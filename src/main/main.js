@@ -110,6 +110,7 @@ async function initializeForCompany(accountId, companyId) {
   approvalQueue.reinitialize();
   terminationQueue.reinitialize();
   tokenTracker.reinitialize();
+  tokenTracker.purgeZeroTokenRecords(); // 清理历史遗留的 0-token 无效记录
   budgetManager.reinitialize();
   memoryStore.reinitialize();
   attachmentManager.reinitialize();

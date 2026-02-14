@@ -72,8 +72,17 @@ class TokenTracker {
       if (fs.existsSync(usageFile)) {
         const content = fs.readFileSync(usageFile, 'utf-8');
         const data = JSON.parse(content);
-        this.records = Array.isArray(data.records) ? data.records : [];
-        logger.debug(`加载了 ${this.records.length} 条 token 使用记录`);
+        const raw = Array.isArray(data.records) ? data.records : [];
+        // 过滤掉 token 为 0 的无效历史记录（早期 bug 遗留）
+        this.records = raw.filter(
+          (r) => r.totalTokens > 0 || r.promptTokens > 0 || r.completionTokens > 0
+        );
+        const purged = raw.length - this.records.length;
+        logger.debug(`加载了 ${this.records.length} 条 token 使用记录` +
+          (purged > 0 ? `，过滤了 ${purged} 条无效记录` : ''));
+        if (purged > 0) {
+          this._debouncedSave(); // 异步写回清理后的数据
+        }
       }
     } catch (error) {
       logger.error('加载 token 使用记录失败:', error);
@@ -261,6 +270,23 @@ class TokenTracker {
     this.records = [];
     this.saveToDisk();
     logger.info('已清除所有 token 使用记录');
+  }
+
+  /**
+   * 清理无效记录（token 为 0 的记录）
+   * @returns {number} 清理的记录数
+   */
+  purgeZeroTokenRecords() {
+    const before = this.records.length;
+    this.records = this.records.filter(
+      (r) => r.totalTokens > 0 || r.promptTokens > 0 || r.completionTokens > 0
+    );
+    const removed = before - this.records.length;
+    if (removed > 0) {
+      this.saveToDisk();
+      logger.info(`已清理 ${removed} 条无效（0 token）记录，剩余 ${this.records.length} 条`);
+    }
+    return removed;
   }
 }
 

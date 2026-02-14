@@ -20,7 +20,7 @@ const { agentConfigStore, AGENT_STATUS } = require('../config/agent-config-store
 const { historyManager, PAGE_SIZE } = require('./history-manager');
 const { setConversationHistory } = require('../tools/history-tool');
 const { agentCommunication } = require('../collaboration/agent-communication');
-const { estimateTokens, getAvailableBudget } = require('../llm/token-estimator');
+const { estimateTokens, estimateMessages, getAvailableBudget } = require('../llm/token-estimator');
 const { compressToolHistory } = require('./context-fitter');
 const { isContextTooLongError } = require('../llm/llm-manager');
 const { tokenTracker } = require('../budget/token-tracker');
@@ -1990,20 +1990,38 @@ CHRO 的质疑：
           break;
         }
 
-        // 记录流式调用的 token 用量
+        // 记录流式调用的 token 用量（SSE 精确值 > 估算值兜底）
         const su = chatOptions._streamUsage;
-        if (su && (su.promptTokens > 0 || su.completionTokens > 0)) {
+        let recordedPrompt = su?.promptTokens || 0;
+        let recordedCompletion = su?.completionTokens || 0;
+        let tokenSource = 'sse';
+
+        // 如果 SSE 没有提供 usage 数据，用估算值兜底
+        if (recordedPrompt === 0 && recordedCompletion === 0) {
+          tokenSource = 'estimated';
+          // 估算 prompt tokens：系统提示 + 历史 + 当前消息
+          const messagesForEstimate = [
+            { role: 'system', content: agent.systemPrompt || '' },
+            ...currentHistory,
+            { role: 'user', content: messageWithTools || '' },
+          ];
+          recordedPrompt = estimateMessages(messagesForEstimate);
+          // 估算 completion tokens：基于实际生成的内容
+          recordedCompletion = estimateTokens(roundContent);
+        }
+
+        if (recordedPrompt > 0 || recordedCompletion > 0) {
           tokenTracker.record({
             agentId: agent.id,
-            model: su.model || agent.model || 'unknown',
-            promptTokens: su.promptTokens,
-            completionTokens: su.completionTokens,
+            model: su?.model || agent.model || 'unknown',
+            promptTokens: recordedPrompt,
+            completionTokens: recordedCompletion,
             conversationId,
           });
-          logger.info(`ChatManager: ${agent.name} token 用量`, {
-            promptTokens: su.promptTokens,
-            completionTokens: su.completionTokens,
-            total: su.promptTokens + su.completionTokens,
+          logger.info(`ChatManager: ${agent.name} token 用量 (${tokenSource})`, {
+            promptTokens: recordedPrompt,
+            completionTokens: recordedCompletion,
+            total: recordedPrompt + recordedCompletion,
           });
         }
         // 重置 _streamUsage 供下一轮使用
