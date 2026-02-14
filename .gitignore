@@ -1,0 +1,43 @@
+# 依赖
+node_modules/
+
+# 环境变量 / 密钥
+.env
+.env.*
+
+# Vite 构建产物（渲染器）
+dist-renderer/
+
+# Electron 构建产物
+dist/
+release/
+out/
+
+# 平台安装包
+*.dmg
+*.exe
+*.msi
+*.AppImage
+*.snap
+*.deb
+*.rpm
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# 日志
+*.log
+npm-debug.log*
+
+# 用户数据（运行时生成）
+.soloforge/
+
+# 图标构建源（保留 ICONS.md 说明）
+build/*.icns
+build/*.ico
+!build/ICONS.md
