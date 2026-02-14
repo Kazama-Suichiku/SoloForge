@@ -164,6 +164,12 @@ async function initializeForCompany(accountId, companyId) {
     todoStore,
     agentCommunication,
     chatManager,
+    projectStore,
+    approvalQueue,
+    memoryManager,
+    llmManager,
+    tokenTracker,
+    budgetManager,
   });
   taskPatrol.start(5 * 60 * 1000); // 每 5 分钟巡查一次
   logger.info('任务巡查系统已启动');

@@ -367,6 +367,19 @@ class ProjectStore {
   }
 
   /**
+   * 通过运营任务 ID 查找项目任务
+   * @param {string} opsTaskId
+   * @returns {{project: Project, task: ProjectTask}|null}
+   */
+  findByOpsTaskId(opsTaskId) {
+    for (const project of this.data.projects) {
+      const task = project.tasks.find((t) => t.opsTaskId === opsTaskId);
+      if (task) return { project, task };
+    }
+    return null;
+  }
+
+  /**
    * 添加进度备注
    */
   addProgressNote(projectId, taskId, note) {
