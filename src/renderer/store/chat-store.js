@@ -14,7 +14,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 /**
- * @typedef {'private' | 'group'} ConversationType
+ * @typedef {'private' | 'group' | 'department'} ConversationType
  * @typedef {'sending' | 'sent' | 'error'} MessageStatus
  *
  * @typedef {Object} Attachment
@@ -47,6 +47,8 @@ import { persist } from 'zustand/middleware';
  * @property {Message} [lastMessage]
  * @property {number} unreadCount
  * @property {number} [displayClearedAt] - 清屏时间戳，早于此时间的消息不显示
+ * @property {string} [departmentId] - 部门 ID（仅 department 类型）
+ * @property {string} [ownerId] - 群主 Agent ID（仅 department 类型）
  */
 
 function generateId(prefix = 'id') {
@@ -306,6 +308,129 @@ export const useChatStore = create(
       },
 
       /**
+       * 创建部门群聊（CXO 团队专属）
+       * @param {Object} params
+       * @param {string} params.departmentId - 部门 ID
+       * @param {string} params.ownerId - 群主（CXO）Agent ID
+       * @param {string} params.name - 群名（CXO 可自定义）
+       * @param {string[]} params.participants - 成员列表（不含 user，会自动添加）
+       * @param {boolean} [params.switchTo=false] - 是否切换到该对话
+       * @returns {string} conversationId
+       */
+      createDepartmentChat: ({ departmentId, ownerId, name, participants, switchTo = false }) => {
+        const id = `dept-${departmentId}`;
+        const newParticipants = ['user', ...participants];
+
+        // 如果已经存在，同步成员列表（可能有新成员加入或旧成员移除）
+        const existing = get().conversations.get(id);
+        if (existing) {
+          // 检查成员列表是否有变化
+          const oldSet = new Set(existing.participants);
+          const newSet = new Set(newParticipants);
+          const hasChanges = oldSet.size !== newSet.size || 
+            [...oldSet].some(p => !newSet.has(p)) ||
+            [...newSet].some(p => !oldSet.has(p));
+          
+          if (hasChanges) {
+            // 更新现有群聊的成员列表
+            set((state) => {
+              const next = new Map(state.conversations);
+              next.set(id, {
+                ...existing,
+                participants: newParticipants,
+                ownerId: ownerId || existing.ownerId,
+                name: name || existing.name,
+              });
+              return { conversations: next };
+            });
+            console.log(`部门群聊成员同步: ${id}`, {
+              old: existing.participants.length,
+              new: newParticipants.length,
+            });
+          }
+          return id;
+        }
+
+        const conversation = {
+          id,
+          type: 'department',
+          name,
+          departmentId,
+          ownerId,
+          participants: newParticipants,
+          createdAt: Date.now(),
+          lastMessage: null,
+          unreadCount: 0,
+          displayClearedAt: null,
+        };
+
+        set((state) => {
+          const next = new Map(state.conversations);
+          next.set(id, conversation);
+          return {
+            conversations: next,
+            messagesByConversation: new Map(state.messagesByConversation).set(id, []),
+            ...(switchTo ? { currentConversationId: id } : {}),
+          };
+        });
+
+        return id;
+      },
+
+      /**
+       * 更新部门群聊成员（添加或移除）
+       * @param {string} departmentId - 部门 ID
+       * @param {string} agentId - Agent ID
+       * @param {'add' | 'remove'} action - 操作类型
+       */
+      updateDepartmentMembers: (departmentId, agentId, action) => {
+        const id = `dept-${departmentId}`;
+        set((state) => {
+          const conv = state.conversations.get(id);
+          if (!conv || conv.type !== 'department') return state;
+
+          const next = new Map(state.conversations);
+          let participants = [...conv.participants];
+
+          if (action === 'add' && !participants.includes(agentId)) {
+            participants.push(agentId);
+          } else if (action === 'remove') {
+            participants = participants.filter((p) => p !== agentId);
+          }
+
+          next.set(id, { ...conv, participants });
+          return { conversations: next };
+        });
+      },
+
+      /**
+       * 重命名部门群聊
+       * @param {string} departmentId - 部门 ID
+       * @param {string} newName - 新群名
+       */
+      renameDepartmentChat: (departmentId, newName) => {
+        const id = `dept-${departmentId}`;
+        set((state) => {
+          const conv = state.conversations.get(id);
+          if (!conv || conv.type !== 'department') return state;
+
+          const next = new Map(state.conversations);
+          next.set(id, { ...conv, name: newName });
+          return { conversations: next };
+        });
+      },
+
+      /**
+       * 根据部门 ID 查找部门群聊
+       * @param {string} departmentId
+       * @returns {Conversation | null}
+       */
+      findDepartmentChat: (departmentId) => {
+        const id = `dept-${departmentId}`;
+        return get().conversations.get(id) || null;
+      },
+
+      /**
        * 选择对话
        */
       selectConversation: (conversationId) => {
@@ -337,12 +462,13 @@ export const useChatStore = create(
       },
 
       /**
-       * 删除对话（仅群聊可删除）
+       * 删除对话（仅普通群聊可删除，私聊和部门群聊不可删除）
        */
       deleteConversation: (conversationId) => {
         set((state) => {
           const conv = state.conversations.get(conversationId);
-          if (!conv || conv.type === 'private') return state; // 私聊不允许删除
+          // 私聊和部门群聊不允许删除
+          if (!conv || conv.type === 'private' || conv.type === 'department') return state;
 
           const nextConvs = new Map(state.conversations);
           const nextMsgs = new Map(state.messagesByConversation);

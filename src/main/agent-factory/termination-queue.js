@@ -295,6 +295,23 @@ class TerminationQueue {
       this.saveToDisk();
     }
   }
+
+  /**
+   * 清空所有已处理的记录（保留待审批的）
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearProcessed() {
+    const pendingRequests = this.requests.filter((r) => r.status === 'pending');
+    const clearedCount = this.requests.length - pendingRequests.length;
+    
+    if (clearedCount > 0) {
+      this.requests = pendingRequests;
+      this.saveToDisk();
+      logger.info(`清空了 ${clearedCount} 条已处理的开除记录`);
+    }
+    
+    return { success: true, clearedCount };
+  }
 }
 
 // 单例

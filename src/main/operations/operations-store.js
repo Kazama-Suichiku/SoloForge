@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
+const { atomicWriteSync } = require('../utils/atomic-write');
 
 function getConfigDir() {
   return dataPath.getBasePath();
@@ -63,10 +64,14 @@ function getOperationsFile() {
  * @property {string} requesterId - 发起人 Agent ID
  * @property {string} requesterName - 发起人名称
  * @property {string} [goalId] - 关联目标 ID
+ * @property {string} [projectId] - 关联项目 ID
+ * @property {string} [projectName] - 关联项目名称（冗余存储，方便显示）
  * @property {'todo' | 'in_progress' | 'review' | 'done' | 'cancelled'} status - 状态
+ * @property {string} [cancelReason] - 取消原因
  * @property {string} createdAt
  * @property {string} [updatedAt]
  * @property {string} [completedAt]
+ * @property {string} [cancelledAt]
  * @property {string} [dueDate]
  */
 
@@ -147,7 +152,8 @@ class OperationsStore {
         null,
         2
       );
-      fs.writeFileSync(getOperationsFile(), content, 'utf-8');
+      // 使用原子写入，防止写入过程中崩溃导致文件损坏
+      atomicWriteSync(getOperationsFile(), content);
     } catch (error) {
       logger.error('保存运营数据失败', error);
     }
@@ -214,6 +220,28 @@ class OperationsStore {
     this.saveToDisk();
     this.notify();
     return goal;
+  }
+
+  /**
+   * 删除目标
+   * @param {string} goalId
+   * @param {string} actorId
+   * @param {string} actorName
+   * @returns {{ success: boolean, error?: string, deletedGoal?: Goal }}
+   */
+  deleteGoal(goalId, actorId, actorName) {
+    const idx = this.data.goals.findIndex((g) => g.id === goalId);
+    if (idx === -1) {
+      return { success: false, error: '目标不存在' };
+    }
+
+    const goal = this.data.goals[idx];
+    this.data.goals.splice(idx, 1);
+    this.logActivity('goal', `删除目标: ${goal.title}`, actorId, actorName, { goalId, title: goal.title });
+    this.saveToDisk();
+    this.notify();
+    
+    return { success: true, deletedGoal: goal };
   }
 
   /**
@@ -299,6 +327,28 @@ class OperationsStore {
   }
 
   /**
+   * 删除 KPI
+   * @param {string} kpiId
+   * @param {string} actorId
+   * @param {string} actorName
+   * @returns {{ success: boolean, error?: string, deletedKPI?: KPI }}
+   */
+  deleteKPI(kpiId, actorId, actorName) {
+    const idx = this.data.kpis.findIndex((k) => k.id === kpiId);
+    if (idx === -1) {
+      return { success: false, error: 'KPI 不存在' };
+    }
+
+    const kpi = this.data.kpis[idx];
+    this.data.kpis.splice(idx, 1);
+    this.logActivity('kpi', `删除 KPI: ${kpi.name}`, actorId, actorName, { kpiId, name: kpi.name });
+    this.saveToDisk();
+    this.notify();
+    
+    return { success: true, deletedKPI: kpi };
+  }
+
+  /**
    * 获取所有 KPI
    * @param {Object} [filter]
    * @returns {KPI[]}
@@ -339,13 +389,17 @@ class OperationsStore {
       requesterId: params.requesterId,
       requesterName: params.requesterName,
       goalId: params.goalId,
+      projectId: params.projectId || null,
+      projectName: params.projectName || null,
       status: 'todo',
       createdAt: new Date().toISOString(),
       dueDate: params.dueDate,
     };
 
     this.data.tasks.push(task);
-    this.logActivity('task', `创建任务: ${task.title} → ${task.assigneeName}`, params.requesterId, params.requesterName, { taskId: task.id });
+    
+    const projectInfo = task.projectId ? ` [项目: ${task.projectName || task.projectId}]` : '';
+    this.logActivity('task', `创建任务: ${task.title} → ${task.assigneeName}${projectInfo}`, params.requesterId, params.requesterName, { taskId: task.id, projectId: task.projectId });
     this.saveToDisk();
     this.notify();
     return task;
@@ -364,10 +418,20 @@ class OperationsStore {
     if (!task) return null;
 
     const oldStatus = task.status;
-    Object.assign(task, updates, { updatedAt: new Date().toISOString() });
+    const now = new Date().toISOString();
+    Object.assign(task, updates, { updatedAt: now });
 
+    // 记录完成时间
     if (updates.status === 'done' && oldStatus !== 'done') {
-      task.completedAt = new Date().toISOString();
+      task.completedAt = now;
+    }
+
+    // 记录取消时间和原因
+    if (updates.status === 'cancelled' && oldStatus !== 'cancelled') {
+      task.cancelledAt = now;
+      if (!task.cancelReason) {
+        task.cancelReason = updates.cancelReason || `由 ${actorName} 取消`;
+      }
     }
 
     if (updates.status && updates.status !== oldStatus) {
@@ -377,6 +441,28 @@ class OperationsStore {
     this.saveToDisk();
     this.notify();
     return task;
+  }
+
+  /**
+   * 删除任务
+   * @param {string} taskId
+   * @param {string} actorId
+   * @param {string} actorName
+   * @returns {{ success: boolean, error?: string, deletedTask?: Task }}
+   */
+  deleteTask(taskId, actorId, actorName) {
+    const idx = this.data.tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) {
+      return { success: false, error: '任务不存在' };
+    }
+
+    const task = this.data.tasks[idx];
+    this.data.tasks.splice(idx, 1);
+    this.logActivity('task', `删除任务: ${task.title}`, actorId, actorName, { taskId, title: task.title });
+    this.saveToDisk();
+    this.notify();
+    
+    return { success: true, deletedTask: task };
   }
 
   /**
@@ -408,11 +494,94 @@ class OperationsStore {
     if (filter.goalId) {
       result = result.filter((t) => t.goalId === filter.goalId);
     }
+    if (filter.projectId) {
+      result = result.filter((t) => t.projectId === filter.projectId);
+    }
     if (filter.priority) {
       result = result.filter((t) => t.priority === filter.priority);
     }
+    // 排除已取消的任务（除非明确要求）
+    if (filter.excludeCancelled) {
+      result = result.filter((t) => t.status !== 'cancelled');
+    }
 
     return result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+
+  /**
+   * 取消项目关联的所有任务
+   * 当项目被取消时调用此方法
+   * @param {string} projectId
+   * @param {string} reason
+   * @returns {{ success: boolean, cancelledCount: number }}
+   */
+  cancelTasksByProject(projectId, reason = '项目已取消') {
+    if (!projectId) {
+      return { success: false, cancelledCount: 0, error: '必须指定 projectId' };
+    }
+
+    let cancelledCount = 0;
+    const now = new Date().toISOString();
+
+    for (const task of this.data.tasks) {
+      if (task.projectId === projectId && task.status !== 'done' && task.status !== 'cancelled') {
+        task.status = 'cancelled';
+        task.cancelReason = reason;
+        task.cancelledAt = now;
+        task.updatedAt = now;
+        cancelledCount++;
+      }
+    }
+
+    if (cancelledCount > 0) {
+      this.logActivity('task', `项目取消，级联取消 ${cancelledCount} 个任务`, 'system', '系统', { projectId, cancelledCount });
+      this.saveToDisk();
+      this.notify();
+      logger.info(`项目取消，级联取消 ${cancelledCount} 个 Operations 任务`, { projectId });
+    }
+
+    return { success: true, cancelledCount };
+  }
+
+  /**
+   * 取消指定负责人的所有未完成任务（用于员工离职时清理）
+   * @param {string} assigneeId - 负责人 ID
+   * @param {string} [reason] - 取消原因
+   * @param {string} [assigneeName] - 负责人名称（用于日志）
+   * @returns {{ success: boolean, cancelledCount: number, cancelledTasks: Array }}
+   */
+  cancelTasksByAssignee(assigneeId, reason = '负责人已离职', assigneeName = null) {
+    if (!assigneeId) {
+      return { success: false, cancelledCount: 0, cancelledTasks: [], error: '必须指定 assigneeId' };
+    }
+
+    const cancelledTasks = [];
+    const now = new Date().toISOString();
+
+    for (const task of this.data.tasks) {
+      if (task.assigneeId === assigneeId && task.status !== 'done' && task.status !== 'cancelled') {
+        task.status = 'cancelled';
+        task.cancelReason = reason;
+        task.cancelledAt = now;
+        task.updatedAt = now;
+        cancelledTasks.push({ id: task.id, title: task.title });
+      }
+    }
+
+    if (cancelledTasks.length > 0) {
+      const name = assigneeName || assigneeId;
+      this.logActivity('task', `员工离职，取消 ${cancelledTasks.length} 个任务`, 'system', '系统', {
+        assigneeId,
+        assigneeName: name,
+        cancelledCount: cancelledTasks.length,
+        reason,
+      });
+      this.saveToDisk();
+      this.notify();
+      logger.info(`员工离职，取消 ${cancelledTasks.length} 个 Operations 任务`, { assigneeId, assigneeName: name });
+    }
+
+    return { success: true, cancelledCount: cancelledTasks.length, cancelledTasks };
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -463,6 +632,42 @@ class OperationsStore {
     }
 
     return result.slice(0, limit);
+  }
+
+  /**
+   * 清空活动日志
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearActivityLog() {
+    const clearedCount = this.data.activityLog.length;
+    
+    if (clearedCount > 0) {
+      this.data.activityLog = [];
+      this.saveToDisk();
+      this.notify();
+      logger.info(`清空了 ${clearedCount} 条活动日志`);
+    }
+    
+    return { success: true, clearedCount };
+  }
+
+  /**
+   * 清空已取消的任务
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearCancelledTasks() {
+    const originalCount = this.data.tasks.length;
+    this.data.tasks = this.data.tasks.filter((t) => t.status !== 'cancelled');
+    const clearedCount = originalCount - this.data.tasks.length;
+    
+    if (clearedCount > 0) {
+      this.logActivity('task', `清空了 ${clearedCount} 个已取消的任务`, 'system', '系统', { clearedCount });
+      this.saveToDisk();
+      this.notify();
+      logger.info(`清空了 ${clearedCount} 个已取消的任务`);
+    }
+    
+    return { success: true, clearedCount };
   }
 
   // ─────────────────────────────────────────────────────────────

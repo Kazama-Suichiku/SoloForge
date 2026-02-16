@@ -25,6 +25,29 @@ export function useChatAgent() {
   // 群聊中断控制
   const groupAbortRef = useRef(false);
 
+  // 部门群聊冷却机制（与后端同步，防止重复触发）
+  // key: `${conversationId}:${agentId}`, value: lastTriggerTimestamp
+  const deptCooldownRef = useRef(new Map());
+  const DEPT_COOLDOWN_MS = 30 * 1000; // 30秒冷却
+
+  /**
+   * 检查 Agent 是否在部门群聊冷却中
+   */
+  const isAgentInDeptCooldown = useCallback((conversationId, agentId) => {
+    const key = `${conversationId}:${agentId}`;
+    const lastTime = deptCooldownRef.current.get(key);
+    if (!lastTime) return false;
+    return Date.now() - lastTime < DEPT_COOLDOWN_MS;
+  }, []);
+
+  /**
+   * 记录 Agent 在部门群聊的触发时间
+   */
+  const recordDeptTrigger = useCallback((conversationId, agentId) => {
+    const key = `${conversationId}:${agentId}`;
+    deptCooldownRef.current.set(key, Date.now());
+  }, []);
+
   /**
    * 模拟 Agent 响应（开发测试用）
    */
@@ -253,8 +276,20 @@ export function useChatAgent() {
         })
         .join('\n');
 
+      // 判断是否是部门群聊
+      const isDepartmentChat = conversation.type === 'department';
+      const groupTypeLabel = isDepartmentChat ? '部门工作群' : '群聊';
+      
+      // 部门群聊额外规则
+      const departmentRules = isDepartmentChat ? `
+7. 这是部门工作群，主要用于工作进度汇报和项目讨论。
+8. 发言要简洁专业，聚焦工作相关内容。
+9. 如果需要汇报进度，请使用 post_to_department 工具而不是直接发消息。
+10. 老板能看到所有消息，请保持专业态度。
+` : '';
+
       // 通用群聊规则（不含身份信息，身份信息在每个 Agent 的消息中单独注入）
-      const groupRules = `[群聊: ${conversation.name}]
+      const groupRules = `[${groupTypeLabel}: ${conversation.name}]
 
 【群内成员】
 ${participantsList}
@@ -267,7 +302,7 @@ ${participantsList}
 4. 你应该基于他人已有的发言进行补充、提出不同角度、指出潜在问题、或表示认同并补充细节。避免"各说各话"。
 5. 只从你自己的专业领域角度发言。不要越界分析其他部门的专业问题。
 6. 如果前面已有人充分阐述了与你观点一致的内容，简要表示认同并补充你的专业视角即可，不必重复长篇论述。
-`;
+${departmentRules}`;
 
       // 第一轮：用户 @ 的 Agent（同时支持 @ID 和 @人名）
       const initialMentions = extractMentions(userContent, agentIds, nameToId);
@@ -497,6 +532,170 @@ ${participantsList}
       unsubscribe?.();
     };
   }, [createGroupChat, sendMessage]);
+
+  // 监听后端创建部门群聊事件
+  const createDepartmentChat = useChatStore((s) => s.createDepartmentChat);
+  const updateDepartmentMembers = useChatStore((s) => s.updateDepartmentMembers);
+  const renameDepartmentChat = useChatStore((s) => s.renameDepartmentChat);
+
+  // 初始化时主动获取所有部门群聊（解决 IPC 时序问题）
+  useEffect(() => {
+    const fetchDepartmentGroups = async () => {
+      if (!window.soloforge?.chat?.getAllDepartmentGroups) return;
+
+      try {
+        const groups = await window.soloforge.chat.getAllDepartmentGroups();
+        console.log('获取部门群聊列表:', groups?.length || 0);
+
+        if (groups && groups.length > 0) {
+          for (const { groupId, departmentId, ownerId, name, participants } of groups) {
+            createDepartmentChat({
+              departmentId,
+              ownerId,
+              name,
+              participants: participants || [ownerId],
+              switchTo: false,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('获取部门群聊失败:', err);
+      }
+    };
+
+    // 稍微延迟以确保 store 已初始化
+    const timer = setTimeout(fetchDepartmentGroups, 500);
+    return () => clearTimeout(timer);
+  }, [createDepartmentChat]);
+
+  useEffect(() => {
+    if (!window.soloforge?.chat?.onDeptGroupCreate) return;
+
+    const unsubscribe = window.soloforge.chat.onDeptGroupCreate((data) => {
+      const { groupId, departmentId, ownerId, name, participants } = data;
+      if (!groupId || !departmentId) return;
+
+      console.log(`收到后端创建部门群聊: ${name} (${groupId})`, { ownerId, members: participants?.length });
+
+      // 创建部门群聊（不自动切换当前对话）
+      createDepartmentChat({
+        departmentId,
+        ownerId,
+        name,
+        participants: participants || [ownerId],
+        switchTo: false,
+      });
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [createDepartmentChat]);
+
+  // 监听部门群聊成员变更
+  useEffect(() => {
+    if (!window.soloforge?.chat?.onDeptGroupUpdate) return;
+
+    const unsubscribe = window.soloforge.chat.onDeptGroupUpdate((data) => {
+      const { action, departmentId, agentId, agentName } = data;
+      if (!departmentId || !agentId) return;
+
+      console.log(`部门群聊成员变更: ${action} ${agentName || agentId} -> dept-${departmentId}`);
+
+      updateDepartmentMembers(departmentId, agentId, action);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [updateDepartmentMembers]);
+
+  // 监听部门群聊消息（支持 @ 触发回复）
+  useEffect(() => {
+    if (!window.soloforge?.chat?.onDeptGroupMessage) return;
+
+    const unsubscribe = window.soloforge.chat.onDeptGroupMessage(async (data) => {
+      const { groupId, departmentId, senderId, senderName, content, mentions, timestamp } = data;
+      if (!groupId || !content) return;
+
+      console.log(`部门群聊消息: ${senderName} -> ${groupId}`, { mentions });
+
+      // 1. 添加消息到部门群聊
+      sendMessage({
+        conversationId: groupId,
+        senderId,
+        senderType: 'agent',
+        content,
+        metadata: {
+          departmentMessage: true,
+          mentions: mentions || [],
+        },
+      });
+
+      // 2. 如果有 @ 某人，触发他们回复
+      if (mentions && mentions.length > 0) {
+        // 获取对话信息
+        const conversation = useChatStore.getState().conversations.get(groupId);
+        if (!conversation) return;
+
+        // 过滤出有效的被 @ 的 Agent（必须是群成员、不是发送者、不在冷却中）
+        const validMentions = mentions.filter((id) => {
+          if (id === senderId) return false;
+          if (!conversation.participants.includes(id)) return false;
+          // 检查前端冷却（双重保险，后端也有冷却）
+          if (isAgentInDeptCooldown(groupId, id)) {
+            console.log(`部门群聊冷却: ${id} 正在冷却中，跳过`);
+            return false;
+          }
+          return true;
+        });
+
+        if (validMentions.length > 0) {
+          console.log(`部门群聊触发回复: ${validMentions.join(', ')}`);
+          
+          // 记录冷却时间
+          validMentions.forEach((id) => recordDeptTrigger(groupId, id));
+          
+          // 构造触发内容，确保包含 @ID 格式以便 extractMentions 能识别
+          // 例如：[发送者]: 原始内容 @agent1 @agent2
+          const mentionTags = validMentions.map((id) => `@${id}`).join(' ');
+          const triggerContent = `[${senderName}]: ${content}\n\n（被点名的同事：${mentionTags}）`;
+          
+          // 使用现有的群聊处理逻辑
+          const agentIds = conversation.participants.filter((p) => p !== 'user');
+          
+          // 直接调用 handleGroupChat，它会处理连锁回复
+          try {
+            await handleGroupChat(groupId, conversation, agentIds, triggerContent);
+          } catch (err) {
+            console.error('部门群聊回复处理失败:', err);
+          }
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [sendMessage, handleGroupChat, isAgentInDeptCooldown, recordDeptTrigger]);
+
+  // 监听部门群聊重命名
+  useEffect(() => {
+    if (!window.soloforge?.chat?.onDeptGroupRename) return;
+
+    const unsubscribe = window.soloforge.chat.onDeptGroupRename((data) => {
+      const { departmentId, newName } = data;
+      if (!departmentId || !newName) return;
+
+      console.log(`部门群聊重命名: dept-${departmentId} -> ${newName}`);
+
+      renameDepartmentChat(departmentId, newName);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [renameDepartmentChat]);
 
   /**
    * 肃静！—— 停止群聊中所有 Agent 发言

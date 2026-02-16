@@ -64,10 +64,22 @@ function PersonNode({ config, level, dept, isLast, onClick, isSelected }) {
               >
                 {level.name}
               </span>
+              {/* 跨部门标记 */}
+              {config.isMultiDepartment && !config.isPrimaryDepartment && (
+                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                  兼职
+                </span>
+              )}
             </div>
             <div className="text-sm text-gray-500 dark:text-gray-400 truncate">
               {config.title}
             </div>
+            {/* 显示其他部门 */}
+            {config.isMultiDepartment && config.crossDepartments?.length > 0 && (
+              <div className="text-xs text-purple-500 dark:text-purple-400 mt-0.5">
+                {config.isPrimaryDepartment ? '兼任' : '主职'}：{config.crossDepartments.join('、')}
+              </div>
+            )}
           </div>
 
           {/* 编辑图标 */}
@@ -202,10 +214,22 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
                       >
                         {levels.find((l) => l.id === leader.level)?.name || leader.level}
                       </span>
+                      {/* 跨部门标记 */}
+                      {leader.isMultiDepartment && !leader.isPrimaryDepartment && (
+                        <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                          兼职
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
                       {leader.title}
                     </div>
+                    {/* 显示其他部门 */}
+                    {leader.isMultiDepartment && leader.crossDepartments?.length > 0 && (
+                      <div className="text-xs text-purple-500 dark:text-purple-400 mt-1">
+                        {leader.isPrimaryDepartment ? '兼任' : '主职'}：{leader.crossDepartments.join('、')}
+                      </div>
+                    )}
                     {leader.description && (
                       <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                         {leader.description}
@@ -265,18 +289,46 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
 }
 
 /**
+ * 获取 Agent 所属的所有部门（兼容新旧格式）
+ */
+function getAgentDepartments(config) {
+  if (Array.isArray(config.departments) && config.departments.length > 0) {
+    return config.departments;
+  }
+  if (config.department) {
+    return [config.department];
+  }
+  return ['other'];
+}
+
+/**
  * 组织架构总览图
  */
 export default function OrgChart({ configs, levels, departments, onSelectMember, selectedId }) {
   const bossConfig = useAgentStore((s) => s.bossConfig);
 
-  // 按部门分组
+  // 按部门分组（支持多部门，同一员工可出现在多个部门）
   const groupedByDept = configs.reduce((acc, config) => {
-    const deptId = config.department || 'other';
-    if (!acc[deptId]) {
-      acc[deptId] = [];
+    const deptIds = getAgentDepartments(config);
+    for (const deptId of deptIds) {
+      if (!acc[deptId]) {
+        acc[deptId] = [];
+      }
+      // 标记该员工是否属于多个部门，以及这是否是其主部门
+      const isPrimary = deptId === deptIds[0];
+      const otherDeptIds = deptIds.filter(d => d !== deptId);
+      // 将部门 ID 转换为部门名称
+      const otherDeptNames = otherDeptIds.map(d => {
+        const dept = departments.find(dep => dep.id === d);
+        return dept?.name || d;
+      });
+      acc[deptId].push({
+        ...config,
+        isPrimaryDepartment: isPrimary,
+        crossDepartments: otherDeptNames,
+        isMultiDepartment: deptIds.length > 1,
+      });
     }
-    acc[deptId].push(config);
     return acc;
   }, {});
 

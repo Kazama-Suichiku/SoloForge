@@ -72,6 +72,13 @@ class ChatManager {
    * 初始化工具执行器
    */
   initToolExecutor() {
+    // 防止重复初始化导致多次订阅
+    if (this._toolExecutorInitialized) {
+      logger.debug('工具执行器已初始化，跳过重复初始化');
+      return;
+    }
+    this._toolExecutorInitialized = true;
+
     this.toolExecutor = new ToolExecutor({
       userPermissions: permissionStore.get(),
     });
@@ -387,11 +394,11 @@ ${proposedByName} 提议开除以下员工：
       if (event === 'confirmed') {
         logger.info(`开除确认: ${agentName} (${agentTitle}) 已被确认开除`);
 
-        // 执行开除：标记状态为 terminated + 从 chatManager 注销
+        // 执行开除：标记状态为 terminated + 从 chatManager 注销 + 清理所有相关资源
         const terminateResult = agentConfigStore.terminate(agentId, reason);
         if (terminateResult.success) {
-          // 从聊天管理器注销 Agent
-          this.unregisterAgent(agentId);
+          // 从聊天管理器注销 Agent，并清理所有相关资源
+          this.unregisterAgent(agentId, { cleanupResources: true });
 
           // 从动态 Agent 工厂中移除
           try {
@@ -403,7 +410,7 @@ ${proposedByName} 提议开除以下员工：
             logger.warn('从动态工厂移除 Agent 失败:', e.message);
           }
 
-          logger.info('Agent 已开除:', { agentId, agentName });
+          logger.info('Agent 已开除，所有相关资源已清理:', { agentId, agentName });
         }
 
         // 通知 CHRO 开除已执行
@@ -771,6 +778,33 @@ CHRO 的质疑：
   }
 
   /**
+   * 重新初始化（公司切换时调用）
+   * 清空所有运行时状态，重新初始化默认 Agent
+   */
+  reinitialize() {
+    // 1. 中止所有活跃任务
+    for (const agentId of this.activeTasks.keys()) {
+      this._abortTask(agentId, '公司切换');
+    }
+
+    // 2. 清空主动推送队列
+    this._proactiveQueue.clear();
+
+    // 3. 清空 agents Map（移除所有动态 Agent）
+    this.agents.clear();
+
+    // 4. 重新初始化默认 Agent
+    this._initDefaultAgents();
+
+    // 5. 重新设置 LLM Manager（如果已有）
+    if (this.llmManager) {
+      this.setLLMManager(this.llmManager);
+    }
+
+    logger.info('ChatManager: 已重新初始化');
+  }
+
+  /**
    * 设置 LLM Manager
    * @param {import('../llm/llm-manager').LLMManager} llmManager
    */
@@ -935,13 +969,59 @@ CHRO 的质疑：
   /**
    * 注销 Agent
    * @param {string} agentId
+   * @param {Object} [options] - 选项
+   * @param {boolean} [options.cleanupResources=false] - 是否清理相关资源（开除时应为 true）
    * @returns {boolean}
    */
-  unregisterAgent(agentId) {
+  unregisterAgent(agentId, options = {}) {
+    const { cleanupResources = false } = options;
+
+    // 从 agents Map 中删除
     const deleted = this.agents.delete(agentId);
     if (deleted) {
       logger.info(`注销 Agent: ${agentId}`);
     }
+
+    // 如果需要清理资源（开除场景）
+    if (cleanupResources) {
+      // 1. 中止该 Agent 的活跃任务
+      this._abortTask(agentId, 'Agent 已开除');
+
+      // 2. 清理主动推送队列
+      if (this._proactiveQueue.has(agentId)) {
+        this._proactiveQueue.delete(agentId);
+        logger.debug(`已清理 Agent ${agentId} 的主动推送队列`);
+      }
+
+      // 3. 清理 Agent 通信队列
+      try {
+        const { agentCommunication } = require('../collaboration/agent-communication');
+        agentCommunication.clearAgentQueues(agentId);
+      } catch (e) {
+        logger.warn('清理通信队列失败:', e.message);
+      }
+
+      // 4. 清理预算配置
+      try {
+        const { budgetManager } = require('../budget/budget-manager');
+        budgetManager.removeAgentBudget(agentId);
+        logger.debug(`已清理 Agent ${agentId} 的预算配置`);
+      } catch (e) {
+        logger.warn('清理预算配置失败:', e.message);
+      }
+
+      // 5. 清理 TODO 列表
+      try {
+        const { todoStore } = require('../tools/todo-store');
+        todoStore.removeAgent(agentId);
+        logger.debug(`已清理 Agent ${agentId} 的 TODO 列表`);
+      } catch (e) {
+        logger.warn('清理 TODO 列表失败:', e.message);
+      }
+
+      logger.info(`Agent ${agentId} 相关资源已清理完毕`);
+    }
+
     return deleted;
   }
 
@@ -953,7 +1033,7 @@ CHRO 的质疑：
    * 注册一个活跃任务
    * @param {string} agentId
    * @param {Object} info - { conversationId, messageId, task, stage }
-   * @returns {AbortController}
+   * @returns {{taskId: string, abortController: AbortController}}
    */
   _startTask(agentId, info) {
     // 如果该 Agent 已有活跃任务，先中止旧任务
@@ -961,7 +1041,10 @@ CHRO 的质疑：
 
     const abortController = new AbortController();
     const agent = this.getAgent(agentId);
+    // 生成唯一任务 ID，用于防止 _finishTask 误删新任务
+    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     this.activeTasks.set(agentId, {
+      taskId,
       agentId,
       agentName: agent?.name || agentId,
       conversationId: info.conversationId,
@@ -971,8 +1054,8 @@ CHRO 的质疑：
       stage: info.stage || 'thinking', // thinking | tools | responding
       abortController,
     });
-    logger.info(`任务开始: ${agent?.name || agentId}`, { task: info.task?.slice(0, 50) });
-    return abortController;
+    logger.info(`任务开始: ${agent?.name || agentId}`, { taskId, task: info.task?.slice(0, 50) });
+    return { taskId, abortController };
   }
 
   /**
@@ -990,12 +1073,23 @@ CHRO 的质疑：
   /**
    * 完成任务（移除追踪）
    * @param {string} agentId
+   * @param {string} [taskId] - 任务 ID，如果提供则只删除匹配的任务
    */
-  _finishTask(agentId) {
+  _finishTask(agentId, taskId) {
     const task = this.activeTasks.get(agentId);
     if (task) {
+      // 如果提供了 taskId，只有匹配时才删除（防止误删新任务）
+      if (taskId && task.taskId !== taskId) {
+        logger.debug(`_finishTask: taskId 不匹配，跳过删除`, {
+          agentId,
+          expectedTaskId: taskId,
+          currentTaskId: task.taskId,
+        });
+        return;
+      }
+
       const elapsed = Date.now() - task.startTime;
-      logger.info(`任务完成: ${task.agentName}`, { elapsed: `${elapsed}ms` });
+      logger.info(`任务完成: ${task.agentName}`, { taskId: task.taskId, elapsed: `${elapsed}ms` });
       this.activeTasks.delete(agentId);
 
       // 冲洗排队的主动推送消息
@@ -1220,7 +1314,12 @@ CHRO 的质疑：
    * @returns {Promise<string>}
    */
   async _chatWithToolLoop(agent, userMessage, history, context = {}) {
-    const MAX_TOOL_ITERATIONS = 20; // 安全上限，防止无限循环
+    // CXO 级别不限制工具调用次数，其他 Agent 限制 100 次
+    const agentConfig = agentConfigStore.get(agent.id);
+    const isCxoLevel = agentConfig?.level === 'c_level' || 
+                       ['ceo', 'cto', 'cfo', 'chro', 'secretary'].includes(agent.role);
+    const MAX_TOOL_ITERATIONS = isCxoLevel ? Infinity : 100;
+    
     let currentHistory = [...history];
     // 注入本轮行动提醒
     let currentMessage = `${this._getTurnReminder()}\n\n${userMessage}`;
@@ -1341,8 +1440,10 @@ CHRO 的质疑：
           ...context,
         });
 
-        // 格式化工具结果
-        const formattedResults = this.toolExecutor.formatToolResults(toolResults);
+        // 格式化工具结果（传入 sessionId 用于虚拟文件关联）
+        const formattedResults = this.toolExecutor.formatToolResults(toolResults, {
+          sessionId: context.conversationId,
+        });
 
         // 更新历史，添加 Agent 响应和工具结果
         currentHistory = [
@@ -1357,7 +1458,11 @@ CHRO 的质疑：
           systemPromptTokens: estimateTokens(agent.systemPrompt),
           userMessageTokens: estimateTokens(currentMessage),
         });
-        const { compressed, wasCompressed } = compressToolHistory(currentHistory, toolBudget);
+        const { compressed, wasCompressed } = compressToolHistory(
+          currentHistory, 
+          toolBudget,
+          { sessionId: context.conversationId, taskContext: userMessage?.slice(0, 100) }
+        );
         if (wasCompressed) {
           currentHistory = compressed;
           logger.info(`ChatManager: ${agent.name} 第 ${iteration} 轮工具循环上下文已压缩`);
@@ -1420,8 +1525,8 @@ CHRO 的质疑：
       return { content: '抱歉，AI 服务暂时不可用' };
     }
 
-    // 注册活跃任务
-    this._startTask(agentId, {
+    // 注册活跃任务，获取 taskId 用于完成时匹配
+    const { taskId } = this._startTask(agentId, {
       conversationId,
       task: message,
       stage: 'thinking',
@@ -1526,7 +1631,7 @@ CHRO 的质疑：
         content: `抱歉老板，我在处理您的请求时遇到了问题：${error.message || '未知错误'}`,
       };
     } finally {
-      this._finishTask(agentId);
+      this._finishTask(agentId, taskId);
     }
   }
 
@@ -1801,7 +1906,6 @@ CHRO 的质疑：
   async handleStreamMessage(request) {
     const { conversationId, agentId, message, messageId, history = [], attachments } = request;
     const CHANNELS = require('../../shared/ipc-channels');
-    const MAX_TOOL_ITERATIONS = 20; // 安全上限，防止无限循环
 
     // 检查 Agent 状态
     const streamAgentConfig = agentConfigStore.get(agentId);
@@ -1824,8 +1928,13 @@ CHRO 的质疑：
       return { content: '抱歉，AI 服务暂时不可用' };
     }
 
-    // 注册活跃任务并获取 AbortController
-    const abortController = this._startTask(agentId, {
+    // CXO 级别不限制工具调用次数，其他 Agent 限制 100 次
+    const isCxoLevel = streamAgentConfig?.level === 'c_level' || 
+                       ['ceo', 'cto', 'cfo', 'chro', 'secretary'].includes(agent.role);
+    const MAX_TOOL_ITERATIONS = isCxoLevel ? Infinity : 100;
+
+    // 注册活跃任务并获取 AbortController 和 taskId
+    const { taskId, abortController } = this._startTask(agentId, {
       conversationId,
       messageId,
       task: message,
@@ -1856,6 +1965,17 @@ CHRO 的质疑：
         } catch (memError) {
           logger.debug('记忆注入失败（不影响对话）:', memError.message);
         }
+      }
+
+      // 注入暂存区上下文（工作状态恢复）
+      try {
+        const { scratchpadManager } = require('../context/agent-scratchpad');
+        const scratchpad = scratchpadManager.get(agentId);
+        if (scratchpad.hasContent()) {
+          contextualMessage = `${scratchpad.getContextSummary()}\n\n---\n\n${contextualMessage}`;
+        }
+      } catch (scratchpadError) {
+        logger.debug('暂存区注入失败（不影响对话）:', scratchpadError.message);
       }
 
       // 获取分页优化后的历史（使用 token 预算模式）
@@ -1996,9 +2116,9 @@ CHRO 的质疑：
         let recordedCompletion = su?.completionTokens || 0;
         let tokenSource = 'sse';
 
-        // 如果 SSE 没有提供 usage 数据，用估算值兜底
-        if (recordedPrompt === 0 && recordedCompletion === 0) {
-          tokenSource = 'estimated';
+        // 分别检查 prompt 和 completion，缺失的用估算值兜底
+        // 注意：有些模型（如 GLM 通过中转站）可能只返回 completion 不返回 prompt
+        if (recordedPrompt === 0) {
           // 估算 prompt tokens：系统提示 + 历史 + 当前消息
           const messagesForEstimate = [
             { role: 'system', content: agent.systemPrompt || '' },
@@ -2006,11 +2126,16 @@ CHRO 的质疑：
             { role: 'user', content: messageWithTools || '' },
           ];
           recordedPrompt = estimateMessages(messagesForEstimate);
+          tokenSource = recordedCompletion === 0 ? 'estimated' : 'sse+estimated';
+        }
+        if (recordedCompletion === 0) {
           // 估算 completion tokens：基于实际生成的内容
           recordedCompletion = estimateTokens(roundContent);
+          tokenSource = recordedPrompt === 0 ? 'estimated' : 'sse+estimated';
         }
 
         if (recordedPrompt > 0 || recordedCompletion > 0) {
+          const totalTokens = recordedPrompt + recordedCompletion;
           tokenTracker.record({
             agentId: agent.id,
             model: su?.model || agent.model || 'unknown',
@@ -2021,8 +2146,15 @@ CHRO 的质疑：
           logger.info(`ChatManager: ${agent.name} token 用量 (${tokenSource})`, {
             promptTokens: recordedPrompt,
             completionTokens: recordedCompletion,
-            total: recordedPrompt + recordedCompletion,
+            total: totalTokens,
           });
+
+          // 从工资余额中扣除 token
+          const { budgetManager } = require('../budget/budget-manager');
+          const deductResult = budgetManager.deductTokens(agent.id, totalTokens);
+          if (deductResult.success) {
+            logger.debug(`ChatManager: ${agent.name} 扣除 ${totalTokens} tokens，余额: ${deductResult.newBalance}`);
+          }
         }
         // 重置 _streamUsage 供下一轮使用
         chatOptions._streamUsage = {};
@@ -2063,11 +2195,11 @@ CHRO 的质疑：
 
         // 执行工具
         if (this.toolExecutor && toolCalls.length > 0) {
-          // 为每个工具调用生成唯一 ID
+          // 为每个工具调用生成唯一 ID（带随机后缀避免冲突）
           const toolGroupIndex = iteration - 1; // 第几批工具调用（从 0 开始）
           const toolCallsWithId = toolCalls.map((t, i) => ({
             ...t,
-            id: `tc-${Date.now()}-${i}`,
+            id: `tc-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
           }));
 
           // 推送工具分组标记（用于前端内容分割定位）
@@ -2121,7 +2253,10 @@ CHRO 的质疑：
             }
           );
 
-          const formattedResults = this.toolExecutor.formatToolResults(toolResults);
+          // 格式化工具结果（传入 sessionId 用于虚拟文件关联）
+          const formattedResults = this.toolExecutor.formatToolResults(toolResults, {
+            sessionId: conversationId,
+          });
 
           // 更新历史
           currentHistory = [
@@ -2136,7 +2271,11 @@ CHRO 的质疑：
             systemPromptTokens: estimateTokens(agent.systemPrompt),
             userMessageTokens: estimateTokens(currentMessage),
           });
-          const { compressed: streamCompressed, wasCompressed: streamWasCompressed } = compressToolHistory(currentHistory, streamToolBudget);
+          const { compressed: streamCompressed, wasCompressed: streamWasCompressed } = compressToolHistory(
+            currentHistory, 
+            streamToolBudget, 
+            { sessionId: conversationId, taskContext: message.slice(0, 100) }
+          );
           if (streamWasCompressed) {
             currentHistory = streamCompressed;
             logger.info(`ChatManager: ${agent.name} 流式第 ${iteration} 轮工具循环上下文已压缩`);
@@ -2180,7 +2319,7 @@ CHRO 的质疑：
       }
       return { content: errorContent };
     } finally {
-      this._finishTask(agentId);
+      this._finishTask(agentId, taskId);
     }
   }
 }

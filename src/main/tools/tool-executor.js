@@ -7,6 +7,7 @@
 const { toolRegistry } = require('./tool-registry');
 const { PermissionChecker } = require('./permission-checker');
 const { logger } = require('../utils/logger');
+const { virtualFileStore, VIRTUALIZE_THRESHOLD, PREVIEW_LENGTH } = require('../context/virtual-file-store');
 
 /**
  * 工具名别名映射表
@@ -49,11 +50,17 @@ const TOOL_NAME_ALIASES = {
 
 /**
  * 解析 XML 格式的工具调用
+ * 支持多种格式：
+ * 1. 标准格式: <tool_call><name>xxx</name><arguments>...</arguments></tool_call>
+ * 2. glm 错误格式: <tool_call>tool_name><param>value</param></tool_name>
+ * 3. glm 错误格式2: <tool_call>tool_name<param>value</param></arguments></think>
  * @param {string} content - LLM 响应内容
  * @returns {Array<{name: string, arguments: Object}>}
  */
 function parseToolCalls(content) {
   const toolCalls = [];
+  
+  // 策略1: 标准格式 <tool_call>...</tool_call>
   const regex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
   let match;
 
@@ -130,6 +137,97 @@ function parseToolCalls(content) {
     toolCalls.push({ name, arguments: args });
   }
 
+  // 策略2: 兼容 glm 错误格式 <tool_call>tool_name>...<param>value</param>...</tool_name>
+  // 例如: <tool_call>read_file><path>/some/path</path></read_file>
+  if (toolCalls.length === 0) {
+    const glmRegex = /<tool_call>(\w+)>([\s\S]*?)<\/\1>/g;
+    let glmMatch;
+    
+    while ((glmMatch = glmRegex.exec(content)) !== null) {
+      const name = glmMatch[1].trim();
+      const argsContent = glmMatch[2].trim();
+      let args = {};
+      
+      // 解析参数 <param>value</param>
+      const paramRegex = /<(\w+)>([\s\S]*?)<\/\1>/g;
+      let paramMatch;
+      while ((paramMatch = paramRegex.exec(argsContent)) !== null) {
+        const paramName = paramMatch[1];
+        let paramValue = paramMatch[2].trim();
+        
+        // 尝试解析数字
+        if (/^-?\d+(\.\d+)?$/.test(paramValue)) {
+          paramValue = parseFloat(paramValue);
+        }
+        // 尝试解析布尔值
+        else if (paramValue === 'true') {
+          paramValue = true;
+        } else if (paramValue === 'false') {
+          paramValue = false;
+        }
+        
+        args[paramName] = paramValue;
+      }
+      
+      if (name) {
+        logger.debug('解析 glm 格式工具调用:', { name, args });
+        toolCalls.push({ name, arguments: args });
+      }
+    }
+  }
+
+  // 策略3: 兼容更宽松的 glm 格式 <tool_call>tool_name<param>value</param>...
+  // 例如: <tool_call>hr_org_chart<tool_call>hr_list_agents
+  if (toolCalls.length === 0) {
+    // 匹配 <tool_call>tool_name 后面跟着参数或其他内容
+    const looseRegex = /<tool_call>(\w+)(?:[>\s<]|$)/g;
+    let looseMatch;
+    const seenTools = new Set();
+    
+    while ((looseMatch = looseRegex.exec(content)) !== null) {
+      const name = looseMatch[1].trim();
+      if (name && !seenTools.has(name)) {
+        seenTools.add(name);
+        
+        // 尝试在这个工具名之后找参数
+        const afterMatch = content.slice(looseMatch.index + looseMatch[0].length);
+        let args = {};
+        
+        // 提取可能的参数（在遇到下一个 <tool_call> 之前）
+        const nextToolIndex = afterMatch.indexOf('<tool_call>');
+        const argsSection = nextToolIndex > 0 ? afterMatch.slice(0, nextToolIndex) : afterMatch.slice(0, 500);
+        
+        // 解析参数 <param>value</param>
+        const paramRegex = /<(\w+)>([\s\S]*?)<\/\1>/g;
+        let paramMatch;
+        while ((paramMatch = paramRegex.exec(argsSection)) !== null) {
+          const paramName = paramMatch[1];
+          // 跳过不像参数名的标签（如 type, arguments, think 等元标签）
+          if (['type', 'arguments', 'think', 'name', 'tool_call', 'tool_result'].includes(paramName)) {
+            continue;
+          }
+          let paramValue = paramMatch[2].trim();
+          
+          // 尝试解析数字
+          if (/^-?\d+(\.\d+)?$/.test(paramValue)) {
+            paramValue = parseFloat(paramValue);
+          }
+          // 尝试解析布尔值
+          else if (paramValue === 'true') {
+            paramValue = true;
+          } else if (paramValue === 'false') {
+            paramValue = false;
+          }
+          
+          args[paramName] = paramValue;
+        }
+        
+        logger.debug('解析宽松 glm 格式工具调用:', { name, args });
+        toolCalls.push({ name, arguments: args });
+      }
+    }
+  }
+
   return toolCalls;
 }
 
@@ -139,7 +237,29 @@ function parseToolCalls(content) {
  * @returns {boolean}
  */
 function hasToolCalls(content) {
+  // 标准格式或 glm 错误格式都算有工具调用
   return /<tool_call>/.test(content);
+}
+
+/**
+ * 尝试修复常见的 XML 格式错误
+ * @param {string} content - 原始内容
+ * @returns {string} 修复后的内容
+ */
+function tryFixMalformedToolCall(content) {
+  let fixed = content;
+  
+  // 修复 <tool_call>tool_name>...</tool_name> 为标准格式
+  // 例如: <tool_call>read_file><path>xxx</path></read_file>
+  // 变成: <tool_call><name>read_file</name><arguments><path>xxx</path></arguments></tool_call>
+  fixed = fixed.replace(
+    /<tool_call>(\w+)>([\s\S]*?)<\/\1>/g,
+    (match, name, params) => {
+      return `<tool_call><name>${name}</name><arguments>${params}</arguments></tool_call>`;
+    }
+  );
+  
+  return fixed;
 }
 
 /**
@@ -509,10 +629,14 @@ class ToolExecutor {
 
   /**
    * 格式化工具执行结果（用于返回给 LLM）
+   * 大结果（>5KB）会被外部化到虚拟文件，上下文只保留预览
+   * 
    * @param {Array} results
+   * @param {Object} [options]
+   * @param {string} [options.sessionId] - 会话 ID（用于虚拟文件管理）
    * @returns {string}
    */
-  formatToolResults(results) {
+  formatToolResults(results, options = {}) {
     return results
       .map((r) => {
         if (r.success) {
@@ -520,7 +644,26 @@ class ToolExecutor {
             ? r.result 
             : JSON.stringify(r.result, null, 2);
           
-          // 限制输出长度
+          // 大结果外部化到虚拟文件（参考 lethain.com 方案）
+          if (virtualFileStore.shouldVirtualize(resultStr)) {
+            const vf = virtualFileStore.store(resultStr, {
+              toolName: r.name,
+              type: 'tool_result',
+              sessionId: options.sessionId,
+            });
+            
+            return `<tool_result name="${r.name}" success="true" virtualized="true">
+[内容已存储到虚拟文件: ${vf.fileId}]
+大小: ${vf.size} 字符
+
+预览 (前 ${PREVIEW_LENGTH} 字符):
+${vf.preview}
+
+如需完整内容，请使用 read_virtual_file 工具读取。
+</tool_result>`;
+          }
+          
+          // 普通结果：保留原有截断逻辑作为兜底
           const maxLen = 10000;
           const truncated = resultStr.length > maxLen
             ? resultStr.slice(0, maxLen) + '\n...(输出已截断)'

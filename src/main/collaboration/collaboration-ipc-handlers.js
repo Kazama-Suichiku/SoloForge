@@ -54,6 +54,39 @@ function setupCollaborationIpcHandlers() {
     };
   });
 
+  // 清理积压任务（超过指定天数的 pending/in_progress 任务标记为 cancelled）
+  ipcMain.handle('collaboration:clear-stale-tasks', async (_event, options = {}) => {
+    logger.info('IPC: collaboration:clear-stale-tasks', options);
+    try {
+      return agentCommunication.clearStaleTasks(options);
+    } catch (error) {
+      logger.error('清理积压任务失败', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 清空已完成/已取消的任务记录
+  ipcMain.handle('collaboration:clear-completed-tasks', async () => {
+    logger.info('IPC: collaboration:clear-completed-tasks');
+    try {
+      return agentCommunication.clearCompletedTasks();
+    } catch (error) {
+      logger.error('清空任务记录失败', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 清空协作消息记录
+  ipcMain.handle('collaboration:clear-messages', async () => {
+    logger.info('IPC: collaboration:clear-messages');
+    try {
+      return agentCommunication.clearMessages();
+    } catch (error) {
+      logger.error('清空消息记录失败', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   logger.info('协作 IPC 处理器已设置');
 }
 

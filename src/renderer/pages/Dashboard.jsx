@@ -21,6 +21,7 @@ import {
   InboxIcon,
   ExclamationTriangleIcon,
   BookmarkIcon,
+  FolderIcon,
 } from '@heroicons/react/24/outline';
 import {
   FlagIcon as FlagSolidIcon,
@@ -412,12 +413,53 @@ function GoalsList({ goals }) {
 // 任务列表
 // ─────────────────────────────────────────────────────────────
 
-function TasksList({ tasks, goals }) {
+function TasksList({ tasks, goals, allTasks, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null);
   const [page, setPage] = useState(1);
+  const [isClearing, setIsClearing] = useState(false);
+
+  // 统计已取消的任务数量（从原始任务列表中统计）
+  const cancelledCount = (allTasks || []).filter((t) => t.status === 'cancelled').length;
+
+  const handleClearCancelled = useCallback(async () => {
+    if (!window.confirm('确定要清空所有已取消的任务吗？此操作不可恢复。')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearCancelledTasks?.();
+      if (result?.success) {
+        setPage(1);
+        if (onRefresh) onRefresh();
+        if (result.clearedCount > 0) {
+          window.alert?.(`已清空 ${result.clearedCount} 个已取消的任务`);
+        }
+      } else {
+        window.alert?.('清空失败: ' + (result?.error || '未知错误'));
+      }
+    } catch (error) {
+      console.error('清空已取消任务失败:', error);
+      window.alert?.('清空已取消任务失败: ' + error.message);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
 
   if (!tasks.length) {
-    return <EmptyState icon={CheckCircleIcon} message="暂无任务" hint="CXO 可以通过对话分配任务" />;
+    return (
+      <div>
+        {cancelledCount > 0 && (
+          <div className="flex justify-end mb-2">
+            <button
+              onClick={handleClearCancelled}
+              disabled={isClearing}
+              className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+            >
+              {isClearing ? '清空中...' : `清空已取消 (${cancelledCount})`}
+            </button>
+          </div>
+        )}
+        <EmptyState icon={CheckCircleIcon} message="暂无任务" hint="CXO 可以通过对话分配任务" />
+      </div>
+    );
   }
 
   const totalPages = Math.ceil(tasks.length / PAGE_SIZE);
@@ -433,6 +475,18 @@ function TasksList({ tasks, goals }) {
 
   return (
     <div>
+      {/* 清空已取消任务按钮 */}
+      {cancelledCount > 0 && (
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={handleClearCancelled}
+            disabled={isClearing}
+            className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+          >
+            {isClearing ? '清空中...' : `清空已取消 (${cancelledCount})`}
+          </button>
+        </div>
+      )}
       <div className="space-y-1">
         {display.map((task) => {
           const isExpanded = expandedId === task.id;
@@ -457,9 +511,19 @@ function TasksList({ tasks, goals }) {
                 <span className={`w-2 h-2 rounded-full shrink-0 ${PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.low}`} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-text-primary truncate">{task.title}</p>
-                  <p className="text-xs text-text-secondary">
-                    {task.assignee} · {new Date(task.createdAt).toLocaleDateString()}
-                  </p>
+                  <div className="flex items-center gap-2 text-xs text-text-secondary">
+                    <span>{task.assignee}</span>
+                    <span>·</span>
+                    <span>{new Date(task.createdAt).toLocaleDateString()}</span>
+                    {task.projectName && (
+                      <>
+                        <span>·</span>
+                        <span className="text-purple-500 dark:text-purple-400 truncate max-w-[100px]" title={task.projectName}>
+                          {task.projectName}
+                        </span>
+                      </>
+                    )}
+                  </div>
                 </div>
                 <span className={`px-2 py-0.5 text-xs rounded-full shrink-0 ${STATUS_COLORS[task.status] || STATUS_COLORS.todo}`}>
                   {STATUS_LABELS[task.status] || task.status}
@@ -496,10 +560,23 @@ function TasksList({ tasks, goals }) {
                     )}
                   </div>
 
+                  {/* 关联项目 */}
+                  {task.projectId && (
+                    <div className="mt-3 p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg flex items-center gap-2">
+                      <FolderIcon className="w-4 h-4 text-purple-500 shrink-0" />
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs text-purple-600 dark:text-purple-400 font-medium">项目</span>
+                        <span className="text-sm text-text-primary truncate">{task.projectName || task.projectId}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 关联目标 */}
                   {linkedGoal && (
-                    <div className="mt-3 p-2 bg-bg-muted rounded-lg flex items-center gap-2">
+                    <div className="mt-2 p-2 bg-bg-muted rounded-lg flex items-center gap-2">
                       <FlagSolidIcon className="w-4 h-4 text-blue-500 shrink-0" />
                       <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">目标</span>
                         <span className="text-sm text-text-primary truncate">{linkedGoal.title}</span>
                         <span className="text-xs text-text-muted shrink-0">{linkedGoal.progress}%</span>
                       </div>
@@ -654,8 +731,25 @@ const CATEGORY_COLORS = {
   system: 'text-text-muted',
 };
 
-function ActivityTimeline({ activities }) {
+function ActivityTimeline({ activities, onRefresh }) {
   const [page, setPage] = useState(1);
+  const [isClearing, setIsClearing] = useState(false);
+
+  const handleClearLog = useCallback(async () => {
+    if (!window.confirm('确定要清空所有活动日志吗？')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearActivityLog?.();
+      if (result?.success) {
+        setPage(1);
+        if (onRefresh) onRefresh();
+      }
+    } catch (error) {
+      console.error('清空活动日志失败:', error);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
 
   if (!activities.length) {
     return <EmptyState icon={InboxIcon} message="暂无活动记录" />;
@@ -666,6 +760,18 @@ function ActivityTimeline({ activities }) {
 
   return (
     <div>
+      {/* 清空按钮 */}
+      {activities.length > 0 && (
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={handleClearLog}
+            disabled={isClearing}
+            className="px-2 py-1 text-xs text-gray-500 hover:text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 rounded transition-colors disabled:opacity-50"
+          >
+            {isClearing ? '清空中...' : `清空日志 (${activities.length})`}
+          </button>
+        </div>
+      )}
       <div className="space-y-3">
         {display.map((activity, idx) => {
           const Icon = CATEGORY_ICONS[activity.category] || BookmarkIcon;
@@ -694,9 +800,33 @@ function ActivityTimeline({ activities }) {
 // 招聘审批列表
 // ─────────────────────────────────────────────────────────────
 
-function RecruitmentList({ requests }) {
+function RecruitmentList({ requests, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null);
   const [page, setPage] = useState(1);
+  const [isClearing, setIsClearing] = useState(false);
+
+  // 统计已处理的数量
+  const processedCount = requests.filter(
+    (r) => r.status !== 'pending' && r.status !== 'discussing'
+  ).length;
+
+  const handleClearProcessed = useCallback(async () => {
+    if (!window.confirm('确定要清空所有已处理的招聘记录吗？（待审批和讨论中的不会被清空）')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearProcessedRecruits?.();
+      if (result?.success) {
+        setPage(1);
+        if (onRefresh) onRefresh();
+      } else {
+        console.error('清空失败:', result?.error);
+      }
+    } catch (error) {
+      console.error('清空操作异常:', error);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
 
   if (!requests.length) {
     return <EmptyState icon={UserPlusIcon} message="暂无招聘申请" />;
@@ -707,6 +837,18 @@ function RecruitmentList({ requests }) {
 
   return (
     <div>
+      {/* 清空按钮 */}
+      {processedCount > 0 && (
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={handleClearProcessed}
+            disabled={isClearing}
+            className="px-2 py-1 text-xs text-purple-500 hover:text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition-colors disabled:opacity-50"
+          >
+            {isClearing ? '清空中...' : `清空已处理 (${processedCount})`}
+          </button>
+        </div>
+      )}
       <div className="space-y-1">
         {display.map((req) => {
           const isExpanded = expandedId === req.id;
@@ -794,10 +936,182 @@ const TERM_STATUS_LABELS = {
   cancelled: '已撤回',
 };
 
+const TERM_PAGE_SIZE = 5; // 每页显示数量
+
+// ─────────────────────────────────────────────────────────────
+// 预算审批面板
+// ─────────────────────────────────────────────────────────────
+
+function BudgetApprovalPanel({ onRefresh }) {
+  const [blockedAgents, setBlockedAgents] = useState([]);
+  const [overrides, setOverrides] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [granting, setGranting] = useState(null);
+
+  const loadBudgetData = useCallback(async () => {
+    try {
+      const [blocked, activeOverrides] = await Promise.all([
+        window.electronAPI?.getBlockedAgents?.() || [],
+        window.electronAPI?.getBudgetOverrides?.() || [],
+      ]);
+      setBlockedAgents(blocked || []);
+      setOverrides(activeOverrides || []);
+    } catch (error) {
+      console.error('加载预算数据失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadBudgetData();
+    const interval = setInterval(loadBudgetData, 10000);
+    return () => clearInterval(interval);
+  }, [loadBudgetData]);
+
+  const handleGrantOverride = useCallback(async (agentId, hours = 24) => {
+    setGranting(agentId);
+    try {
+      const result = await window.electronAPI?.grantBudgetOverride?.(agentId, hours);
+      if (result?.success) {
+        loadBudgetData();
+        if (onRefresh) onRefresh();
+      } else {
+        console.error('授予放行失败:', result?.error);
+      }
+    } catch (error) {
+      console.error('授予放行异常:', error);
+    } finally {
+      setGranting(null);
+    }
+  }, [loadBudgetData, onRefresh]);
+
+  const handleRevokeOverride = useCallback(async (agentId) => {
+    try {
+      const result = await window.electronAPI?.revokeBudgetOverride?.(agentId);
+      if (result?.success) {
+        loadBudgetData();
+        if (onRefresh) onRefresh();
+      }
+    } catch (error) {
+      console.error('撤销放行异常:', error);
+    }
+  }, [loadBudgetData, onRefresh]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <div className="w-5 h-5 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  const hasContent = blockedAgents.length > 0 || overrides.length > 0;
+
+  if (!hasContent) {
+    return <EmptyState icon={CheckCircleIcon} message="预算运行正常，无需审批" />;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 被阻止的 Agent */}
+      {blockedAgents.length > 0 && (
+        <div>
+          <h4 className="text-xs font-medium text-text-secondary mb-2 flex items-center gap-1.5">
+            <ExclamationTriangleIcon className="w-3.5 h-3.5 text-red-500" />
+            预算超限 ({blockedAgents.length})
+          </h4>
+          <div className="space-y-2">
+            {blockedAgents.map((agent) => (
+              <div
+                key={agent.agentId}
+                className="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-text-primary truncate">
+                      {agent.agentId}
+                    </p>
+                    <p className="text-xs text-text-secondary mt-0.5">
+                      使用率 {agent.percent}% · {formatNumber(agent.usage)} / {formatNumber(agent.limit)} tokens
+                    </p>
+                    <p className="text-xs text-text-muted mt-1">
+                      阻止于 {new Date(agent.blockedAt).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => handleGrantOverride(agent.agentId, 24)}
+                      disabled={granting === agent.agentId}
+                      className="px-2 py-1 text-xs bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50 transition-colors"
+                    >
+                      {granting === agent.agentId ? '...' : '放行 24h'}
+                    </button>
+                    <button
+                      onClick={() => handleGrantOverride(agent.agentId, 4)}
+                      disabled={granting === agent.agentId}
+                      className="px-2 py-1 text-xs bg-yellow-500 text-white rounded hover:bg-yellow-600 disabled:opacity-50 transition-colors"
+                    >
+                      4h
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 已放行的 Agent */}
+      {overrides.length > 0 && (
+        <div>
+          <h4 className="text-xs font-medium text-text-secondary mb-2 flex items-center gap-1.5">
+            <CheckCircleIcon className="w-3.5 h-3.5 text-green-500" />
+            临时放行中 ({overrides.length})
+          </h4>
+          <div className="space-y-1.5">
+            {overrides.map((override) => (
+              <div
+                key={override.agentId}
+                className="flex items-center justify-between p-2 bg-green-50 dark:bg-green-900/20 rounded-lg"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-text-primary truncate">
+                    {override.agentId}
+                  </p>
+                  <p className="text-xs text-text-muted">
+                    剩余 {override.remainingHours} 小时
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleRevokeOverride(override.agentId)}
+                  className="px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded transition-colors"
+                >
+                  撤销
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 格式化大数字
+function formatNumber(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return String(num);
+}
+
 function TerminationApprovalPanel({ requests, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null);
   const [decidingId, setDecidingId] = useState(null);
   const [comment, setComment] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showOnlyPending, setShowOnlyPending] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   const handleDecide = useCallback(async (requestId, approved) => {
     setDecidingId(requestId);
@@ -821,6 +1135,25 @@ function TerminationApprovalPanel({ requests, onRefresh }) {
     }
   }, [comment, onRefresh]);
 
+  // 清空已处理的记录
+  const handleClearProcessed = useCallback(async () => {
+    if (!window.confirm('确定要清空所有已处理的开除记录吗？（待审批的不会被清空）')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearProcessedTerminations?.();
+      if (result?.success) {
+        setCurrentPage(1);
+        if (onRefresh) onRefresh();
+      } else {
+        console.error('清空失败:', result?.error);
+      }
+    } catch (error) {
+      console.error('清空操作异常:', error);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
+
   if (!requests || requests.length === 0) {
     return <EmptyState icon={ExclamationTriangleIcon} message="暂无开除申请" />;
   }
@@ -832,9 +1165,53 @@ function TerminationApprovalPanel({ requests, onRefresh }) {
     return new Date(b.createdAt) - new Date(a.createdAt);
   });
 
+  // 过滤（可选只看待审批）
+  const filtered = showOnlyPending ? sorted.filter(r => r.status === 'pending') : sorted;
+  
+  // 分页
+  const totalPages = Math.ceil(filtered.length / TERM_PAGE_SIZE);
+  const startIdx = (currentPage - 1) * TERM_PAGE_SIZE;
+  const paginatedRequests = filtered.slice(startIdx, startIdx + TERM_PAGE_SIZE);
+  
+  // 统计
+  const pendingCount = requests.filter(r => r.status === 'pending').length;
+  const processedCount = requests.filter(r => r.status !== 'pending').length;
+
   return (
-    <div className="space-y-1">
-      {sorted.map((req) => {
+    <div className="space-y-2">
+      {/* 顶部工具栏 */}
+      <div className="flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-color)]/50">
+        <div className="flex items-center gap-2">
+          {/* 筛选开关 */}
+          <button
+            onClick={() => { setShowOnlyPending(!showOnlyPending); setCurrentPage(1); }}
+            className={`px-2 py-1 text-xs rounded-full transition-colors ${
+              showOnlyPending 
+                ? 'bg-orange-100 text-orange-600 dark:bg-orange-900 dark:text-orange-300' 
+                : 'bg-bg-muted text-text-secondary hover:bg-[var(--bg-hover)]'
+            }`}
+          >
+            {showOnlyPending ? `待审批 (${pendingCount})` : `全部 (${filtered.length})`}
+          </button>
+          {!showOnlyPending && pendingCount > 0 && (
+            <span className="text-xs text-text-muted">{pendingCount} 待审批</span>
+          )}
+        </div>
+        
+        {/* 清空按钮 */}
+        {processedCount > 0 && (
+          <button
+            onClick={handleClearProcessed}
+            disabled={isClearing}
+            className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+          >
+            {isClearing ? '清空中...' : `清空已处理 (${processedCount})`}
+          </button>
+        )}
+      </div>
+
+      {/* 列表 */}
+      {paginatedRequests.map((req) => {
         const isExpanded = expandedId === req.id;
         const isPending = req.status === 'pending';
         const isDeciding = decidingId === req.id;
@@ -953,6 +1330,29 @@ function TerminationApprovalPanel({ requests, onRefresh }) {
           </div>
         );
       })}
+
+      {/* 分页控件 */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 pt-3 border-t border-[var(--border-color)]/50">
+          <button
+            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+            disabled={currentPage === 1}
+            className="px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            上一页
+          </button>
+          <span className="text-xs text-text-muted">
+            {currentPage} / {totalPages}
+          </span>
+          <button
+            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+            disabled={currentPage === totalPages}
+            className="px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            下一页
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -961,9 +1361,66 @@ function TerminationApprovalPanel({ requests, onRefresh }) {
 // Agent 协作活动
 // ─────────────────────────────────────────────────────────────
 
-function CollaborationActivity({ activities }) {
+function CollaborationActivity({ activities, onRefresh }) {
   const [expandedId, setExpandedId] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [isClearing, setIsClearing] = useState(false);
+
+  // 统计
+  const staleCount = activities?.filter(
+    (a) => a.type === 'task' && (a.status === 'pending' || a.status === 'in_progress')
+  ).length || 0;
+  const completedCount = activities?.filter(
+    (a) => a.type === 'task' && (a.status === 'completed' || a.status === 'cancelled')
+  ).length || 0;
+
+  const handleClearStale = useCallback(async () => {
+    if (!window.confirm('确定要关闭所有超过 1 天的积压任务吗？（仅关闭超时任务，将状态改为已取消）')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearStaleTasks?.({ maxAgeDays: 1 });
+      if (result?.success) {
+        setCurrentPage(1);
+        if (onRefresh) onRefresh();
+        if (result.clearedCount > 0) {
+          window.alert?.(`已关闭 ${result.clearedCount} 个积压任务`);
+        } else {
+          window.alert?.('没有超过 1 天的积压任务需要关闭');
+        }
+      } else {
+        window.alert?.('操作失败: ' + (result?.error || '未知错误'));
+      }
+    } catch (error) {
+      console.error('清理积压任务失败:', error);
+      window.alert?.('清理积压任务失败: ' + error.message);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
+
+  const handleClearCompleted = useCallback(async () => {
+    if (!window.confirm('确定要清空所有已完成/已取消的任务记录吗？')) return;
+    setIsClearing(true);
+    try {
+      const result = await window.electronAPI.clearCompletedTasks?.();
+      if (result?.success) {
+        setCurrentPage(1);
+        if (onRefresh) onRefresh();
+        if (result.clearedCount > 0) {
+          window.alert?.(`已清空 ${result.clearedCount} 条任务记录`);
+        } else {
+          window.alert?.('没有已完成/已取消的任务需要清空');
+        }
+      } else {
+        window.alert?.('操作失败: ' + (result?.error || '未知错误'));
+      }
+    } catch (error) {
+      console.error('清空任务记录失败:', error);
+      window.alert?.('清空任务记录失败: ' + error.message);
+    } finally {
+      setIsClearing(false);
+    }
+  }, [onRefresh]);
 
   if (!activities || activities.length === 0) {
     return <EmptyState icon={ArrowsRightLeftIcon} message="暂无协作记录" />;
@@ -975,6 +1432,30 @@ function CollaborationActivity({ activities }) {
 
   return (
     <div>
+      {/* 清理按钮 */}
+      {(staleCount > 0 || completedCount > 0) && (
+        <div className="flex justify-end gap-2 mb-2">
+          {staleCount > 0 && (
+            <button
+              onClick={handleClearStale}
+              disabled={isClearing}
+              className="px-2 py-1 text-xs text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded transition-colors disabled:opacity-50"
+              title="关闭超过 1 天未完成的任务"
+            >
+              {isClearing ? '处理中...' : `关闭超时任务`}
+            </button>
+          )}
+          {completedCount > 0 && (
+            <button
+              onClick={handleClearCompleted}
+              disabled={isClearing}
+              className="px-2 py-1 text-xs text-blue-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors disabled:opacity-50"
+            >
+              {isClearing ? '处理中...' : `清空已完成 (${completedCount})`}
+            </button>
+          )}
+        </div>
+      )}
       <div className="space-y-1">
         {displayActivities.map((activity, idx) => {
           const key = activity.id || idx;
@@ -1325,7 +1806,7 @@ function AgentTaskPanel() {
 // 运营仪表板主组件
 // ─────────────────────────────────────────────────────────────
 
-export default function Dashboard({ onBack }) {
+export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState({
     summary: null,
@@ -1371,10 +1852,13 @@ export default function Dashboard({ onBack }) {
   }, []);
 
   useEffect(() => {
+    // 只在页面可见时加载数据和轮询
+    if (!isActive) return;
+    
     loadData();
     const interval = setInterval(loadData, 30000);
     return () => clearInterval(interval);
-  }, [loadData]);
+  }, [loadData, isActive]);
 
   if (loading) {
     return (
@@ -1418,14 +1902,26 @@ export default function Dashboard({ onBack }) {
               <p className="text-xs text-text-muted mt-0.5">公司运营状况概览</p>
             </div>
           </div>
-          {/* H: 刷新按钮降权 -- ghost 样式 */}
-          <button
-            onClick={loadData}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
-          >
-            <ArrowPathIcon className="w-4 h-4" />
-            <span className="text-xs">刷新</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {/* CFO 控制台入口 */}
+            {onOpenCFO && (
+              <button
+                onClick={onOpenCFO}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 rounded-lg transition-colors"
+              >
+                <ChartBarIcon className="w-4 h-4" />
+                <span className="text-xs font-medium">CFO 控制台</span>
+              </button>
+            )}
+            {/* H: 刷新按钮降权 -- ghost 样式 */}
+            <button
+              onClick={loadData}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+            >
+              <ArrowPathIcon className="w-4 h-4" />
+              <span className="text-xs">刷新</span>
+            </button>
+          </div>
         </div>
 
         {/* B: 统计卡片 -- 左侧彩条，无 emoji 图标 */}
@@ -1480,7 +1976,7 @@ export default function Dashboard({ onBack }) {
           <div className="space-y-6">
             {/* E: 任务看板提到更显眼的位置 */}
             <Panel title="任务看板" trailing={`${tasks.length} 个任务`}>
-              <TasksList tasks={tasks} goals={goals} />
+              <TasksList tasks={tasks} goals={goals} allTasks={rawTasks} onRefresh={loadData} />
               {tasks.length > 0 && (
                 <div className="mt-4 pt-3 border-t border-[var(--border-color)]/50">
                   <div className="flex flex-wrap gap-3 text-xs text-text-secondary">
@@ -1518,9 +2014,14 @@ export default function Dashboard({ onBack }) {
 
           {/* 右栏 */}
           <div className="space-y-6">
+            {/* 预算审批 */}
+            <Panel title="预算审批" trailing="Agent 预算管理">
+              <BudgetApprovalPanel onRefresh={loadData} />
+            </Panel>
+
             {/* Agent 协作 */}
             <Panel title="Agent 协作" trailing={`${collabStats.pendingTasks || 0} 待处理`}>
-              <CollaborationActivity activities={collabStats.recentActivity} />
+              <CollaborationActivity activities={collabStats.recentActivity} onRefresh={loadData} />
               {(collabStats.messageCount > 0 || collabStats.taskCount > 0) && (
                 <div className="mt-3 pt-3 border-t border-[var(--border-color)] flex gap-4 text-xs text-text-muted">
                   <span>消息: {collabStats.messageCount || 0}</span>
@@ -1543,12 +2044,12 @@ export default function Dashboard({ onBack }) {
               title="招聘审批"
               trailing={`${recruitRequests.filter((r) => r.status === 'pending' || r.status === 'discussing').length} 待处理`}
             >
-              <RecruitmentList requests={recruitRequests} />
+              <RecruitmentList requests={recruitRequests} onRefresh={loadData} />
             </Panel>
 
             {/* 最近活动 */}
             <Panel title="最近活动">
-              <ActivityTimeline activities={activityLog} />
+              <ActivityTimeline activities={activityLog} onRefresh={loadData} />
             </Panel>
           </div>
         </div>

@@ -75,6 +75,8 @@ class DataPath {
       dirs.push(path.join(basePath, 'memory'));
       dirs.push(path.join(basePath, 'reports'));
       dirs.push(path.join(basePath, 'attachments'));
+      dirs.push(path.join(basePath, 'virtual-files'));  // 虚拟文件存储
+      dirs.push(path.join(basePath, 'scratchpads'));    // Agent 暂存区
     }
 
     for (const dir of dirs) {

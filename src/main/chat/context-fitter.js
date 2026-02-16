@@ -13,21 +13,25 @@
 
 const { estimateTokens, estimateMessages, getContextLimit, getAvailableBudget, DEFAULT_OUTPUT_RESERVE, SAFETY_MARGIN } = require('../llm/token-estimator');
 const { logger } = require('../utils/logger');
+const { virtualFileStore } = require('../context/virtual-file-store');
 
 /**
  * 工具循环中的压缩阈值：当 currentHistory 占用超过可用预算的此比例时触发压缩
+ * 已优化：从 0.6 增加到 0.75，更晚触发压缩，保留更多上下文
  */
-const TOOL_LOOP_COMPRESS_RATIO = 0.6;
+const TOOL_LOOP_COMPRESS_RATIO = 0.75;
 
 /**
  * 工具循环压缩时保留的最近轮数（每轮 = 1条 assistant + 1条 user/tool_result）
+ * 已优化：从 2 增加到 4，长任务中保留更多完整的工具调用历史
  */
-const TOOL_LOOP_KEEP_ROUNDS = 2;
+const TOOL_LOOP_KEEP_ROUNDS = 4;
 
 /**
  * 截断单条消息时的最大字符数
+ * 已优化：从 300 增加到 500，摘要更完整
  */
-const TRUNCATED_MSG_MAX_CHARS = 300;
+const TRUNCATED_MSG_MAX_CHARS = 500;
 
 /**
  * @typedef {Object} FitContextParams
@@ -127,15 +131,19 @@ function fitContext({ systemPrompt, history, userMessage, model, outputReserve =
  * 压缩工具循环中累积的 currentHistory
  * 当累积的历史 token 超过可用预算的 TOOL_LOOP_COMPRESS_RATIO 时触发
  * 
- * 策略：
+ * 策略（已优化 - 参考 Cursor/Claude Code 最佳实践）：
  * - 保留最近 TOOL_LOOP_KEEP_ROUNDS 轮（每轮 2 条：assistant + tool_result）的完整内容
  * - 将更早的轮次截断为摘要
+ * - 原始内容保存到虚拟文件，支持按需回溯
  * 
  * @param {Array<{role: string, content: string}>} currentHistory - 工具循环中累积的历史
  * @param {number} availableBudget - 可用于历史的 token 预算
- * @returns {{ compressed: Array<{role: string, content: string}>, wasCompressed: boolean }}
+ * @param {Object} [options] - 额外选项
+ * @param {string} [options.taskContext] - 当前任务描述（用于虚拟文件标记）
+ * @param {string} [options.sessionId] - 会话 ID
+ * @returns {{ compressed: Array<{role: string, content: string}>, wasCompressed: boolean, virtualFileId?: string }}
  */
-function compressToolHistory(currentHistory, availableBudget) {
+function compressToolHistory(currentHistory, availableBudget, options = {}) {
   if (!currentHistory || currentHistory.length === 0) {
     return { compressed: currentHistory, wasCompressed: false };
   }
@@ -158,58 +166,124 @@ function compressToolHistory(currentHistory, availableBudget) {
     return { compressed: keep, wasCompressed: false };
   }
 
-  // 压缩较早的消息为摘要
-  const compressed = older.map((msg) => {
-    if (!msg.content || typeof msg.content !== 'string') return msg;
-
-    if (msg.role === 'user' && msg.content.startsWith('工具执行结果')) {
-      // 工具结果：截断到 TRUNCATED_MSG_MAX_CHARS 字符
-      if (msg.content.length > TRUNCATED_MSG_MAX_CHARS) {
-        return {
-          role: msg.role,
-          content: msg.content.slice(0, TRUNCATED_MSG_MAX_CHARS) + '\n...(结果已截断，如需完整信息请重新调用工具)',
-        };
-      }
-      return msg;
+  // 将原始内容保存到虚拟文件（供回溯使用）
+  let virtualFileId = null;
+  try {
+    const olderContent = JSON.stringify(older, null, 2);
+    if (olderContent.length > 1000) { // 只有内容足够大时才保存
+      const vf = virtualFileStore.store(olderContent, {
+        type: 'compressed_history',
+        taskContext: options.taskContext,
+        sessionId: options.sessionId,
+        messageCount: older.length,
+      });
+      virtualFileId = vf.fileId;
     }
+  } catch (err) {
+    logger.debug('保存压缩历史到虚拟文件失败', { error: err.message });
+  }
 
-    if (msg.role === 'assistant') {
-      // Assistant 响应：截断并保留工具调用的名称
-      if (msg.content.length > TRUNCATED_MSG_MAX_CHARS) {
-        // 尝试提取工具调用名称
-        const toolNames = [];
-        const toolCallRegex = /<name>([^<]+)<\/name>/g;
-        let match;
-        while ((match = toolCallRegex.exec(msg.content)) !== null) {
-          toolNames.push(match[1]);
-        }
-        const toolInfo = toolNames.length > 0
-          ? `\n(本轮调用了工具: ${toolNames.join(', ')})`
-          : '';
-        return {
-          role: msg.role,
-          content: msg.content.slice(0, 200) + `\n...(已截断)${toolInfo}`,
-        };
-      }
-      return msg;
-    }
+  // 生成规则摘要（提取关键信息）
+  const summary = _generateHistorySummary(older);
 
-    // 其他消息类型（如 system）保持不变
-    return msg;
-  });
+  // 构建摘要消息
+  const summaryMessage = {
+    role: 'user',
+    content: virtualFileId
+      ? `[历史摘要 - 共 ${older.length} 条消息已压缩，完整内容见虚拟文件 ${virtualFileId}]\n\n${summary}\n\n如需查看完整的工具调用历史，请使用 recall_compressed_history 工具。`
+      : `[历史摘要 - 共 ${older.length} 条消息已压缩]\n\n${summary}`,
+  };
 
-  const result = [...compressed, ...keep];
+  const result = [summaryMessage, ...keep];
 
-  logger.info('context-fitter: 工具循环历史已压缩', {
+  logger.info('context-fitter: 工具循环历史已智能压缩', {
     originalMessages: currentHistory.length,
     compressedMessages: result.length,
     olderCompressed: older.length,
     recentKept: keep.length,
     estimatedBefore: estimated,
     estimatedAfter: estimateMessages(result),
+    virtualFileId,
   });
 
-  return { compressed: result, wasCompressed: true };
+  return { compressed: result, wasCompressed: true, virtualFileId };
+}
+
+/**
+ * 生成历史消息的规则摘要
+ * 提取关键信息：工具调用、文件路径、错误、决策
+ * 
+ * @param {Array<{role: string, content: string}>} messages
+ * @returns {string}
+ */
+function _generateHistorySummary(messages) {
+  const toolCalls = [];
+  const filePaths = new Set();
+  const errors = [];
+  const decisions = [];
+
+  for (const msg of messages) {
+    if (!msg.content || typeof msg.content !== 'string') continue;
+
+    // 提取工具调用
+    const toolCallRegex = /<name>([^<]+)<\/name>/g;
+    let match;
+    while ((match = toolCallRegex.exec(msg.content)) !== null) {
+      if (!toolCalls.includes(match[1])) {
+        toolCalls.push(match[1]);
+      }
+    }
+
+    // 提取文件路径
+    const pathRegex = /(?:\/[\w.-]+)+(?:\.[\w]+)?/g;
+    while ((match = pathRegex.exec(msg.content)) !== null) {
+      if (match[0].length > 5 && match[0].length < 200) {
+        filePaths.add(match[0]);
+      }
+    }
+
+    // 提取错误信息
+    if (msg.content.includes('错误') || msg.content.includes('Error') || msg.content.includes('失败')) {
+      const errorMatch = msg.content.match(/(?:错误|Error|失败)[：:]\s*([^\n]+)/i);
+      if (errorMatch && errorMatch[1]) {
+        errors.push(errorMatch[1].slice(0, 100));
+      }
+    }
+
+    // 提取决策/结论
+    if (msg.role === 'assistant' && msg.content.length > 100) {
+      // 查找结论性语句
+      const conclusionMatch = msg.content.match(/(?:完成|已|结论|总结|决定|方案)[：:]\s*([^\n]+)/);
+      if (conclusionMatch && conclusionMatch[1]) {
+        decisions.push(conclusionMatch[1].slice(0, 100));
+      }
+    }
+  }
+
+  const parts = [];
+
+  if (toolCalls.length > 0) {
+    parts.push(`**已调用工具**: ${toolCalls.join(', ')}`);
+  }
+
+  if (filePaths.size > 0) {
+    const pathList = Array.from(filePaths).slice(0, 10);
+    parts.push(`**涉及文件**: ${pathList.join(', ')}${filePaths.size > 10 ? ` 等 ${filePaths.size} 个文件` : ''}`);
+  }
+
+  if (errors.length > 0) {
+    parts.push(`**遇到的问题**: ${errors.slice(0, 3).join('; ')}`);
+  }
+
+  if (decisions.length > 0) {
+    parts.push(`**关键结论**: ${decisions.slice(0, 3).join('; ')}`);
+  }
+
+  if (parts.length === 0) {
+    return `已执行 ${messages.length} 轮工具调用（内容已压缩）`;
+  }
+
+  return parts.join('\n');
 }
 
 /**
@@ -231,4 +305,5 @@ module.exports = {
   getDroppedHistoryHint,
   TOOL_LOOP_COMPRESS_RATIO,
   TOOL_LOOP_KEEP_ROUNDS,
+  _generateHistorySummary, // 导出供测试使用
 };

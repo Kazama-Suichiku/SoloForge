@@ -75,6 +75,8 @@ class TaskPatrol {
 
     /** @type {ReturnType<typeof setInterval>|null} */
     this._interval = null;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this._startTimeout = null;
     this._running = false;
     this._checking = false;
 
@@ -103,7 +105,8 @@ class TaskPatrol {
     this._running = true;
     logger.info('任务巡查系统已启动（全能版）', { intervalMs });
 
-    setTimeout(() => {
+    this._startTimeout = setTimeout(() => {
+      this._startTimeout = null;
       if (this._running) this._runCheck();
     }, 30000);
 
@@ -113,12 +116,16 @@ class TaskPatrol {
   }
 
   stop() {
+    this._running = false;
+    this._checking = false;
+    if (this._startTimeout) {
+      clearTimeout(this._startTimeout);
+      this._startTimeout = null;
+    }
     if (this._interval) {
       clearInterval(this._interval);
       this._interval = null;
     }
-    this._running = false;
-    this._checking = false;
     logger.info('任务巡查系统已停止');
   }
 
@@ -135,10 +142,7 @@ class TaskPatrol {
   // ═══════════════════════════════════════════════════════════════
 
   async _runCheck() {
-    if (this._checking) {
-      logger.debug('任务巡查: 上次检查尚未完成，跳过');
-      return;
-    }
+    if (this._checking || !this._running) return;
     this._checking = true;
 
     /** 收集本轮所有通知消息 */
@@ -149,12 +153,14 @@ class TaskPatrol {
 
       // 1. 运营任务催促
       await this._checkOpsTasks(now);
+      if (!this._running) return; // 已被关闭，立即退出
 
       // 2. 运营→项目管理同步
       const pmChanges = await this._syncOpsToProjects(now);
       if (pmChanges.length > 0) {
         notifications.push(this._formatPMChanges(pmChanges));
       }
+      if (!this._running) return;
 
       // 3. 逾期预警
       const deadlineWarnings = this._checkDeadlines(now);
@@ -179,6 +185,7 @@ class TaskPatrol {
       if (approvalAlerts.length > 0) {
         notifications.push(this._formatApprovalAlerts(approvalAlerts));
       }
+      if (!this._running) return;
 
       // 7. Agent 活跃度监控
       const inactiveAgents = this._checkAgentActivity(now);
@@ -188,12 +195,14 @@ class TaskPatrol {
 
       // 8. 记忆系统维护
       await this._runMemoryMaintenance(now);
+      if (!this._running) return;
 
       // 9. LLM Provider 健康探测
       const llmIssues = await this._checkLLMHealth(now);
       if (llmIssues.length > 0) {
         notifications.push(this._formatLLMIssues(llmIssues));
       }
+      if (!this._running) return;
 
       // 10. 数据完整性校验
       const integrityIssues = this._checkDataIntegrity(now);
@@ -209,9 +218,11 @@ class TaskPatrol {
 
       // 12. Agent TODO 滞留
       await this._checkAgentTodos(now);
+      if (!this._running) return;
 
       // 13. 日报（每日一次）
       await this._checkDailyReport(now);
+      if (!this._running) return;
 
       // 推送汇总通知
       if (notifications.length > 0) {
@@ -235,18 +246,29 @@ class TaskPatrol {
   async _checkOpsTasks(now) {
     if (!this.operationsStore) return;
 
+    // 辅助函数：检查负责人是否有效（在职且活跃）
+    const isAssigneeValid = (assigneeId) => {
+      if (!assigneeId) return false;
+      const config = agentConfigStore.get(assigneeId);
+      if (!config) return false;
+      // 跳过已停职或已离职的员工
+      if (['suspended', 'terminated'].includes(config.status)) return false;
+      return true;
+    };
+
     const todoTasks = this.operationsStore.getTasks({ status: 'todo' })
-      .filter((t) => t.assigneeId);
+      .filter((t) => isAssigneeValid(t.assigneeId));
 
     const staleTasks = this.operationsStore.getTasks({ status: 'in_progress' })
       .filter((t) => {
-        if (!t.assigneeId) return false;
+        if (!isAssigneeValid(t.assigneeId)) return false;
         const lastUpdate = t.updatedAt || t.createdAt;
         const ts = typeof lastUpdate === 'string' ? new Date(lastUpdate).getTime() : lastUpdate;
         return (now - ts) > STALE_THRESHOLD_MS;
       });
 
     for (const task of todoTasks) {
+      if (!this._running) return;
       if (this._isInCooldown(task.id, now)) continue;
       await this._nudgeOpsTask(task, 'todo');
       this._nudgedAt.set(task.id, now);
@@ -254,6 +276,7 @@ class TaskPatrol {
     }
 
     for (const task of staleTasks) {
+      if (!this._running) return;
       if (this._isInCooldown(task.id, now)) continue;
       await this._nudgeOpsTask(task, 'stale');
       this._nudgedAt.set(task.id, now);
@@ -756,7 +779,7 @@ class TaskPatrol {
       }
     }
 
-    // 检查分配给不存在/停职 Agent 的任务
+    // 检查分配给不存在/停职/离职 Agent 的任务，并自动清理离职员工的任务
     if (this.operationsStore) {
       const activeTasks = [
         ...this.operationsStore.getTasks({ status: 'todo' }),
@@ -767,8 +790,21 @@ class TaskPatrol {
         const config = agentConfigStore.get(task.assigneeId);
         if (!config) {
           issues.push({ type: 'orphan_task', description: `任务「${task.title}」分配给不存在的 Agent: ${task.assigneeId}` });
+          // 自动取消孤儿任务
+          this.operationsStore.updateTask(task.id, {
+            status: 'cancelled',
+            cancelReason: '负责人不存在',
+          }, 'system', '巡查系统');
         } else if (config.status === 'terminated') {
-          issues.push({ type: 'terminated_assignee', description: `任务「${task.title}」分配给已离职的 ${config.name}` });
+          // 自动取消已离职员工的任务
+          this.operationsStore.updateTask(task.id, {
+            status: 'cancelled',
+            cancelReason: `负责人 ${config.name} 已离职`,
+          }, 'system', '巡查系统');
+          issues.push({
+            type: 'terminated_assignee_fixed',
+            description: `已自动取消任务「${task.title}」（原负责人 ${config.name} 已离职）`,
+          });
         }
       }
     }
@@ -853,6 +889,8 @@ class TaskPatrol {
     const allTodos = this.todoStore.getAll();
 
     for (const [agentId, todos] of Object.entries(allTodos)) {
+      if (!this._running) return;
+
       const pendingTodos = todos.filter((t) => t.status === 'pending' || t.status === 'in_progress');
       if (pendingTodos.length === 0) continue;
 

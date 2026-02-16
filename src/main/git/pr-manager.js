@@ -126,7 +126,7 @@ class PRManager extends BranchManager {
     const changedFiles = diffOutput.split('\n').filter((l) => l.trim());
 
     const pr = {
-      id: `pr-${Date.now()}`,
+      id: `pr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       title,
       description,
       sourceBranch,

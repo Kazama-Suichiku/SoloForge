@@ -69,11 +69,15 @@ function setupOperationsIpcHandlers() {
         requester: t.requesterName,
         requesterId: t.requesterId,
         goalId: t.goalId,
+        projectId: t.projectId,       // 新增：关联项目 ID
+        projectName: t.projectName,   // 新增：关联项目名称
         status: t.status,
         dueDate: t.dueDate,
         createdAt: t.createdAt,
         updatedAt: t.updatedAt,
         completedAt: t.completedAt,
+        cancelledAt: t.cancelledAt,   // 新增：取消时间
+        cancelReason: t.cancelReason, // 新增：取消原因
       }));
     } catch (error) {
       logger.error('获取任务列表失败', error);
@@ -130,6 +134,17 @@ function setupOperationsIpcHandlers() {
     }
   });
 
+  // 清空已处理的招聘记录
+  ipcMain.handle('operations:clear-recruit-processed', async () => {
+    logger.info('IPC: 清空已处理的招聘记录');
+    try {
+      return approvalQueue.clearProcessed();
+    } catch (error) {
+      logger.error('清空招聘记录失败', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   // 获取活动日志
   ipcMain.handle('operations:get-activity-log', async (_event, { filter, limit } = {}) => {
     logger.debug('IPC: operations:get-activity-log', { filter, limit });
@@ -147,6 +162,28 @@ function setupOperationsIpcHandlers() {
     } catch (error) {
       logger.error('获取活动日志失败', error);
       return [];
+    }
+  });
+
+  // 清空活动日志
+  ipcMain.handle('operations:clear-activity-log', async () => {
+    logger.info('IPC: 清空活动日志');
+    try {
+      return operationsStore.clearActivityLog();
+    } catch (error) {
+      logger.error('清空活动日志失败', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 清空已取消的任务
+  ipcMain.handle('operations:clear-cancelled-tasks', async () => {
+    logger.info('IPC: 清空已取消的任务');
+    try {
+      return operationsStore.clearCancelledTasks();
+    } catch (error) {
+      logger.error('清空已取消任务失败', error);
+      return { success: false, error: error.message };
     }
   });
 

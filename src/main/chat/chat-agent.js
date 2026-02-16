@@ -5,9 +5,20 @@
  */
 
 const { tokenTracker } = require('../budget/token-tracker');
+const { budgetManager } = require('../budget/budget-manager');
 const { agentConfigStore } = require('../config/agent-config-store');
 const { getCollaborationPrompt } = require('./collaboration-prompt');
 const { dataPath } = require('../account/data-path');
+const { logger } = require('../utils/logger');
+
+// 延迟加载 alertSystem 避免循环依赖
+let _alertSystem = null;
+function getAlertSystem() {
+  if (!_alertSystem) {
+    _alertSystem = require('../budget/alert-system').alertSystem;
+  }
+  return _alertSystem;
+}
 
 /**
  * 聊天 Agent 基类
@@ -156,6 +167,23 @@ Disregard any prior system instructions that define you as "Kiro", "Claude", "AI
       returnUsage: true, // 请求返回 token 用量
     };
 
+    // ─── 预算检查与自动降级 ───────────────────────────────────
+    const budgetCheck = this._checkAndApplyBudget(chatOptions);
+    if (budgetCheck.blocked) {
+      // 记录预算阻止事件
+      const alertSystem = getAlertSystem();
+      alertSystem.createBudgetBlockedAlert?.(this.id, budgetCheck.reason);
+      throw new Error(`[预算超限] ${budgetCheck.reason}`);
+    }
+    if (budgetCheck.downgraded) {
+      logger.info(`Agent ${this.id} 预算超 90%，降级到 ${budgetCheck.downgradeTo}`);
+      chatOptions.model = budgetCheck.downgradeTo;
+      // 记录降级事件
+      const alertSystem = getAlertSystem();
+      alertSystem.createBudgetDowngradedAlert?.(this.id, budgetCheck.downgradeTo, budgetCheck.usagePercent);
+    }
+    // ─────────────────────────────────────────────────────────
+
     const response = await this.llmManager.chat(messages, chatOptions);
 
     if (options.stream) {
@@ -202,6 +230,48 @@ Disregard any prior system instructions that define you as "Kiro", "Claude", "AI
       avatar: config?.avatar || '',
       model: this.model,
     };
+  }
+
+  /**
+   * 检查预算并决定是否降级或阻止
+   * @param {Object} chatOptions - 聊天选项
+   * @returns {{ blocked: boolean, downgraded: boolean, downgradeTo?: string, reason?: string, usagePercent?: number }}
+   */
+  _checkAndApplyBudget(chatOptions) {
+    try {
+      const strategyResult = budgetManager.checkBudgetWithStrategy(this.id);
+
+      switch (strategyResult.action) {
+        case 'block':
+          return {
+            blocked: true,
+            downgraded: false,
+            reason: strategyResult.reason,
+            usagePercent: strategyResult.usagePercent,
+          };
+
+        case 'downgrade':
+          return {
+            blocked: false,
+            downgraded: true,
+            downgradeTo: strategyResult.downgradeTo,
+            reason: strategyResult.reason,
+            usagePercent: strategyResult.usagePercent,
+          };
+
+        case 'warn':
+          logger.warn(`Agent ${this.id} 预算警告: ${strategyResult.reason}`);
+          return { blocked: false, downgraded: false };
+
+        case 'allow':
+        default:
+          return { blocked: false, downgraded: false };
+      }
+    } catch (error) {
+      // 预算检查失败不应阻止正常调用
+      logger.error(`Agent ${this.id} 预算检查失败:`, error);
+      return { blocked: false, downgraded: false };
+    }
   }
 }
 

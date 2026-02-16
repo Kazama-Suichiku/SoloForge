@@ -60,6 +60,25 @@ const CHAT_COMPLETE = 'chat:complete';
 const CHAT_CREATE_GROUP = 'chat:create-group';
 
 // ─────────────────────────────────────────────────────────────
+// 部门群聊相关
+// ─────────────────────────────────────────────────────────────
+
+/** @constant {string} 创建部门群聊 (main -> renderer) */
+const CHAT_DEPT_GROUP_CREATE = 'chat:dept-group-create';
+
+/** @constant {string} 部门群聊成员变更 (main -> renderer) */
+const CHAT_DEPT_GROUP_UPDATE = 'chat:dept-group-update';
+
+/** @constant {string} 部门群聊消息 (main -> renderer) */
+const CHAT_DEPT_GROUP_MESSAGE = 'chat:dept-group-message';
+
+/** @constant {string} 部门群聊重命名 (main -> renderer) */
+const CHAT_DEPT_GROUP_RENAME = 'chat:dept-group-rename';
+
+/** @constant {string} 获取所有部门群聊 (invoke) */
+const CHAT_DEPT_GROUP_GET_ALL = 'chat:dept-group-get-all';
+
+// ─────────────────────────────────────────────────────────────
 // AGENT TASK 相关（任务追踪与终止）
 // ─────────────────────────────────────────────────────────────
 
@@ -105,6 +124,9 @@ const TERMINATION_GET_PENDING = 'termination:get-pending';
 /** @constant {string} 确认/拒绝开除申请 (invoke) */
 const TERMINATION_DECIDE = 'termination:decide';
 
+/** @constant {string} 清空已处理的开除记录 (invoke) */
+const TERMINATION_CLEAR_PROCESSED = 'termination:clear-processed';
+
 // ─────────────────────────────────────────────────────────────
 // ATTACHMENT 相关（图片附件）
 // ─────────────────────────────────────────────────────────────
@@ -146,6 +168,11 @@ module.exports = {
   CHAT_STREAM,
   CHAT_COMPLETE,
   CHAT_CREATE_GROUP,
+  CHAT_DEPT_GROUP_CREATE,
+  CHAT_DEPT_GROUP_UPDATE,
+  CHAT_DEPT_GROUP_MESSAGE,
+  CHAT_DEPT_GROUP_RENAME,
+  CHAT_DEPT_GROUP_GET_ALL,
   AGENT_TASK_GET_ALL,
   AGENT_TASK_ABORT,
   AGENT_CONFIG_CHANGED,
@@ -156,6 +183,7 @@ module.exports = {
   MEMORY_GET_RECENT,
   TERMINATION_GET_PENDING,
   TERMINATION_DECIDE,
+  TERMINATION_CLEAR_PROCESSED,
   ATTACHMENT_SAVE,
   ATTACHMENT_SAVE_FROM_PATH,
   ATTACHMENT_GET_BASE64,

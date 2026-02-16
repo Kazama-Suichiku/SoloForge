@@ -121,6 +121,85 @@ const addMilestoneTool = {
   },
 };
 
+const updateMilestoneTool = {
+  name: 'pm_update_milestone',
+  description: `更新里程碑信息，包括名称、状态、截止日期等。
+
+可更新字段：
+- name: 里程碑名称
+- status: 状态（pending/in_progress/completed）
+- dueDate: 截止日期（YYYY-MM-DD）
+
+示例：pm_update_milestone(project_id="proj-xxx", milestone_id="ms-xxx", status="completed")`,
+  category: 'pm',
+  parameters: {
+    project_id: { type: 'string', description: '项目 ID', required: true },
+    milestone_id: { type: 'string', description: '里程碑 ID', required: true },
+    name: { type: 'string', description: '新名称' },
+    status: { 
+      type: 'string', 
+      description: '新状态（pending/in_progress/completed）',
+      enum: ['pending', 'in_progress', 'completed'],
+    },
+    dueDate: { type: 'string', description: '新截止日期（YYYY-MM-DD）' },
+  },
+  requiredPermissions: [],
+
+  async execute(args) {
+    if (!args.project_id) return { success: false, error: '必须指定项目 ID' };
+    if (!args.milestone_id) return { success: false, error: '必须指定里程碑 ID' };
+
+    const project = projectStore.getProject(args.project_id);
+    if (!project) return { success: false, error: `项目不存在: ${args.project_id}` };
+
+    const milestone = project.milestones.find((ms) => ms.id === args.milestone_id);
+    if (!milestone) return { success: false, error: `里程碑不存在: ${args.milestone_id}` };
+
+    const changes = [];
+
+    if (args.name && args.name !== milestone.name) {
+      changes.push(`名称: ${milestone.name} → ${args.name}`);
+      milestone.name = args.name;
+    }
+    if (args.status && args.status !== milestone.status) {
+      const validStatuses = ['pending', 'in_progress', 'completed'];
+      if (!validStatuses.includes(args.status)) {
+        return { success: false, error: `无效的状态: ${args.status}，可选: ${validStatuses.join('/')}` };
+      }
+      changes.push(`状态: ${milestone.status} → ${args.status}`);
+      milestone.status = args.status;
+      // 如果完成，设置进度为 100%
+      if (args.status === 'completed') {
+        milestone.progress = 100;
+      }
+    }
+    if (args.dueDate && args.dueDate !== milestone.dueDate) {
+      changes.push(`截止日期: ${milestone.dueDate || '未设置'} → ${args.dueDate}`);
+      milestone.dueDate = args.dueDate;
+    }
+
+    if (changes.length === 0) {
+      return { success: false, error: '没有需要更新的字段' };
+    }
+
+    projectStore.updateProject(args.project_id, { milestones: project.milestones });
+    projectStore.recalculateProgress(args.project_id);
+
+    return {
+      success: true,
+      message: `里程碑「${milestone.name}」已更新`,
+      changes,
+      milestone: {
+        id: milestone.id,
+        name: milestone.name,
+        status: milestone.status,
+        progress: milestone.progress,
+        dueDate: milestone.dueDate,
+      },
+    };
+  },
+};
+
 // ─────────────────────────────────────────────────────────────
 // 任务管理（WBS 分解）
 // ─────────────────────────────────────────────────────────────
@@ -550,6 +629,104 @@ const statusReportTool = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// 项目更新
+// ─────────────────────────────────────────────────────────────
+
+const updateProjectTool = {
+  name: 'pm_update_project',
+  description: `更新项目信息，包括名称、描述、状态等。
+
+可更新字段：
+- name: 项目名称
+- description: 项目描述
+- status: 项目状态（planning/active/paused/completed/cancelled/archived）
+- priority: 优先级（low/normal/high/critical）
+
+示例：pm_update_project(project_id="proj-xxx", status="cancelled")
+示例：pm_update_project(project_id="proj-xxx", name="新名称", priority="high")`,
+  category: 'pm',
+  parameters: {
+    project_id: { type: 'string', description: '项目 ID', required: true },
+    name: { type: 'string', description: '新项目名称' },
+    description: { type: 'string', description: '新项目描述' },
+    status: { 
+      type: 'string', 
+      description: '新状态（planning/active/paused/completed/cancelled/archived）',
+      enum: ['planning', 'active', 'paused', 'completed', 'cancelled', 'archived'],
+    },
+    priority: { 
+      type: 'string', 
+      description: '新优先级（low/normal/high/critical）',
+      enum: ['low', 'normal', 'high', 'critical'],
+    },
+  },
+  requiredPermissions: [],
+
+  async execute(args, context) {
+    if (!args.project_id) return { success: false, error: '必须指定项目 ID' };
+
+    const project = projectStore.getProject(args.project_id);
+    if (!project) return { success: false, error: `项目不存在: ${args.project_id}` };
+
+    const updates = {};
+    const changes = [];
+
+    if (args.name && args.name !== project.name) {
+      updates.name = args.name;
+      changes.push(`名称: ${project.name} → ${args.name}`);
+    }
+    if (args.description !== undefined && args.description !== project.description) {
+      updates.description = args.description;
+      changes.push('描述已更新');
+    }
+    if (args.status && args.status !== project.status) {
+      const validStatuses = ['planning', 'active', 'paused', 'completed', 'cancelled', 'archived'];
+      if (!validStatuses.includes(args.status)) {
+        return { success: false, error: `无效的状态值: ${args.status}，可选: ${validStatuses.join('/')}` };
+      }
+      updates.status = args.status;
+      changes.push(`状态: ${project.status} → ${args.status}`);
+    }
+    if (args.priority && args.priority !== project.priority) {
+      const validPriorities = ['low', 'normal', 'high', 'critical'];
+      if (!validPriorities.includes(args.priority)) {
+        return { success: false, error: `无效的优先级: ${args.priority}，可选: ${validPriorities.join('/')}` };
+      }
+      updates.priority = args.priority;
+      changes.push(`优先级: ${project.priority || 'normal'} → ${args.priority}`);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return { success: false, error: '没有需要更新的字段' };
+    }
+
+    const updated = projectStore.updateProject(args.project_id, updates);
+    if (!updated) {
+      return { success: false, error: '更新失败' };
+    }
+
+    logger.info('PM 工具: 项目已更新', {
+      projectId: args.project_id,
+      changes,
+      operator: context?.agentId,
+    });
+
+    return {
+      success: true,
+      message: `项目「${updated.name}」已更新`,
+      changes,
+      project: {
+        id: updated.id,
+        name: updated.name,
+        status: updated.status,
+        priority: updated.priority || 'normal',
+        progress: updated.progress,
+      },
+    };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────
 // 项目删除
 // ─────────────────────────────────────────────────────────────
 
@@ -614,6 +791,7 @@ const deleteProjectTool = {
 function registerPMTools() {
   toolRegistry.register(createProjectTool);
   toolRegistry.register(addMilestoneTool);
+  toolRegistry.register(updateMilestoneTool);
   toolRegistry.register(addTasksTool);
   toolRegistry.register(startProjectTool);
   toolRegistry.register(assignTaskTool);
@@ -621,6 +799,7 @@ function registerPMTools() {
   toolRegistry.register(projectDetailTool);
   toolRegistry.register(updateTaskStatusTool);
   toolRegistry.register(statusReportTool);
+  toolRegistry.register(updateProjectTool);
   toolRegistry.register(deleteProjectTool);
   logger.info('PM 工具已注册');
 }
@@ -629,6 +808,7 @@ module.exports = {
   registerPMTools,
   createProjectTool,
   addMilestoneTool,
+  updateMilestoneTool,
   addTasksTool,
   startProjectTool,
   assignTaskTool,
@@ -636,5 +816,6 @@ module.exports = {
   projectDetailTool,
   updateTaskStatusTool,
   statusReportTool,
+  updateProjectTool,
   deleteProjectTool,
 };

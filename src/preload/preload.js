@@ -104,6 +104,12 @@ const CHANNELS = {
   COMPANY_UPDATE: 'company:update',
   COMPANY_SELECT: 'company:select',
   COMPANY_GET_CURRENT: 'company:get-current',
+  // 部门群聊
+  CHAT_DEPT_GROUP_CREATE: 'chat:dept-group-create',
+  CHAT_DEPT_GROUP_UPDATE: 'chat:dept-group-update',
+  CHAT_DEPT_GROUP_MESSAGE: 'chat:dept-group-message',
+  CHAT_DEPT_GROUP_RENAME: 'chat:dept-group-rename',
+  CHAT_DEPT_GROUP_GET_ALL: 'chat:dept-group-get-all',
 };
 
 contextBridge.exposeInMainWorld('soloforge', {
@@ -222,6 +228,56 @@ contextBridge.exposeInMainWorld('soloforge', {
       ipcRenderer.on(CHANNELS.CHAT_CREATE_GROUP, handler);
       return () => ipcRenderer.removeListener(CHANNELS.CHAT_CREATE_GROUP, handler);
     },
+
+    /**
+     * 订阅后端创建部门群聊事件
+     * @param {(data: { groupId: string; departmentId: string; ownerId: string; name: string; participants: string[] }) => void} callback
+     * @returns {() => void} 取消订阅函数
+     */
+    onDeptGroupCreate: (callback) => {
+      const handler = (_event, data) => callback(data);
+      ipcRenderer.on(CHANNELS.CHAT_DEPT_GROUP_CREATE, handler);
+      return () => ipcRenderer.removeListener(CHANNELS.CHAT_DEPT_GROUP_CREATE, handler);
+    },
+
+    /**
+     * 订阅部门群聊成员变更事件
+     * @param {(data: { action: 'add' | 'remove'; groupId: string; departmentId: string; agentId: string; agentName: string }) => void} callback
+     * @returns {() => void} 取消订阅函数
+     */
+    onDeptGroupUpdate: (callback) => {
+      const handler = (_event, data) => callback(data);
+      ipcRenderer.on(CHANNELS.CHAT_DEPT_GROUP_UPDATE, handler);
+      return () => ipcRenderer.removeListener(CHANNELS.CHAT_DEPT_GROUP_UPDATE, handler);
+    },
+
+    /**
+     * 订阅部门群聊消息事件
+     * @param {(data: { groupId: string; departmentId: string; senderId: string; senderName: string; content: string; mentions: string[]; timestamp: number }) => void} callback
+     * @returns {() => void} 取消订阅函数
+     */
+    onDeptGroupMessage: (callback) => {
+      const handler = (_event, data) => callback(data);
+      ipcRenderer.on(CHANNELS.CHAT_DEPT_GROUP_MESSAGE, handler);
+      return () => ipcRenderer.removeListener(CHANNELS.CHAT_DEPT_GROUP_MESSAGE, handler);
+    },
+
+    /**
+     * 订阅部门群聊重命名事件
+     * @param {(data: { groupId: string; departmentId: string; newName: string }) => void} callback
+     * @returns {() => void} 取消订阅函数
+     */
+    onDeptGroupRename: (callback) => {
+      const handler = (_event, data) => callback(data);
+      ipcRenderer.on(CHANNELS.CHAT_DEPT_GROUP_RENAME, handler);
+      return () => ipcRenderer.removeListener(CHANNELS.CHAT_DEPT_GROUP_RENAME, handler);
+    },
+
+    /**
+     * 获取所有部门群聊（前端初始化时同步）
+     * @returns {Promise<Array<{ groupId: string; departmentId: string; ownerId: string; name: string; participants: string[] }>>}
+     */
+    getAllDepartmentGroups: () => ipcRenderer.invoke(CHANNELS.CHAT_DEPT_GROUP_GET_ALL),
   },
 
   // 附件相关（图片上传）
@@ -340,7 +396,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOperationsTasks: (filter) => ipcRenderer.invoke(CHANNELS.OPS_GET_TASKS, filter),
   getOperationsKPIs: (filter) => ipcRenderer.invoke(CHANNELS.OPS_GET_KPIS, filter),
   getRecruitRequests: () => ipcRenderer.invoke(CHANNELS.OPS_GET_RECRUIT_REQUESTS),
+  clearProcessedRecruits: () => ipcRenderer.invoke('operations:clear-recruit-processed'),
   getActivityLog: (options) => ipcRenderer.invoke(CHANNELS.OPS_GET_ACTIVITY_LOG, options),
+  clearActivityLog: () => ipcRenderer.invoke('operations:clear-activity-log'),
+  clearCancelledTasks: () => ipcRenderer.invoke('operations:clear-cancelled-tasks'),
 
   // Agent 协作
   getCollaborationActivity: (limit) => ipcRenderer.invoke(CHANNELS.COLLAB_GET_ACTIVITY, limit),
@@ -350,6 +409,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke(CHANNELS.COLLAB_GET_TASKS, agentId, options),
   getCollaborationStats: (agentId) => ipcRenderer.invoke(CHANNELS.COLLAB_GET_STATS, agentId),
   getCollaborationSummary: () => ipcRenderer.invoke(CHANNELS.COLLAB_GET_SUMMARY),
+  clearStaleTasks: (options) => ipcRenderer.invoke('collaboration:clear-stale-tasks', options),
+  clearCompletedTasks: () => ipcRenderer.invoke('collaboration:clear-completed-tasks'),
+  clearCollaborationMessages: () => ipcRenderer.invoke('collaboration:clear-messages'),
 
   // 外部链接
   openExternal: (url) => ipcRenderer.invoke(CHANNELS.OPEN_EXTERNAL, url),
@@ -391,11 +453,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 开除审批（Dashboard 老板操作）
   getTerminationRequests: () => ipcRenderer.invoke('termination:get-pending'),
   terminationDecide: (params) => ipcRenderer.invoke('termination:decide', params),
+  clearProcessedTerminations: () => ipcRenderer.invoke('termination:clear-processed'),
 
   // CFO 预算仪表板
   getTokenStats: (params) => ipcRenderer.invoke('budget:get-token-stats', params),
   getAlerts: () => ipcRenderer.invoke('budget:get-alerts'),
   acknowledgeAlert: (alertId) => ipcRenderer.invoke('budget:acknowledge-alert', alertId),
+
+  // 预算审批（Dashboard 老板操作）
+  grantBudgetOverride: (agentId, hours) => ipcRenderer.invoke('budget:grant-override', agentId, hours),
+  getBudgetOverrides: () => ipcRenderer.invoke('budget:get-overrides'),
+  revokeBudgetOverride: (agentId) => ipcRenderer.invoke('budget:revoke-override', agentId),
+  getBlockedAgents: () => ipcRenderer.invoke('budget:get-blocked-agents'),
+
+  // 工资系统
+  getSalaryConfig: () => ipcRenderer.invoke('salary:get-config'),
+  setLevelSalary: (level, amount) => ipcRenderer.invoke('salary:set-level-salary', level, amount),
+  setAgentSalary: (agentId, amount) => ipcRenderer.invoke('salary:set-agent-salary', agentId, amount),
+  payBonus: (agentId, amount, reason) => ipcRenderer.invoke('salary:pay-bonus', agentId, amount, reason),
+  getAgentBalance: (agentId) => ipcRenderer.invoke('salary:get-agent-balance', agentId),
 
   // 云同步 API
   sync: {

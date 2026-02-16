@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
+const { atomicWriteSync } = require('../utils/atomic-write');
 
 function getConfigDir() {
   return dataPath.getBasePath();
@@ -97,7 +98,8 @@ class ChatHistoryStore {
     try {
       this._ensureDir();
       const content = JSON.stringify(this._pendingData, null, 2);
-      fs.writeFileSync(getHistoryFile(), content, 'utf-8');
+      // 使用原子写入，防止写入过程中崩溃导致文件损坏
+      atomicWriteSync(getHistoryFile(), content);
 
       const convCount = this._pendingData.state
         ? Object.keys(this._pendingData.state.conversations || {}).length

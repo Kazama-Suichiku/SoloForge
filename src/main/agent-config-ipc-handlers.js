@@ -11,6 +11,7 @@ const {
   agentConfigStore,
   LEVELS,
   DEPARTMENTS,
+  departmentStore,
   AVAILABLE_MODELS,
 } = require('./config/agent-config-store');
 const { logger } = require('./utils/logger');
@@ -61,9 +62,10 @@ function setupAgentConfigIpcHandlers() {
     return Object.values(LEVELS);
   });
 
-  // 获取部门列表
+  // 获取部门列表（包括自定义部门）
   ipcMain.handle('agent-config:get-departments', async () => {
-    return Object.values(DEPARTMENTS);
+    // 返回所有部门（预设 + 自定义）
+    return departmentStore.getAll();
   });
 
   // 获取可用模型列表

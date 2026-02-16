@@ -11,15 +11,17 @@ const { logger } = require('../utils/logger');
 /**
  * @typedef {Object} Alert
  * @property {string} id - 预警 ID
- * @property {'warning' | 'critical' | 'exceeded'} level - 预警级别
+ * @property {'warning' | 'critical' | 'exceeded' | 'downgraded' | 'blocked'} level - 预警级别
  * @property {'agent' | 'global'} scope - 预警范围
  * @property {string} [agentId] - Agent ID（scope 为 agent 时）
  * @property {string} message - 预警消息
- * @property {number} currentUsage - 当前使用量
- * @property {number} limit - 限额
- * @property {number} percentage - 使用百分比
+ * @property {number} [currentUsage] - 当前使用量
+ * @property {number} [limit] - 限额
+ * @property {number} [percentage] - 使用百分比
+ * @property {string} [downgradeTo] - 降级到的模型
  * @property {string} timestamp - 时间戳
  * @property {boolean} acknowledged - 是否已确认
+ * @property {string} [type] - 预警类型：budget_warning | budget_downgraded | budget_blocked
  */
 
 /**
@@ -237,6 +239,97 @@ class AlertSystem {
     for (const alert of this.alerts) {
       alert.acknowledged = true;
     }
+  }
+
+  // ─── 预算执行相关的预警方法 ───────────────────────────────────
+
+  /**
+   * 创建预算降级预警
+   * @param {string} agentId - Agent ID
+   * @param {string} downgradeTo - 降级到的模型
+   * @param {number} usagePercent - 使用百分比
+   * @returns {Alert}
+   */
+  createBudgetDowngradedAlert(agentId, downgradeTo, usagePercent) {
+    const alert = {
+      id: `alert-downgrade-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      level: 'downgraded',
+      type: 'budget_downgraded',
+      scope: 'agent',
+      agentId,
+      message: `Agent "${agentId}" 预算使用率 ${usagePercent}%，已自动降级到便宜模型 ${downgradeTo}`,
+      downgradeTo,
+      percentage: usagePercent,
+      timestamp: new Date().toISOString(),
+      acknowledged: false,
+    };
+
+    this.alerts.push(alert);
+
+    // 保留最近 100 条预警
+    if (this.alerts.length > 100) {
+      this.alerts = this.alerts.slice(-100);
+    }
+
+    this.notifyListeners(alert);
+    logger.info('预算降级预警:', alert);
+
+    return alert;
+  }
+
+  /**
+   * 创建预算阻止预警
+   * @param {string} agentId - Agent ID
+   * @param {string} reason - 阻止原因
+   * @returns {Alert}
+   */
+  createBudgetBlockedAlert(agentId, reason) {
+    // 防止同一 Agent 短时间内重复生成阻止预警（5分钟内）
+    const recentBlocked = this.alerts.find(
+      (a) =>
+        a.type === 'budget_blocked' &&
+        a.agentId === agentId &&
+        !a.acknowledged &&
+        Date.now() - new Date(a.timestamp).getTime() < 5 * 60 * 1000
+    );
+
+    if (recentBlocked) {
+      return recentBlocked;
+    }
+
+    const alert = {
+      id: `alert-blocked-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      level: 'blocked',
+      type: 'budget_blocked',
+      scope: 'agent',
+      agentId,
+      message: `Agent "${agentId}" 因预算超限被阻止调用，需要老板审批`,
+      reason,
+      timestamp: new Date().toISOString(),
+      acknowledged: false,
+    };
+
+    this.alerts.push(alert);
+
+    // 保留最近 100 条预警
+    if (this.alerts.length > 100) {
+      this.alerts = this.alerts.slice(-100);
+    }
+
+    this.notifyListeners(alert);
+    logger.warn('预算阻止预警:', alert);
+
+    return alert;
+  }
+
+  /**
+   * 获取需要审批的被阻止 Agent 预警
+   * @returns {Alert[]}
+   */
+  getBlockedAlerts() {
+    return this.alerts.filter(
+      (a) => a.type === 'budget_blocked' && !a.acknowledged
+    );
   }
 
   /**

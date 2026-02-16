@@ -151,6 +151,61 @@ function ContactItem({ agent, conversation, actualLastMsg, isActive, onClick, on
 }
 
 /**
+ * 部门群聊卡片
+ */
+function DepartmentItem({ conversation, actualLastMsg, isActive, onClick }) {
+  const lastMessage = actualLastMsg || conversation.lastMessage;
+  const rawContent = lastMessage?.content || '';
+  const cleaned = cleanExcerpt(rawContent);
+  const excerpt = cleaned
+    ? cleaned.length > 25
+      ? `${cleaned.slice(0, 25)}...`
+      : cleaned
+    : '';
+
+  return (
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={onClick}
+        className={`w-full flex items-start gap-3 rounded-lg px-3 py-3 text-left transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] ${
+          isActive
+            ? 'bg-[var(--color-primary)]/15'
+            : 'hover:bg-[var(--border-color)]/50'
+        }`}
+      >
+        <AgentAvatar avatar={null} fallback="🏢" size="sm" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between">
+            <span
+              className={`font-medium truncate ${
+                isActive ? 'text-[var(--color-primary)]' : 'text-text-primary'
+              }`}
+            >
+              {conversation.name}
+            </span>
+            {lastMessage && (
+              <span className="text-xs text-text-secondary shrink-0 ml-2">
+                {formatTime(lastMessage.timestamp)}
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-text-secondary truncate mt-0.5">
+            {excerpt || '团队工作群'}
+          </p>
+        </div>
+        {conversation.unreadCount > 0 && (
+          <span className="shrink-0 bg-[var(--color-primary)] text-white text-xs font-medium rounded-full w-5 h-5 flex items-center justify-center">
+            {conversation.unreadCount > 9 ? '9+' : conversation.unreadCount}
+          </span>
+        )}
+      </button>
+      {/* 部门群聊不可隐藏/删除 */}
+    </div>
+  );
+}
+
+/**
  * 群聊卡片
  */
 function GroupItem({ conversation, actualLastMsg, isActive, onClick, onHide }) {
@@ -264,7 +319,22 @@ export default function ConversationList({ onNewChat }) {
       .sort((a, b) => b.lastTime - a.lastTime);
   }, [agentsMap, conversations, messagesByConversation, findPrivateChatByAgent, getActualLastMsg, hiddenConversations]);
 
-  // 群聊列表
+  // 部门群聊列表
+  const allDepartmentChats = useMemo(() => {
+    return Array.from(conversations.values())
+      .filter((c) => c.type === 'department')
+      .map((c) => {
+        const actualLast = getActualLastMsg(c.id);
+        return { ...c, _actualLastMsg: actualLast };
+      })
+      .sort((a, b) => {
+        const aTime = a._actualLastMsg?.timestamp ?? a.lastMessage?.timestamp ?? a.createdAt;
+        const bTime = b._actualLastMsg?.timestamp ?? b.lastMessage?.timestamp ?? b.createdAt;
+        return bTime - aTime;
+      });
+  }, [conversations, messagesByConversation, getActualLastMsg]);
+
+  // 普通群聊列表
   const allGroupChats = useMemo(() => {
     return Array.from(conversations.values())
       .filter((c) => c.type === 'group')
@@ -295,6 +365,15 @@ export default function ConversationList({ onNewChat }) {
     }
     return allContacts.filter(({ isHidden }) => !isHidden);
   }, [allContacts, isSearching, query]);
+
+  const visibleDepartmentChats = useMemo(() => {
+    if (isSearching) {
+      return allDepartmentChats.filter((c) =>
+        c.name.toLowerCase().includes(query)
+      );
+    }
+    return allDepartmentChats; // 部门群聊始终显示
+  }, [allDepartmentChats, isSearching, query]);
 
   const visibleGroupChats = useMemo(() => {
     if (isSearching) {
@@ -385,7 +464,7 @@ export default function ConversationList({ onNewChat }) {
 
       {/* 联系人列表 */}
       <div className="flex-1 overflow-auto px-2 py-1">
-        {visibleContacts.length === 0 && visibleGroupChats.length === 0 ? (
+        {visibleContacts.length === 0 && visibleDepartmentChats.length === 0 && visibleGroupChats.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-text-secondary">
             <p className="text-sm">{isSearching ? '没有匹配的联系人' : '暂无联系人'}</p>
             {isSearching && (
@@ -401,20 +480,51 @@ export default function ConversationList({ onNewChat }) {
               </div>
             )}
 
-            {/* Agent 联系人 */}
-            {visibleContacts.map(({ agent, conversation, actualLastMsg, isHidden }) => (
-              <ContactItem
-                key={agent.id}
-                agent={agent}
-                conversation={conversation}
-                actualLastMsg={actualLastMsg}
-                isActive={!!conversation && conversation.id === currentConversationId}
-                onClick={() => handleAgentClick(agent)}
-                onHide={isSearching ? null : handleHide}
-              />
-            ))}
+            {/* 部门群聊（置顶显示） */}
+            {visibleDepartmentChats.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <div className="flex-1 h-px bg-[var(--border-color)]" />
+                  <span className="text-xs text-text-secondary">部门</span>
+                  <div className="flex-1 h-px bg-[var(--border-color)]" />
+                </div>
+                {visibleDepartmentChats.map((conv) => (
+                  <DepartmentItem
+                    key={conv.id}
+                    conversation={conv}
+                    actualLastMsg={conv._actualLastMsg}
+                    isActive={conv.id === currentConversationId}
+                    onClick={() => handleGroupClick(conv.id)}
+                  />
+                ))}
+              </>
+            )}
 
-            {/* 群聊分隔 */}
+            {/* Agent 联系人 */}
+            {visibleContacts.length > 0 && (
+              <>
+                {visibleDepartmentChats.length > 0 && (
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <div className="flex-1 h-px bg-[var(--border-color)]" />
+                    <span className="text-xs text-text-secondary">同事</span>
+                    <div className="flex-1 h-px bg-[var(--border-color)]" />
+                  </div>
+                )}
+                {visibleContacts.map(({ agent, conversation, actualLastMsg, isHidden }) => (
+                  <ContactItem
+                    key={agent.id}
+                    agent={agent}
+                    conversation={conversation}
+                    actualLastMsg={actualLastMsg}
+                    isActive={!!conversation && conversation.id === currentConversationId}
+                    onClick={() => handleAgentClick(agent)}
+                    onHide={isSearching ? null : handleHide}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* 普通群聊分隔 */}
             {visibleGroupChats.length > 0 && (
               <>
                 <div className="flex items-center gap-2 px-3 py-2 mt-2">

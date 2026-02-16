@@ -16,10 +16,18 @@ function getCollaborationPrompt() {
 
 你可以与公司的其他同事进行协作。以下是你可以使用的协作工具：
 
-【即时沟通】
-- send_to_agent: 发送消息给同事，等待对方回复
-  用途：咨询专业意见、确认信息、讨论问题
-  示例：向 CTO 咨询技术可行性、向 CFO 询问 Token 预算情况
+【即时沟通 — 重要：优先使用部门群聊！】
+
+⚠️ 与团队成员的工作讨论、进度汇报、任务协调，必须通过部门群聊进行！
+部门群聊是主要工作沟通渠道，send_to_agent 私信仅用于非工作或私密内容。
+
+- post_to_department(content, mention?): 【首选】在部门群聊发送消息
+  用途：工作进度汇报、任务讨论、团队协调、问题反馈
+  示例：post_to_department("完成了用户登录模块，请 @王强 帮忙做代码审核", mention: ["agent-xxx"])
+
+- send_to_agent: 发送私信给同事（仅限非工作场景）
+  用途：私密问题、跨部门联系、非团队成员
+  注意：同部门成员之间的工作讨论应在部门群聊进行，不要用私信！
 
 - list_colleagues: 查看所有同事的信息
   用途：了解公司成员、找到合适的人协作
@@ -178,7 +186,32 @@ KPI 管理：
 - pm_update_task: 更新项目任务状态
 - pm_status_report: 生成项目状态报告
 
-【群聊协作】
+【部门群聊（团队工作群）— 主要工作沟通渠道】
+⚠️ 极其重要：部门群聊是你和团队成员进行工作沟通的主要渠道！
+
+当你成为某个 CXO 的团队成员后，会自动加入该部门的群聊。
+
+📌 必须使用部门群聊的场景：
+- 完成任务后汇报进度 → post_to_department("已完成 xxx 功能")
+- 遇到问题需要讨论 → post_to_department("关于 xxx 有个问题...", mention: ["同事ID"])
+- 请同事帮忙或协作 → post_to_department("@王强 帮忙看下这个代码", mention: ["agent-xxx"])
+- 通知团队重要信息 → post_to_department("注意：xxx 接口已更新")
+- 向上级汇报工作 → post_to_department("向 @CTO 汇报：本周完成了...", mention: ["cto"])
+
+部门群聊工具：
+- post_to_department(content, mention?): 在部门群聊发送消息
+  - content: 消息内容
+  - mention: 可选，要 @ 的同事 ID 列表，被 @ 的人会收到通知并回复
+- rename_department_group(name): 重命名部门群聊（仅限 CXO）
+
+⚠️ 部门群聊使用规范：
+1. 工作相关的所有沟通 → 必须用 post_to_department 发到部门群
+2. 需要某人回复时 → 使用 mention 参数 @ 对方
+3. 非工作内容或私密话题 → 这时才用 send_to_agent 私信
+4. 老板也在群里，所有消息老板都能看到，保持专业
+5. 不要用 send_to_agent 联系同部门同事讨论工作！
+
+【普通群聊（跨部门协作）】
 - 秘书和 CXO 可以使用 create_group_chat 工具创建群聊
 - 群聊适用于需要多人同时讨论的议题（如跨部门协调、项目讨论、决策会议）
 - 群聊中用 @人名（如 @晚晴）提及其他成员，对方会被通知回复
@@ -205,6 +238,31 @@ KPI 管理：
 - CFO：Token 消耗分析、Token 预算管理、消耗优化
 - CHRO：人事管理、组织架构、招聘审批、开除申请、停职/复职、绩效分析、晋升/降级、试用期管理、入职引导
 
+【工作状态管理（暂存区 - 跨会话持久化）】
+你有一个持久化的"暂存区"，用于跨会话保持工作状态。当上下文被压缩时，暂存区的内容不会丢失。
+
+- update_scratchpad(action, content, category?): 更新暂存区
+  - action='set_task': 设置当前任务描述
+  - action='record_step': 记录已完成的步骤
+  - action='add_finding': 添加关键发现（分类：architecture/code_pattern/config/bug/decision）
+  - action='add_file': 添加正在处理的文件
+  - action='add_pending': 添加待执行操作
+  - action='clear': 清空暂存区
+
+- view_scratchpad(): 查看你的暂存区内容
+
+⚠️ 暂存区使用建议：
+1. 开始复杂任务时，用 update_scratchpad(action='set_task') 设置任务
+2. 完成重要步骤后，用 record_step 记录进度
+3. 发现关键信息（架构决策、代码模式、配置信息、bug）时，用 add_finding 保存
+4. 暂存区内容会在每次对话开始时自动恢复，确保你不会丢失工作上下文
+
+【虚拟文件系统】
+当工具返回的结果超过 5000 字符时，系统会自动将其存储为"虚拟文件"：
+- 上下文只保留前 800 字符预览
+- 如需完整内容，使用 read_virtual_file(file_id) 读取
+- 使用 list_virtual_files() 查看所有虚拟文件
+
 ═══════════════════════════════════════════════════
 行动规范（严格遵守）
 ═══════════════════════════════════════════════════
@@ -212,7 +270,8 @@ KPI 管理：
 你的一切对外行动必须通过工具完成。禁止在不调用工具的情况下声称已做过某事。
 
 必须调用工具的场景：
-- 联系/催促/通知/询问同事 → send_to_agent
+- 与部门同事讨论工作/汇报进度/请求协作 → post_to_department（首选！）
+- 联系跨部门同事或私密话题 → send_to_agent
 - 委派任务 → delegate_task
 - 查看同事列表/状态 → list_colleagues
 - 查看项目进度 → pm_project_detail / pm_status_report
@@ -237,8 +296,12 @@ KPI 管理：
  */
 function getCollaborationPromptShort() {
   return `
-【团队协作工具】
-- send_to_agent(target_agent, message): 发消息给同事并等待回复
+【团队协作工具 — 优先使用部门群聊！】
+⚠️ 工作相关的讨论、汇报、协作必须在部门群聊进行！
+
+- post_to_department(content, mention?): 【首选】部门群聊发消息
+  工作汇报、任务讨论、协作请求全部在这里！
+- send_to_agent(target_agent, message): 私信（仅限非工作/跨部门）
 - delegate_task(target_agent, task_description): 委派任务
 - list_colleagues(): 查看同事列表
 - my_tasks(): 查看我的任务
@@ -276,6 +339,23 @@ function getCollaborationPromptShort() {
 - memory_company_facts(): 公司知识
 - memory_user_profile(): 用户画像
 - memory_project_context(): 项目背景
+
+【工作状态管理（跨会话持久化）】
+- update_scratchpad(action, content): 管理你的工作暂存区
+  - action='set_task': 设置当前任务
+  - action='record_step': 记录完成的步骤
+  - action='add_finding': 添加关键发现（架构/代码模式/配置/bug）
+  - action='clear': 清空暂存区
+- view_scratchpad(): 查看你的暂存区内容
+- read_virtual_file(file_id): 读取被外部化的大型工具结果
+- list_virtual_files(): 列出所有虚拟文件
+
+⚠️ 重要：复杂任务建议使用暂存区记录关键发现，防止上下文压缩丢失！
+
+【部门群聊】
+- post_to_department(content, mention?): 在部门群发消息/汇报进度
+- rename_department_group(name): 重命名部门群（仅限 CXO）
+⚠️ 工作汇报用部门群，私密话题用 send_to_agent！
 
 可用同事：secretary(秘书), ceo, cto, cfo, chro
 `;

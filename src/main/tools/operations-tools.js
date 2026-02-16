@@ -211,6 +211,59 @@ const listGoalsTool = {
   },
 };
 
+/**
+ * 删除目标
+ */
+const deleteGoalTool = {
+  name: 'ops_delete_goal',
+  description: `删除一个业务目标。删除后数据将被永久移除。
+
+注意：删除前请确认目标确实不再需要。`,
+  category: 'operations',
+  parameters: {
+    goal_id: {
+      type: 'string',
+      description: '要删除的目标 ID',
+      required: true,
+    },
+    confirm: {
+      type: 'boolean',
+      description: '确认删除（必须为 true）',
+      required: true,
+    },
+  },
+  requiredPermissions: [],
+
+  async execute(args, context) {
+    if (!args.goal_id) return { success: false, error: '必须指定目标 ID' };
+    if (!args.confirm) return { success: false, error: '必须设置 confirm=true 确认删除' };
+
+    const config = agentConfigStore.get(context?.agentId) || {};
+    const result = operationsStore.deleteGoal(
+      args.goal_id,
+      context?.agentId,
+      config.name || '未知'
+    );
+
+    if (!result.success) {
+      return result;
+    }
+
+    logger.info('删除目标', { goalId: args.goal_id, title: result.deletedGoal.title });
+
+    return {
+      success: true,
+      message: `目标「${result.deletedGoal.title}」已被永久删除`,
+      deletedGoal: {
+        id: result.deletedGoal.id,
+        title: result.deletedGoal.title,
+        type: result.deletedGoal.type,
+        status: result.deletedGoal.status,
+      },
+    };
+  },
+};
+
 // ─────────────────────────────────────────────────────────────
 // KPI 管理工具
 // ─────────────────────────────────────────────────────────────
@@ -400,6 +453,59 @@ const listKPIsTool = {
   },
 };
 
+/**
+ * 删除 KPI
+ */
+const deleteKPITool = {
+  name: 'ops_delete_kpi',
+  description: `删除一个 KPI 指标。删除后数据将被永久移除。
+
+注意：删除前请确认 KPI 确实不再需要。`,
+  category: 'operations',
+  parameters: {
+    kpi_id: {
+      type: 'string',
+      description: '要删除的 KPI ID',
+      required: true,
+    },
+    confirm: {
+      type: 'boolean',
+      description: '确认删除（必须为 true）',
+      required: true,
+    },
+  },
+  requiredPermissions: [],
+
+  async execute(args, context) {
+    if (!args.kpi_id) return { success: false, error: '必须指定 KPI ID' };
+    if (!args.confirm) return { success: false, error: '必须设置 confirm=true 确认删除' };
+
+    const config = agentConfigStore.get(context?.agentId) || {};
+    const result = operationsStore.deleteKPI(
+      args.kpi_id,
+      context?.agentId,
+      config.name || '未知'
+    );
+
+    if (!result.success) {
+      return result;
+    }
+
+    logger.info('删除 KPI', { kpiId: args.kpi_id, name: result.deletedKPI.name });
+
+    return {
+      success: true,
+      message: `KPI「${result.deletedKPI.name}」已被永久删除`,
+      deletedKPI: {
+        id: result.deletedKPI.id,
+        name: result.deletedKPI.name,
+        target: result.deletedKPI.target,
+        current: result.deletedKPI.current,
+      },
+    };
+  },
+};
+
 // ─────────────────────────────────────────────────────────────
 // 任务管理工具
 // ─────────────────────────────────────────────────────────────
@@ -409,7 +515,11 @@ const listKPIsTool = {
  */
 const createTaskTool = {
   name: 'ops_create_task',
-  description: '创建任务并分配给团队成员。',
+  description: `创建任务并分配给团队成员。
+
+建议：
+- 如果任务属于某个项目，请指定 project_id 以便追踪
+- 项目取消时，关联的任务会自动取消`,
   category: 'operations',
   parameters: {
     title: {
@@ -430,6 +540,11 @@ const createTaskTool = {
     priority: {
       type: 'string',
       description: '优先级: high, medium, low',
+      required: false,
+    },
+    project_id: {
+      type: 'string',
+      description: '关联的项目 ID（强烈建议指定，便于项目管理和级联操作）',
       required: false,
     },
     goal_id: {
@@ -455,6 +570,26 @@ const createTaskTool = {
     const assigneeId = resolvedAssignee.agentId;
     const assigneeConfig = resolvedAssignee.config;
 
+    // 如果指定了项目，获取项目名称
+    let projectName = null;
+    if (args.project_id) {
+      try {
+        const { projectStore } = require('../pm/project-store');
+        const project = projectStore.getProject(args.project_id);
+        if (project) {
+          projectName = project.name;
+          // 检查项目状态
+          if (project.status === 'cancelled') {
+            return { success: false, error: `项目 "${project.name}" 已取消，无法创建新任务` };
+          }
+        } else {
+          return { success: false, error: `找不到项目: ${args.project_id}` };
+        }
+      } catch (e) {
+        // projectStore 可能未初始化
+      }
+    }
+
     const task = operationsStore.createTask({
       title: args.title,
       description: args.description,
@@ -463,19 +598,23 @@ const createTaskTool = {
       assigneeName: assigneeConfig.name,
       requesterId: context?.agentId,
       requesterName: requesterConfig.name || '未知',
+      projectId: args.project_id || null,
+      projectName: projectName,
       goalId: args.goal_id,
       dueDate: args.due_date,
     });
 
     return {
       success: true,
-      message: `任务已创建并分配给 ${assigneeConfig.name}`,
+      message: `任务已创建并分配给 ${assigneeConfig.name}${projectName ? ` [项目: ${projectName}]` : ''}`,
       task: {
         id: task.id,
         title: task.title,
         assignee: task.assigneeName,
         priority: task.priority,
         status: task.status,
+        projectId: task.projectId,
+        projectName: task.projectName,
       },
     };
   },
@@ -486,12 +625,27 @@ const createTaskTool = {
  */
 const updateTaskTool = {
   name: 'ops_update_task',
-  description: '更新任务状态。',
+  description: `更新运营任务（Operations Task）的状态或优先级。
+
+**重要**: 这是运营任务系统，不是委派任务系统！
+- 运营任务 ID 格式: task-xxxxxxxxxx-xxxx（带 task- 前缀）
+- 委派任务请使用 update_delegated_task 或 cancel_delegated_task 工具
+
+**使用前**: 请先用 ops_list_tasks 或 ops_my_tasks 获取有效的任务 ID。
+
+**可用状态**:
+- todo: 待办
+- in_progress: 进行中
+- review: 待审核
+- done: 已完成
+- cancelled: 已取消（需要提供 cancel_reason）
+
+**取消任务**: 将 status 设为 cancelled 即可取消任务。`,
   category: 'operations',
   parameters: {
     task_id: {
       type: 'string',
-      description: '任务 ID',
+      description: '运营任务 ID（格式: task-xxxxxxxxxx-xxxx，请先用 ops_list_tasks 查询）',
       required: true,
     },
     status: {
@@ -504,6 +658,11 @@ const updateTaskTool = {
       description: '优先级: high, medium, low',
       required: false,
     },
+    cancel_reason: {
+      type: 'string',
+      description: '取消原因（当 status=cancelled 时建议提供）',
+      required: false,
+    },
   },
   requiredPermissions: [],
 
@@ -513,6 +672,7 @@ const updateTaskTool = {
     const updates = {};
     if (args.status) updates.status = args.status;
     if (args.priority) updates.priority = args.priority;
+    if (args.cancel_reason) updates.cancelReason = args.cancel_reason;
 
     const task = operationsStore.updateTask(
       args.task_id,
@@ -522,17 +682,24 @@ const updateTaskTool = {
     );
 
     if (!task) {
-      return { success: false, error: '任务不存在' };
+      // 提供更详细的错误信息
+      return { 
+        success: false, 
+        error: `任务 ${args.task_id} 不存在。请先使用 ops_list_tasks 工具获取有效的运营任务列表。如果你要操作的是委派任务（Agent 间协作任务），请使用 update_delegated_task 或 cancel_delegated_task 工具。`,
+      };
     }
 
+    const statusMsg = args.status === 'cancelled' ? '已取消' : '已更新';
     return {
       success: true,
-      message: `任务已更新: ${task.title}`,
+      message: `任务${statusMsg}: ${task.title}`,
       task: {
         id: task.id,
         title: task.title,
         status: task.status,
         priority: task.priority,
+        cancelReason: task.cancelReason,
+        cancelledAt: task.cancelledAt,
       },
     };
   },
@@ -585,6 +752,59 @@ const listTasksTool = {
         dueDate: t.dueDate,
         createdAt: formatLocalTime(t.createdAt),
       })),
+    };
+  },
+};
+
+/**
+ * 删除任务
+ */
+const deleteTaskTool = {
+  name: 'ops_delete_task',
+  description: `删除一个任务。删除后数据将被永久移除。
+
+注意：删除前请确认任务确实不再需要。`,
+  category: 'operations',
+  parameters: {
+    task_id: {
+      type: 'string',
+      description: '要删除的任务 ID',
+      required: true,
+    },
+    confirm: {
+      type: 'boolean',
+      description: '确认删除（必须为 true）',
+      required: true,
+    },
+  },
+  requiredPermissions: [],
+
+  async execute(args, context) {
+    if (!args.task_id) return { success: false, error: '必须指定任务 ID' };
+    if (!args.confirm) return { success: false, error: '必须设置 confirm=true 确认删除' };
+
+    const config = agentConfigStore.get(context?.agentId) || {};
+    const result = operationsStore.deleteTask(
+      args.task_id,
+      context?.agentId,
+      config.name || '未知'
+    );
+
+    if (!result.success) {
+      return result;
+    }
+
+    logger.info('删除任务', { taskId: args.task_id, title: result.deletedTask.title });
+
+    return {
+      success: true,
+      message: `任务「${result.deletedTask.title}」已被永久删除`,
+      deletedTask: {
+        id: result.deletedTask.id,
+        title: result.deletedTask.title,
+        assignee: result.deletedTask.assigneeName,
+        status: result.deletedTask.status,
+      },
     };
   },
 };
@@ -856,16 +1076,19 @@ function registerOperationsTools() {
   toolRegistry.register(createGoalTool);
   toolRegistry.register(updateGoalTool);
   toolRegistry.register(listGoalsTool);
+  toolRegistry.register(deleteGoalTool);
 
   // KPI
   toolRegistry.register(createKPITool);
   toolRegistry.register(updateKPITool);
   toolRegistry.register(listKPIsTool);
+  toolRegistry.register(deleteKPITool);
 
   // 任务
   toolRegistry.register(createTaskTool);
   toolRegistry.register(updateTaskTool);
   toolRegistry.register(listTasksTool);
+  toolRegistry.register(deleteTaskTool);
   toolRegistry.register(claimTaskTool);
   toolRegistry.register(reportTaskProgressTool);
   toolRegistry.register(myAssignedTasksTool);
@@ -879,12 +1102,15 @@ module.exports = {
   createGoalTool,
   updateGoalTool,
   listGoalsTool,
+  deleteGoalTool,
   createKPITool,
   updateKPITool,
   listKPIsTool,
+  deleteKPITool,
   createTaskTool,
   updateTaskTool,
   listTasksTool,
+  deleteTaskTool,
   claimTaskTool,
   reportTaskProgressTool,
   myAssignedTasksTool,

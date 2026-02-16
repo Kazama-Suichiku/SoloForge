@@ -10,7 +10,9 @@ const { logger } = require('../utils/logger');
 const { agentConfigStore } = require('../config/agent-config-store');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { dataPath } = require('../account/data-path');
+const { scratchpadManager } = require('../context/agent-scratchpad');
 
 function getDataDir() {
   return dataPath.getBasePath();
@@ -20,12 +22,17 @@ function getCommFile() {
   return path.join(dataPath.getBasePath(), 'agent-communications.json');
 }
 
-// 上下文配置
-const MAX_HISTORY_MESSAGES = 15; // Agent 间对话最多保留的历史条数（自动注入）
-const HISTORY_PAGE_SIZE = 15; // 分页查看历史时每页条数
-const MAX_USER_CONTEXT_LENGTH = 500; // 用户对话摘要最大长度
-const MAX_INTERNAL_TOOL_ITERATIONS = 20; // 安全上限，防止无限循环
+// 上下文配置（已优化：参考 Cursor/Claude Code 最佳实践）
+const MAX_HISTORY_MESSAGES = 30; // Agent 间对话最多保留的历史条数（从 15 增加到 30）
+const HISTORY_PAGE_SIZE = 30; // 分页查看历史时每页条数
+const MAX_USER_CONTEXT_LENGTH = 800; // 用户对话摘要最大长度（从 500 增加到 800）
+const MAX_INTERNAL_TOOL_ITERATIONS = 100; // 安全上限，允许复杂任务（从 20 增加到 100）
 const BROWSE_CONTENT_LIMIT = 600; // 分页浏览时单条消息内容截断长度（防 token 爆炸）
+
+// 协作健壮性配置
+const MAX_NESTING_DEPTH = 5; // 最大嵌套深度，防止 A→B→C→... 无限链
+const DEFAULT_TIMEOUT_MS = 120000; // 默认通信超时时间（2分钟）
+const DELEGATE_TIMEOUT_MS = 300000; // 委派任务超时时间（5分钟）
 
 /**
  * 截断过长文本，附带原始长度提示
@@ -83,6 +90,14 @@ class AgentCommunicationManager {
     /** @type {Object | null} - 工具注册表引用 */
     this.toolRegistry = null;
 
+    // ═══════════════════════════════════════════════════════════
+    // 协作健壮性：消息队列和并发控制
+    // ═══════════════════════════════════════════════════════════
+    /** @type {Map<string, Array<{task: Function, resolve: Function, reject: Function}>>} - 每个 Agent 的消息队列 */
+    this._agentQueues = new Map();
+    /** @type {Map<string, boolean>} - 每个 Agent 是否正在处理消息 */
+    this._agentProcessing = new Map();
+
     this._ensureDataDir();
     this._loadFromDisk();
   }
@@ -94,8 +109,153 @@ class AgentCommunicationManager {
   reinitialize() {
     this.messages = [];
     this.delegatedTasks = [];
+    // 清空消息队列
+    this._agentQueues.clear();
+    this._agentProcessing.clear();
     this._ensureDataDir();
     this._loadFromDisk();
+  }
+
+  /**
+   * 清理指定 Agent 的消息队列（开除时调用）
+   * @param {string} agentId - 要清理的 Agent ID
+   * @returns {{queueCleared: number, wasProcessing: boolean}}
+   */
+  clearAgentQueues(agentId) {
+    // 获取队列中待处理的任务数
+    const queue = this._agentQueues.get(agentId) || [];
+    const queueCleared = queue.length;
+
+    // 拒绝所有排队中的任务
+    for (const { reject } of queue) {
+      try {
+        reject(new Error('Agent 已被开除，任务已取消'));
+      } catch (e) {
+        // 忽略 reject 时的错误
+      }
+    }
+
+    // 清理队列和处理状态
+    const wasProcessing = this._agentProcessing.get(agentId) || false;
+    this._agentQueues.delete(agentId);
+    this._agentProcessing.delete(agentId);
+
+    if (queueCleared > 0 || wasProcessing) {
+      logger.info(`AgentCommunication: 已清理 Agent ${agentId} 的通信队列`, {
+        queueCleared,
+        wasProcessing,
+      });
+    }
+
+    return { queueCleared, wasProcessing };
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 消息队列和并发控制（协作健壮性核心）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 将任务加入 Agent 的消息队列
+   * 确保同一 Agent 同时只处理一个任务
+   * @param {string} agentId - 目标 Agent ID
+   * @param {Function} task - 异步任务函数
+   * @returns {Promise<any>} 任务执行结果
+   */
+  _enqueue(agentId, task) {
+    return new Promise((resolve, reject) => {
+      if (!this._agentQueues.has(agentId)) {
+        this._agentQueues.set(agentId, []);
+      }
+      this._agentQueues.get(agentId).push({ task, resolve, reject });
+      // 尝试处理队列
+      this._processQueue(agentId);
+    });
+  }
+
+  /**
+   * 处理 Agent 的消息队列
+   * @param {string} agentId - Agent ID
+   */
+  async _processQueue(agentId) {
+    // 如果该 Agent 正在处理，退出（当前任务完成后会继续处理队列）
+    if (this._agentProcessing.get(agentId)) {
+      return;
+    }
+
+    const queue = this._agentQueues.get(agentId);
+    if (!queue || queue.length === 0) {
+      return;
+    }
+
+    // 标记正在处理
+    this._agentProcessing.set(agentId, true);
+
+    // 取出队列中的第一个任务
+    const { task, resolve, reject } = queue.shift();
+
+    try {
+      // 执行任务
+      const result = await task();
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    } finally {
+      // 标记处理完成
+      this._agentProcessing.set(agentId, false);
+      // 使用 setImmediate 让出事件循环，然后继续处理队列中的下一个任务
+      setImmediate(() => this._processQueue(agentId));
+    }
+  }
+
+  /**
+   * 检测循环调用
+   * @param {string[]} callChain - 调用链（从发起者到当前）
+   * @param {string} targetAgent - 目标 Agent
+   * @returns {{isCycle: boolean, cycleInfo?: string}}
+   */
+  _detectCycle(callChain, targetAgent) {
+    if (!callChain || callChain.length === 0) {
+      return { isCycle: false };
+    }
+
+    // 检查目标是否已在调用链中
+    if (callChain.includes(targetAgent)) {
+      const cycleStart = callChain.indexOf(targetAgent);
+      const cycleInfo = [...callChain.slice(cycleStart), targetAgent].join(' → ');
+      return { isCycle: true, cycleInfo };
+    }
+
+    return { isCycle: false };
+  }
+
+  /**
+   * 检查嵌套深度
+   * @param {number} nestingDepth - 当前嵌套深度
+   * @returns {{tooDeep: boolean, maxDepth: number}}
+   */
+  _checkNestingDepth(nestingDepth) {
+    if (nestingDepth >= MAX_NESTING_DEPTH) {
+      return { tooDeep: true, maxDepth: MAX_NESTING_DEPTH };
+    }
+    return { tooDeep: false, maxDepth: MAX_NESTING_DEPTH };
+  }
+
+  /**
+   * 带超时的 Promise 包装
+   * @param {Promise} promise - 原始 Promise
+   * @param {number} timeoutMs - 超时时间（毫秒）
+   * @param {string} operationName - 操作名称（用于错误信息）
+   * @returns {Promise}
+   */
+  _withTimeout(promise, timeoutMs, operationName = '操作') {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`${operationName}超时（${timeoutMs / 1000}秒）`));
+        }, timeoutMs);
+      }),
+    ]);
   }
 
   /**
@@ -147,17 +307,17 @@ class AgentCommunicationManager {
    */
   _saveToDisk() {
     try {
-      fs.writeFileSync(
-        getCommFile(),
-        JSON.stringify(
-          {
-            messages: this.messages.slice(-500), // 只保留最近 500 条消息
-            delegatedTasks: this.delegatedTasks.slice(-200), // 只保留最近 200 个任务
-          },
-          null,
-          2
-        )
+      const { atomicWriteSync } = require('../utils/atomic-write');
+      const content = JSON.stringify(
+        {
+          messages: this.messages.slice(-500), // 只保留最近 500 条消息
+          delegatedTasks: this.delegatedTasks.slice(-200), // 只保留最近 200 个任务
+        },
+        null,
+        2
       );
+      // 使用原子写入，防止写入过程中崩溃导致文件损坏
+      atomicWriteSync(getCommFile(), content);
     } catch (error) {
       logger.error('保存 Agent 通信记录失败', error);
     }
@@ -179,20 +339,23 @@ class AgentCommunicationManager {
    * 让控制面板能看到通过内部通信工作的 Agent
    * @param {string} agentId - Agent ID
    * @param {string} taskDescription - 任务描述
+   * @returns {string|null} taskId - 用于后续 _untrackAgentActivity 匹配
    */
   _trackAgentActivity(agentId, taskDescription) {
-    if (!this.chatManager) return;
+    if (!this.chatManager) return null;
     try {
       // 使用 ChatManager 的 _startTask 方法注册
       if (typeof this.chatManager._startTask === 'function') {
-        this.chatManager._startTask(agentId, {
+        const { taskId } = this.chatManager._startTask(agentId, {
           task: taskDescription,
           stage: 'thinking',
         });
+        return taskId;
       }
     } catch (error) {
       logger.debug('注册活跃任务追踪失败:', error.message);
     }
+    return null;
   }
 
   /**
@@ -214,12 +377,13 @@ class AgentCommunicationManager {
   /**
    * 取消注册 Agent 活跃状态
    * @param {string} agentId - Agent ID
+   * @param {string} [taskId] - 任务 ID，用于匹配防止误删
    */
-  _untrackAgentActivity(agentId) {
+  _untrackAgentActivity(agentId, taskId) {
     if (!this.chatManager) return;
     try {
       if (typeof this.chatManager._finishTask === 'function') {
-        this.chatManager._finishTask(agentId);
+        this.chatManager._finishTask(agentId, taskId);
       }
     } catch (error) {
       logger.debug('取消活跃任务追踪失败:', error.message);
@@ -330,7 +494,7 @@ class AgentCommunicationManager {
    * @param {Object} [options] - 额外选项
    * @param {'planning' | 'full'} [options.toolFilter='full'] - 工具过滤模式
    * @param {Function} [options.onToolExecuted] - 工具执行后的回调（可设置 break flag）
-   * @returns {Promise<string>} 最终回复
+   * @returns {Promise<{content: string, toolsUsed: string[]}>} 最终回复和使用的工具列表
    */
   async _chatWithToolLoop(agent, message, history, context = {}, options = {}) {
     const { toolFilter = 'full', onToolExecuted } = options;
@@ -344,13 +508,19 @@ class AgentCommunicationManager {
     let iteration = 0;
     let shouldBreak = false;
 
-    // 追踪本次调用中实际执行过的工具名称
-    this._lastToolsUsed = [];
+    // 追踪本次调用中实际执行过的工具名称（局部变量，避免实例共享问题）
+    const toolsUsedInThisCall = [];
 
     // 获取 Agent 可用的工具 schema（根据过滤模式）
     const toolSchema = this._getFilteredToolSchema(agent.id, toolFilter);
 
-    while (iteration < MAX_INTERNAL_TOOL_ITERATIONS && !shouldBreak) {
+    // CXO 级别不限制工具调用次数，其他 Agent 限制 100 次
+    const agentConfig = agentConfigStore.get(agent.id);
+    const isCxoLevel = agentConfig?.level === 'c_level' || 
+                       ['ceo', 'cto', 'cfo', 'chro', 'secretary'].includes(agent.role);
+    const maxIterations = isCxoLevel ? Infinity : MAX_INTERNAL_TOOL_ITERATIONS;
+
+    while (iteration < maxIterations && !shouldBreak) {
       iteration++;
 
       // 构建包含工具说明的消息（包括权限上下文）
@@ -402,6 +572,9 @@ class AgentCommunicationManager {
           agentId: agent.id,
           agentName: agent.name,
           isInternalCommunication: true, // 标记为内部通信
+          // 传递调用链和嵌套深度（用于协作工具的循环检测）
+          callChain: context.callChain || [],
+          nestingDepth: context.nestingDepth || 0,
           ...context,
         });
 
@@ -415,11 +588,11 @@ class AgentCommunicationManager {
           { role: 'user', content: `工具执行结果：\n\n${formattedResults}` },
         ];
 
-        // 记录已使用的工具
+        // 记录已使用的工具（局部变量）
         const usedToolNames = toolCalls.map((t) => t.name).join(', ');
         for (const tc of toolCalls) {
-          if (!this._lastToolsUsed.includes(tc.name)) {
-            this._lastToolsUsed.push(tc.name);
+          if (!toolsUsedInThisCall.includes(tc.name)) {
+            toolsUsedInThisCall.push(tc.name);
           }
         }
 
@@ -456,15 +629,16 @@ class AgentCommunicationManager {
       }
     }
 
-    if (iteration >= MAX_INTERNAL_TOOL_ITERATIONS) {
-      logger.warn(`Agent 内部通信: ${agent.id} 达到最大工具调用轮数`, { iteration });
+    if (iteration >= maxIterations) {
+      logger.warn(`Agent 内部通信: ${agent.id} 达到最大工具调用轮数`, { iteration, maxIterations });
       // 不要显示这个提示，让 Agent 的最后回复作为最终内容
       if (!finalContent.trim()) {
         finalContent = '（任务处理中，请稍后查看结果）';
       }
     }
 
-    return finalContent;
+    // 返回内容和使用的工具列表（避免实例级共享问题）
+    return { content: finalContent, toolsUsed: toolsUsedInThisCall };
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -710,6 +884,7 @@ class AgentCommunicationManager {
   /**
    * Agent 发送消息给另一个 Agent（同步，等待回复）
    * 支持通信历史记忆、用户对话上下文，以及工具调用
+   * 协作健壮性：消息队列、循环检测、嵌套深度限制、超时机制
    * @param {Object} params
    * @param {string} params.fromAgent - 发送方 Agent ID
    * @param {string} params.toAgent - 接收方 Agent ID
@@ -717,13 +892,60 @@ class AgentCommunicationManager {
    * @param {string} [params.conversationId] - 关联的用户对话 ID
    * @param {boolean} [params.includeUserContext=true] - 是否包含用户对话上下文
    * @param {boolean} [params.allowTools=true] - 是否允许目标 Agent 使用工具
+   * @param {string[]} [params.callChain=[]] - 调用链（用于循环检测）
+   * @param {number} [params.nestingDepth=0] - 当前嵌套深度
+   * @param {number} [params.timeout] - 超时时间（毫秒）
    * @returns {Promise<{success: boolean, response?: string, error?: string}>}
    */
   async sendMessage(params) {
-    const { fromAgent, toAgent, message, conversationId, includeUserContext = true, allowTools = true, maxHistory, historyStrategy } = params;
+    const {
+      fromAgent,
+      toAgent,
+      message,
+      conversationId,
+      includeUserContext = true,
+      allowTools = true,
+      maxHistory,
+      historyStrategy,
+      callChain = [],
+      nestingDepth = 0,
+      timeout = DEFAULT_TIMEOUT_MS,
+    } = params;
 
     if (!this.chatManager) {
       return { success: false, error: 'ChatManager 未初始化' };
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 协作健壮性检查
+    // ═══════════════════════════════════════════════════════════
+
+    // 1. 循环调用检测
+    const cycleCheck = this._detectCycle(callChain, toAgent);
+    if (cycleCheck.isCycle) {
+      logger.warn(`检测到循环调用，已阻断: ${cycleCheck.cycleInfo}`, {
+        fromAgent,
+        toAgent,
+        callChain,
+      });
+      return {
+        success: false,
+        error: `检测到循环调用: ${cycleCheck.cycleInfo}，已阻断以防止无限递归`,
+      };
+    }
+
+    // 2. 嵌套深度检查
+    const depthCheck = this._checkNestingDepth(nestingDepth);
+    if (depthCheck.tooDeep) {
+      logger.warn(`嵌套深度超限: ${nestingDepth} >= ${depthCheck.maxDepth}`, {
+        fromAgent,
+        toAgent,
+        nestingDepth,
+      });
+      return {
+        success: false,
+        error: `通信嵌套深度超过限制（最大 ${depthCheck.maxDepth} 层），请简化协作链路`,
+      };
     }
 
     // 检查目标 Agent 状态（system 消息不受限制）
@@ -746,103 +968,148 @@ class AgentCommunicationManager {
     const fromAgentInfo = this.chatManager.getAgent(fromAgent);
     const fromAgentName = fromAgentInfo?.name || fromAgent;
 
-    const msgRecord = {
-      id: this._generateId(),
-      fromAgent,
-      toAgent,
-      content: message,
-      response: '',
-      status: 'pending',
-      createdAt: Date.now(),
-      context: conversationId,
-    };
+    // 构建新的调用链（用于传递给下层调用）
+    const newCallChain = [...callChain, fromAgent];
+    const newNestingDepth = nestingDepth + 1;
 
-    this.messages.push(msgRecord);
+    logger.info(`Agent 通信: ${fromAgent} → ${toAgent}`, {
+      message: message.slice(0, 100),
+      allowTools,
+      nestingDepth,
+      callChainLength: newCallChain.length,
+    });
 
-    logger.info(`Agent 通信: ${fromAgent} → ${toAgent}`, { message: message.slice(0, 100), allowTools });
-
-    // 注册活跃任务追踪（让控制面板能看到 Agent 在工作）
-    this._trackAgentActivity(toAgent, `内部通信: 来自 ${fromAgentName}`);
-
-    try {
-      // 1. 构建分层通信历史（远期摘要 + 近期完整，避免上下文过长）
-      let pairwiseHistory;
-      let contextBlock = '';
-
-      if (historyStrategy) {
-        // 使用新的分层策略
-        const ctx = this._buildContextHistory(fromAgent, toAgent, { strategy: historyStrategy });
-        pairwiseHistory = ctx.history;
-        contextBlock = ctx.contextBlock;
-      } else if (maxHistory) {
-        // 兼容旧调用：直接限制条数
-        pairwiseHistory = this._getPairwiseHistory(fromAgent, toAgent, maxHistory);
-        contextBlock = '━━━ 当前任务 ━━━\n\n';
-      } else {
-        // 默认：使用智能分层策略
-        const ctx = this._buildContextHistory(fromAgent, toAgent, { strategy: 'full' });
-        pairwiseHistory = ctx.history;
-        contextBlock = ctx.contextBlock;
-      }
-
-      // 2. 获取用户对话上下文（如果有）
-      let userContextPart = '';
-      if (includeUserContext && conversationId) {
-        const userSummary = this._getUserContextSummary(conversationId);
-        if (userSummary) {
-          userContextPart = `\n\n[用户对话背景]\n${userSummary}\n`;
-        }
-      }
-
-      // 3. 构建给目标 Agent 的消息（添加上下文分隔标记）
-      const contextMessage = `${contextBlock}[内部消息 - 来自 ${fromAgentName} (${fromAgent})]${userContextPart}\n\n${message}`;
-
-      // 4. 调用目标 Agent
-      logger.debug(`Agent 通信历史条数: ${pairwiseHistory.length}`);
-
-      let response;
-      if (allowTools && this.toolExecutor) {
-        // 使用工具调用循环
-        response = await this._chatWithToolLoop(targetAgent, contextMessage, pairwiseHistory, {
-          conversationId,
-          fromAgent,
-          isInternalCommunication: true,
-        });
-      } else {
-        // 不使用工具，直接调用
-        response = await targetAgent.chat(contextMessage, pairwiseHistory, { stream: false });
-      }
-
-      msgRecord.response = response;
-      msgRecord.status = 'responded';
-      msgRecord.respondedAt = Date.now();
-
-      this._saveToDisk();
-
-      logger.info(`Agent 通信完成: ${fromAgent} ← ${toAgent}`, {
-        responseLength: response.length,
-        historyUsed: pairwiseHistory.length,
-        allowTools,
-      });
-
-      // 异步触发记忆提取
-      this._triggerMemoryExtraction('communication', {
+    // ═══════════════════════════════════════════════════════════
+    // 使用消息队列确保同一 Agent 串行处理
+    // ═══════════════════════════════════════════════════════════
+    const executeTask = async () => {
+      const msgRecord = {
+        id: this._generateId(),
         fromAgent,
         toAgent,
-        message,
-        response,
-      });
+        content: message,
+        response: '',
+        status: 'pending',
+        createdAt: Date.now(),
+        context: conversationId,
+      };
 
-      return { success: true, response };
+      this.messages.push(msgRecord);
+
+      // 注册活跃任务追踪（让控制面板能看到 Agent 在工作），获取 taskId 用于完成时匹配
+      const activityTaskId = this._trackAgentActivity(toAgent, `内部通信: 来自 ${fromAgentName}`);
+
+      try {
+        // 1. 构建分层通信历史（远期摘要 + 近期完整，避免上下文过长）
+        let pairwiseHistory;
+        let contextBlock = '';
+
+        if (historyStrategy) {
+          // 使用新的分层策略
+          const ctx = this._buildContextHistory(fromAgent, toAgent, { strategy: historyStrategy });
+          pairwiseHistory = ctx.history;
+          contextBlock = ctx.contextBlock;
+        } else if (maxHistory) {
+          // 兼容旧调用：直接限制条数
+          pairwiseHistory = this._getPairwiseHistory(fromAgent, toAgent, maxHistory);
+          contextBlock = '━━━ 当前任务 ━━━\n\n';
+        } else {
+          // 默认：使用智能分层策略
+          const ctx = this._buildContextHistory(fromAgent, toAgent, { strategy: 'full' });
+          pairwiseHistory = ctx.history;
+          contextBlock = ctx.contextBlock;
+        }
+
+        // 2. 获取用户对话上下文（如果有）
+        let userContextPart = '';
+        if (includeUserContext && conversationId) {
+          const userSummary = this._getUserContextSummary(conversationId);
+          if (userSummary) {
+            userContextPart = `\n\n[用户对话背景]\n${userSummary}\n`;
+          }
+        }
+
+        // 2.5 获取目标 Agent 的暂存区上下文（工作状态恢复）
+        let scratchpadPart = '';
+        try {
+          const scratchpad = scratchpadManager.get(toAgent);
+          if (scratchpad.hasContent()) {
+            scratchpadPart = `\n\n${scratchpad.getContextSummary()}`;
+          }
+        } catch (err) {
+          logger.debug('获取暂存区失败', { toAgent, error: err.message });
+        }
+
+        // 3. 构建给目标 Agent 的消息（添加上下文分隔标记）
+        const contextMessage = `${contextBlock}${scratchpadPart}[内部消息 - 来自 ${fromAgentName} (${fromAgent})]${userContextPart}\n\n${message}`;
+
+        // 4. 调用目标 Agent
+        logger.debug(`Agent 通信历史条数: ${pairwiseHistory.length}`);
+
+        let response;
+        let toolsUsed = [];
+        if (allowTools && this.toolExecutor) {
+          // 使用工具调用循环，传递调用链和嵌套深度
+          const loopResult = await this._chatWithToolLoop(targetAgent, contextMessage, pairwiseHistory, {
+            conversationId,
+            fromAgent,
+            isInternalCommunication: true,
+            callChain: newCallChain,
+            nestingDepth: newNestingDepth,
+          });
+          response = loopResult.content;
+          toolsUsed = loopResult.toolsUsed || [];
+        } else {
+          // 不使用工具，直接调用
+          response = await targetAgent.chat(contextMessage, pairwiseHistory, { stream: false });
+        }
+
+        msgRecord.response = response;
+        msgRecord.status = 'responded';
+        msgRecord.respondedAt = Date.now();
+
+        this._saveToDisk();
+
+        logger.info(`Agent 通信完成: ${fromAgent} ← ${toAgent}`, {
+          responseLength: response.length,
+          historyUsed: pairwiseHistory.length,
+          allowTools,
+          nestingDepth,
+          toolsUsed,
+        });
+
+        // 异步触发记忆提取
+        this._triggerMemoryExtraction('communication', {
+          fromAgent,
+          toAgent,
+          message,
+          response,
+        });
+
+        return { success: true, response, toolsUsed };
+      } catch (error) {
+        msgRecord.status = 'failed';
+        msgRecord.response = error.message;
+        this._saveToDisk();
+
+        logger.error(`Agent 通信失败: ${fromAgent} → ${toAgent}`, error);
+        return { success: false, error: error.message };
+      } finally {
+        this._untrackAgentActivity(toAgent, activityTaskId);
+      }
+    };
+
+    // 将任务加入目标 Agent 的队列，并应用超时
+    try {
+      const result = await this._withTimeout(
+        this._enqueue(toAgent, executeTask),
+        timeout,
+        `与 ${toAgent} 通信`
+      );
+      return result;
     } catch (error) {
-      msgRecord.status = 'failed';
-      msgRecord.response = error.message;
-      this._saveToDisk();
-
-      logger.error(`Agent 通信失败: ${fromAgent} → ${toAgent}`, error);
+      logger.error(`Agent 通信超时或异常: ${fromAgent} → ${toAgent}`, error);
       return { success: false, error: error.message };
-    } finally {
-      this._untrackAgentActivity(toAgent);
     }
   }
 
@@ -1243,8 +1510,8 @@ class AgentCommunicationManager {
 
       const fromAgentName = task.fromAgentName || task.fromAgent;
 
-      // 注册活跃任务追踪
-      this._trackAgentActivity(task.toAgent, `规划任务: 来自 ${fromAgentName}`);
+      // 注册活跃任务追踪，获取 taskId 用于完成时匹配
+      const planActivityTaskId = this._trackAgentActivity(task.toAgent, `规划任务: 来自 ${fromAgentName}`);
 
       logger.info(`进入规划阶段: ${task.id}`, {
         executor: task.toAgent,
@@ -1260,6 +1527,17 @@ class AgentCommunicationManager {
           userContextPart = `\n\n[用户对话背景]\n${task.userContextSummary}\n`;
         }
 
+        // 获取目标 Agent 的暂存区上下文（工作状态恢复）
+        let planScratchpadContext = '';
+        try {
+          const scratchpad = scratchpadManager.get(task.toAgent);
+          if (scratchpad.hasContent()) {
+            planScratchpadContext = `\n${scratchpad.getContextSummary()}\n`;
+          }
+        } catch (err) {
+          logger.debug('获取暂存区失败', { toAgent: task.toAgent, error: err.message });
+        }
+
         // 构建规划阶段的消息
         let feedbackSection = '';
         if (rejectionFeedback) {
@@ -1273,8 +1551,7 @@ ${rejectionFeedback}
 `;
         }
 
-        const planningMessage = `[工作指令 - 来自上级 ${fromAgentName}]${userContextPart}
-
+        const planningMessage = `[工作指令 - 来自上级 ${fromAgentName}]${userContextPart}${planScratchpadContext}
 ═══════════════════════════════════════
 任务要求：
 ═══════════════════════════════════════
@@ -1304,7 +1581,7 @@ ${feedbackSection}
 审批通过后，系统会自动解锁所有开发工具，你就可以开始编码了。`;
 
         // 规划阶段使用受限工具集
-        const planResult = await this._chatWithToolLoop(
+        const planLoopResult = await this._chatWithToolLoop(
           targetAgent,
           planningMessage,
           taskHistory,
@@ -1326,6 +1603,7 @@ ${feedbackSection}
             },
           }
         );
+        const planResult = planLoopResult.content;
 
         // 规划阶段完成，任务进入等待审批状态
         if (task.planStatus === 'submitted') {
@@ -1370,7 +1648,7 @@ ${feedbackSection}
         logger.error(`规划阶段执行失败: ${task.id}`, error);
         return { success: false, error: error.message };
       } finally {
-        this._untrackAgentActivity(task.toAgent);
+        this._untrackAgentActivity(task.toAgent, planActivityTaskId);
       }
     }
 
@@ -1383,8 +1661,8 @@ ${feedbackSection}
     if (!task.discussion) task.discussion = [];
     this._saveToDisk();
 
-    // 注册活跃任务追踪
-    this._trackAgentActivity(task.toAgent, `执行任务: 来自 ${task.fromAgentName || task.fromAgent}`);
+    // 注册活跃任务追踪，获取 taskId 用于完成时匹配
+    const execActivityTaskId = this._trackAgentActivity(task.toAgent, `执行任务: 来自 ${task.fromAgentName || task.fromAgent}`);
 
     logger.info(`开始执行任务: ${task.id}`, { executor: task.toAgent, allowTools, planApproved: task.planStatus === 'approved' });
 
@@ -1396,6 +1674,17 @@ ${feedbackSection}
       let userContextPart = '';
       if (task.userContextSummary) {
         userContextPart = `\n\n[用户对话背景]\n${task.userContextSummary}\n`;
+      }
+
+      // 2.5 获取目标 Agent 的暂存区上下文（工作状态恢复）
+      let scratchpadContext = '';
+      try {
+        const scratchpad = scratchpadManager.get(task.toAgent);
+        if (scratchpad.hasContent()) {
+          scratchpadContext = `\n${scratchpad.getContextSummary()}\n`;
+        }
+      } catch (err) {
+        logger.debug('获取暂存区失败', { toAgent: task.toAgent, error: err.message });
       }
 
       // 3. 构建任务执行消息（必须足够明确，Agent 要知道这是工作指令而非闲聊）
@@ -1445,8 +1734,7 @@ ${approvedPlan.approveComment ? `\n上级备注：${approvedPlan.approveComment}
         }
       }
 
-      const taskMessage = `[工作指令 - 来自上级 ${fromAgentName}]${userContextPart}
-
+      const taskMessage = `[工作指令 - 来自上级 ${fromAgentName}]${userContextPart}${scratchpadContext}
 ═══════════════════════════════════════
 任务要求（你必须完成以下工作）：
 ═══════════════════════════════════════
@@ -1465,14 +1753,17 @@ ${planApprovalNote}${gitInstructions}
       logger.debug(`任务执行历史条数: ${taskHistory.length}`);
 
       let result;
+      let toolsUsedInTask = [];
       if (allowTools && this.toolExecutor) {
         // 使用工具调用循环
-        result = await this._chatWithToolLoop(targetAgent, taskMessage, taskHistory, {
+        const loopResult = await this._chatWithToolLoop(targetAgent, taskMessage, taskHistory, {
           conversationId: task.conversationId,
           fromAgent: task.fromAgent,
           taskId: task.id,
           isInternalCommunication: true,
         });
+        result = loopResult.content;
+        toolsUsedInTask = loopResult.toolsUsed || [];
       } else {
         // 不使用工具，直接调用
         result = await targetAgent.chat(taskMessage, taskHistory, { stream: false });
@@ -1528,7 +1819,7 @@ ${planApprovalNote}${gitInstructions}
       logger.error(`任务执行失败: ${task.id}`, error);
       return { success: false, error: error.message };
     } finally {
-      this._untrackAgentActivity(task.toAgent);
+      this._untrackAgentActivity(task.toAgent, execActivityTaskId);
     }
   }
 
@@ -1634,8 +1925,10 @@ ${resultPreview}
         });
 
         // 检查上司是否实际调用了工具（notify_boss 或 delegate_task）
-        const usedNotifyBoss = this._lastToolsUsed?.includes('notify_boss');
-        const usedDelegateTask = this._lastToolsUsed?.includes('delegate_task');
+        // 使用 sendMessage 返回的 toolsUsed，避免实例级共享问题
+        const reviewToolsUsed = reviewResult?.toolsUsed || [];
+        const usedNotifyBoss = reviewToolsUsed.includes('notify_boss');
+        const usedDelegateTask = reviewToolsUsed.includes('delegate_task');
 
         if (usedDelegateTask) {
           // 上司退回任务 → 运营任务状态回到 in_progress
@@ -1963,6 +2256,80 @@ ${resultPreview}
     // 按时间排序，limit <= 0 表示返回全部
     const sorted = activities.sort((a, b) => b.timestamp - a.timestamp);
     return limit > 0 ? sorted.slice(0, limit) : sorted;
+  }
+
+  /**
+   * 清理积压的任务（超过指定天数的 in_progress/pending 任务标记为 cancelled）
+   * @param {Object} [options]
+   * @param {number} [options.maxAgeDays=1] - 超过多少天的任务会被清理
+   * @param {string} [options.agentId] - 只清理指定 Agent 的任务
+   * @returns {{ success: boolean, clearedCount: number, clearedTasks: string[] }}
+   */
+  clearStaleTasks(options = {}) {
+    const maxAgeDays = options.maxAgeDays ?? 1;
+    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const clearedTasks = [];
+
+    for (const task of this.delegatedTasks) {
+      // 只处理 in_progress 或 pending 状态的任务
+      if (task.status !== 'in_progress' && task.status !== 'pending') continue;
+      
+      // 如果指定了 agentId，只清理该 Agent 的任务
+      if (options.agentId && task.toAgent !== options.agentId && task.fromAgent !== options.agentId) {
+        continue;
+      }
+      
+      const taskAge = now - task.createdAt;
+      if (taskAge > maxAgeMs) {
+        task.status = 'cancelled';
+        task.completedAt = now;
+        task.result = `[系统自动关闭] 任务超过 ${maxAgeDays} 天未完成，已自动取消`;
+        clearedTasks.push(task.id);
+        logger.info('清理积压任务', { taskId: task.id, toAgent: task.toAgent, ageHours: Math.round(taskAge / 3600000) });
+      }
+    }
+
+    if (clearedTasks.length > 0) {
+      this._saveToDisk();
+    }
+
+    return { success: true, clearedCount: clearedTasks.length, clearedTasks };
+  }
+
+  /**
+   * 清空所有已完成/已取消的任务记录
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearCompletedTasks() {
+    const before = this.delegatedTasks.length;
+    this.delegatedTasks = this.delegatedTasks.filter(
+      (t) => t.status === 'in_progress' || t.status === 'pending'
+    );
+    const clearedCount = before - this.delegatedTasks.length;
+    
+    if (clearedCount > 0) {
+      this._saveToDisk();
+      logger.info(`清空了 ${clearedCount} 条已完成/已取消的任务记录`);
+    }
+    
+    return { success: true, clearedCount };
+  }
+
+  /**
+   * 清空所有消息记录
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearMessages() {
+    const clearedCount = this.messages.length;
+    
+    if (clearedCount > 0) {
+      this.messages = [];
+      this._saveToDisk();
+      logger.info(`清空了 ${clearedCount} 条协作消息记录`);
+    }
+    
+    return { success: true, clearedCount };
   }
 }
 

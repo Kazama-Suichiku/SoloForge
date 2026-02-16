@@ -9,6 +9,7 @@ import { ChatView } from './components/chat';
 import Settings from './pages/Settings';
 import AgentSettings from './pages/AgentSettings';
 import Dashboard from './pages/Dashboard';
+import CFODashboard from './components/cfo/CFODashboard';
 import LoginPage from './pages/LoginPage';
 import CompanySelectPage from './pages/CompanySelectPage';
 import { useAuthStore } from './store/auth-store';
@@ -169,7 +170,22 @@ export default function App() {
         {mountedPages.has('dashboard') && (
           <PageSlot active={currentPage === 'dashboard'}>
             <ErrorBoundary>
-              <Dashboard onBack={() => setCurrentPage('chat')} />
+              <Dashboard 
+                onBack={() => setCurrentPage('chat')} 
+                onOpenCFO={() => navigateTo('cfo-dashboard')}
+                isActive={currentPage === 'dashboard'}
+              />
+            </ErrorBoundary>
+          </PageSlot>
+        )}
+
+        {mountedPages.has('cfo-dashboard') && (
+          <PageSlot active={currentPage === 'cfo-dashboard'}>
+            <ErrorBoundary>
+              <CFODashboard 
+                onBack={() => setCurrentPage('dashboard')} 
+                isActive={currentPage === 'cfo-dashboard'}
+              />
             </ErrorBoundary>
           </PageSlot>
         )}

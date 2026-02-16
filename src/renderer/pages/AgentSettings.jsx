@@ -2,14 +2,27 @@
  * SoloForge - Agent 人员管理设置页面
  * 配置 Agent 的名字、职级、部门
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import OrgChart from '../components/OrgChart';
 import AgentAvatar, { isImageAvatar } from '../components/AgentAvatar';
 
 /**
  * Agent 编辑卡片组件
  */
-function AgentCard({ config, levels, departments, models, onSave, onReset, saving }) {
+/**
+ * 获取 Agent 所属的所有部门（兼容新旧格式）
+ */
+function getAgentDepartments(config) {
+  if (Array.isArray(config.departments) && config.departments.length > 0) {
+    return config.departments;
+  }
+  if (config.department) {
+    return [config.department];
+  }
+  return [];
+}
+
+function AgentCard({ config, levels, departments, models, onSave, onReset, saving, salaryInfo }) {
   const [editing, setEditing] = useState(false);
   const [formData, setFormData] = useState({
     name: config.name,
@@ -21,9 +34,13 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
     model: config.model || 'claude-sonnet-4-5',
   });
 
-  const dept = departments.find((d) => d.id === config.department) || {};
+  // 支持多部门显示
+  const agentDepts = getAgentDepartments(config);
+  const primaryDept = departments.find((d) => d.id === agentDepts[0]) || {};
+  const dept = primaryDept; // 兼容后续代码
   const level = levels.find((l) => l.id === config.level) || {};
   const modelInfo = models?.find((m) => m.id === config.model) || null;
+  const isMultiDepartment = agentDepts.length > 1;
 
   const handleSave = async () => {
     await onSave(config.id, formData);
@@ -238,7 +255,7 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
 
         {/* Info */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-lg font-semibold text-text-primary">
               {config.name}
             </h3>
@@ -251,16 +268,45 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
             >
               {dept.name || config.department}
             </span>
+            {/* 多部门标记 */}
+            {isMultiDepartment && (
+              <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                +{agentDepts.length - 1} 部门
+              </span>
+            )}
           </div>
           <div className="text-sm text-text-secondary">
             {config.title} · {level.name || config.level}
           </div>
+          {/* 显示所有部门 */}
+          {isMultiDepartment && (
+            <div className="text-xs text-purple-500 dark:text-purple-400 mt-1">
+              跨部门：{agentDepts.map(d => departments.find(dept => dept.id === d)?.name || d).join('、')}
+            </div>
+          )}
           {modelInfo && (
             <div className="text-xs text-blue-500 dark:text-blue-400 mt-1 flex items-center gap-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
               </svg>
               {modelInfo.name}
+            </div>
+          )}
+          {/* 薪资信息 */}
+          {salaryInfo && (
+            <div className={`text-xs mt-1 flex items-center gap-2 ${salaryInfo.isOverdrawn ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
+              <span>
+                余额: {(salaryInfo.balance || 0).toLocaleString()}
+              </span>
+              <span className="text-text-muted">|</span>
+              <span className="text-text-secondary">
+                日薪: {(salaryInfo.dailySalary || 0).toLocaleString()}
+              </span>
+              {salaryInfo.isOverdrawn && (
+                <span className="px-1.5 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs">
+                  透支
+                </span>
+              )}
             </div>
           )}
           {config.description && (
@@ -569,6 +615,7 @@ export default function AgentSettings({ onBack }) {
   const [levels, setLevels] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [models, setModels] = useState([]);
+  const [salaryData, setSalaryData] = useState({}); // agentId -> salaryInfo
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
@@ -578,16 +625,26 @@ export default function AgentSettings({ onBack }) {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [configsData, levelsData, deptsData, modelsData] = await Promise.all([
+        const [configsData, levelsData, deptsData, modelsData, salaryConfig] = await Promise.all([
           window.electronAPI.getAgentConfigs(),
           window.electronAPI.getAgentLevels(),
           window.electronAPI.getAgentDepartments(),
           window.electronAPI.getAvailableModels(),
+          window.electronAPI.getSalaryConfig?.(),
         ]);
         setConfigs(configsData);
         setLevels(levelsData);
         setDepartments(deptsData);
         setModels(modelsData || []);
+        
+        // 将薪资数据转换为 map 格式
+        if (salaryConfig?.employeeSalaries) {
+          const salaryMap = {};
+          salaryConfig.employeeSalaries.forEach((s) => {
+            salaryMap[s.agentId] = s;
+          });
+          setSalaryData(salaryMap);
+        }
       } catch (error) {
         console.error('加载 Agent 配置失败:', error);
       } finally {
@@ -595,7 +652,21 @@ export default function AgentSettings({ onBack }) {
       }
     };
     loadData();
+
+    // 订阅后端配置变更（开除/停职/复职/新增等），实时更新架构图
+    const unsubscribe = window.electronAPI?.onAgentConfigChanged?.((newConfigs) => {
+      if (newConfigs && Array.isArray(newConfigs)) {
+        setConfigs(newConfigs);
+      }
+    });
+    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
   }, []);
+
+  // 过滤已开除的 Agent（架构图和列表只显示在职 + 停职人员）
+  const activeConfigs = useMemo(
+    () => configs.filter((c) => (c.status || 'active') !== 'terminated'),
+    [configs]
+  );
 
   // 保存配置
   const handleSave = useCallback(async (agentId, updates) => {
@@ -643,13 +714,22 @@ export default function AgentSettings({ onBack }) {
     );
   }
 
-  // 按部门分组（用于列表视图）
-  const groupedConfigs = configs.reduce((acc, config) => {
-    const deptId = config.department || 'other';
-    if (!acc[deptId]) {
-      acc[deptId] = [];
+  // 按部门分组（用于列表视图），支持多部门，只显示在职/停职人员
+  const groupedConfigs = activeConfigs.reduce((acc, config) => {
+    const depts = getAgentDepartments(config);
+    const deptIds = depts.length > 0 ? depts : ['other'];
+    for (const deptId of deptIds) {
+      if (!acc[deptId]) {
+        acc[deptId] = [];
+      }
+      // 标记多部门信息
+      acc[deptId].push({
+        ...config,
+        isPrimaryDepartment: deptId === deptIds[0],
+        crossDepartments: deptIds.filter(d => d !== deptId),
+        isMultiDepartment: deptIds.length > 1,
+      });
     }
-    acc[deptId].push(config);
     return acc;
   }, {});
 
@@ -712,7 +792,7 @@ export default function AgentSettings({ onBack }) {
         {/* 组织架构图视图 */}
         {viewMode === 'chart' && (
           <OrgChart
-            configs={configs}
+            configs={activeConfigs}
             levels={levels}
             departments={departments}
             onSelectMember={(member) => setSelectedId(member.id)}
@@ -750,6 +830,7 @@ export default function AgentSettings({ onBack }) {
                         onSave={handleSave}
                         onReset={handleReset}
                         saving={saving}
+                        salaryInfo={salaryData[config.id]}
                       />
                     ))}
                   </div>

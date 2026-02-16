@@ -9,8 +9,9 @@ const { estimateTokens } = require('../llm/token-estimator');
 
 /**
  * 每页消息数量
+ * 已优化：从 30 增加到 50，每页加载更多历史消息
  */
-const PAGE_SIZE = 30;
+const PAGE_SIZE = 50;
 
 /**
  * 摘要缓存过期时间（毫秒）
@@ -371,6 +372,31 @@ class HistoryManager {
       cachedSummaries: this.summaryCache.size,
       pageSize: PAGE_SIZE,
     };
+  }
+
+  /**
+   * 重新初始化（公司切换时调用）
+   * 清空所有缓存
+   */
+  reinitialize() {
+    this.summaryCache.clear();
+    this.accessTime.clear();
+    logger.debug('HistoryManager: 缓存已清空');
+  }
+
+  /**
+   * 清理指定对话的缓存（对话删除时调用）
+   * @param {string} conversationId
+   */
+  clearConversationCache(conversationId) {
+    const prefix = `${conversationId}:`;
+    for (const key of this.summaryCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.summaryCache.delete(key);
+        this.accessTime.delete(key);
+      }
+    }
+    logger.debug('HistoryManager: 已清理对话缓存', { conversationId });
   }
 }
 

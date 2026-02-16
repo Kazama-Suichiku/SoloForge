@@ -45,7 +45,7 @@ function getProjectsFile() {
  * @property {string} name
  * @property {string} [description]
  * @property {number} order - 排序序号
- * @property {'pending'|'in_progress'|'completed'} status
+ * @property {'pending'|'in_progress'|'completed'|'cancelled'} status
  * @property {number} progress - 0-100 自动计算
  * @property {string} [dueDate] - YYYY-MM-DD
  */
@@ -58,7 +58,7 @@ function getProjectsFile() {
  * @property {string} milestoneId - 所属里程碑
  * @property {string} [assigneeId] - 执行人 Agent ID
  * @property {string} [assigneeName]
- * @property {'todo'|'in_progress'|'review'|'done'|'blocked'} status
+ * @property {'todo'|'in_progress'|'review'|'done'|'blocked'|'cancelled'|'paused'} status
  * @property {'high'|'medium'|'low'} priority
  * @property {string[]} dependencies - 依赖的任务 ID 列表
  * @property {string} [delegatedTaskId] - 关联的委派任务 ID
@@ -66,8 +66,11 @@ function getProjectsFile() {
  * @property {string} [dueDate]
  * @property {number} [estimateHours]
  * @property {string} [blockerNote] - 阻塞原因
+ * @property {string} [cancelReason] - 取消原因（项目取消时自动设置）
  * @property {ProgressNote[]} progressNotes
  * @property {number} [completedAt]
+ * @property {number} [cancelledAt] - 取消时间
+ * @property {number} [pausedAt] - 暂停时间
  * @property {number} createdAt
  */
 
@@ -215,10 +218,139 @@ class ProjectStore {
     const project = this.getProject(projectId);
     if (!project) return null;
 
+    const oldStatus = project.status;
+
     Object.assign(project, updates, { updatedAt: Date.now() });
     this.saveToDisk();
     this.notify();
+
+    // 状态变更为取消/暂停时，级联处理任务
+    if (updates.status && updates.status !== oldStatus) {
+      if (updates.status === 'cancelled') {
+        this._cascadeCancelTasks(project);
+      } else if (updates.status === 'on_hold') {
+        this._cascadePauseTasks(project);
+      }
+    }
+
     return project;
+  }
+
+  /**
+   * 级联取消项目内所有未完成的任务
+   * @param {Project} project
+   * @private
+   */
+  _cascadeCancelTasks(project) {
+    const cancelledTaskIds = [];
+
+    for (const task of project.tasks) {
+      // 只取消未完成的任务
+      if (task.status !== 'done' && task.status !== 'cancelled') {
+        task.status = 'cancelled';
+        task.cancelledAt = Date.now();
+        task.cancelReason = '项目已取消';
+        cancelledTaskIds.push({ id: task.id, delegatedTaskId: task.delegatedTaskId });
+      }
+    }
+
+    // 同步更新里程碑状态
+    for (const ms of project.milestones) {
+      if (ms.status !== 'completed') {
+        ms.status = 'cancelled';
+      }
+    }
+
+    if (cancelledTaskIds.length > 0) {
+      this.saveToDisk();
+      logger.info(`项目取消，级联取消 ${cancelledTaskIds.length} 个 PM 任务`, {
+        projectId: project.id,
+        projectName: project.name,
+      });
+
+      // 异步取消委派任务（避免循环依赖，延迟加载）
+      setImmediate(() => {
+        this._cancelDelegatedTasks(cancelledTaskIds);
+      });
+    }
+
+    // 同时取消 Operations Store 中关联此项目的任务
+    setImmediate(() => {
+      this._cancelOperationsTasks(project.id, project.name);
+    });
+  }
+
+  /**
+   * 取消 Operations Store 中关联此项目的任务
+   * @param {string} projectId
+   * @param {string} projectName
+   * @private
+   */
+  _cancelOperationsTasks(projectId, projectName) {
+    try {
+      const { operationsStore } = require('../operations/operations-store');
+      const result = operationsStore.cancelTasksByProject(projectId, `项目「${projectName}」已取消`);
+      if (result.cancelledCount > 0) {
+        logger.info(`项目取消，级联取消 ${result.cancelledCount} 个 Operations 任务`, { projectId });
+      }
+    } catch (error) {
+      logger.error('取消 Operations 任务失败', error);
+    }
+  }
+
+  /**
+   * 取消关联的委派任务
+   * @param {Array<{id: string, delegatedTaskId: string|null}>} taskInfos
+   * @private
+   */
+  _cancelDelegatedTasks(taskInfos) {
+    try {
+      const { agentCommunication } = require('../collaboration/agent-communication');
+      
+      for (const taskInfo of taskInfos) {
+        if (taskInfo.delegatedTaskId) {
+          const delegated = agentCommunication.delegatedTasks.find(
+            (t) => t.id === taskInfo.delegatedTaskId
+          );
+          if (delegated && delegated.status !== 'completed' && delegated.status !== 'cancelled') {
+            delegated.status = 'cancelled';
+            delegated.result = '关联项目已取消';
+            delegated.completedAt = Date.now();
+            logger.debug(`委派任务已取消: ${delegated.id}`);
+          }
+        }
+      }
+
+      agentCommunication._saveToDisk();
+    } catch (error) {
+      logger.error('取消委派任务失败', error);
+    }
+  }
+
+  /**
+   * 级联暂停项目内所有进行中的任务
+   * @param {Project} project
+   * @private
+   */
+  _cascadePauseTasks(project) {
+    let pausedCount = 0;
+
+    for (const task of project.tasks) {
+      // 只暂停进行中的任务
+      if (task.status === 'in_progress') {
+        task.status = 'paused';
+        task.pausedAt = Date.now();
+        pausedCount++;
+      }
+    }
+
+    if (pausedCount > 0) {
+      this.saveToDisk();
+      logger.info(`项目暂停，级联暂停 ${pausedCount} 个任务`, {
+        projectId: project.id,
+        projectName: project.name,
+      });
+    }
   }
 
   /**
@@ -404,6 +536,7 @@ class ProjectStore {
 
   /**
    * 重新计算里程碑和项目进度
+   * 注意：已取消（cancelled）的任务不计入进度统计
    * @param {string} projectId
    * @returns {number} 项目总进度
    */
@@ -411,9 +544,14 @@ class ProjectStore {
     const project = this.getProject(projectId);
     if (!project) return 0;
 
-    // 计算每个里程碑的进度
+    // 计算每个里程碑的进度（排除已取消的任务）
     for (const ms of project.milestones) {
-      const msTasks = project.tasks.filter((t) => t.milestoneId === ms.id);
+      // 如果里程碑本身已取消，跳过
+      if (ms.status === 'cancelled') continue;
+
+      const msTasks = project.tasks.filter(
+        (t) => t.milestoneId === ms.id && t.status !== 'cancelled'
+      );
       if (msTasks.length === 0) {
         ms.progress = 0;
         ms.status = 'pending';
@@ -425,20 +563,20 @@ class ProjectStore {
 
       if (ms.progress >= 100) {
         ms.status = 'completed';
-      } else if (msTasks.some((t) => t.status !== 'todo')) {
+      } else if (msTasks.some((t) => t.status !== 'todo' && t.status !== 'paused')) {
         ms.status = 'in_progress';
       } else {
         ms.status = 'pending';
       }
     }
 
-    // 计算项目总进度
-    const allTasks = project.tasks;
-    if (allTasks.length === 0) {
+    // 计算项目总进度（排除已取消的任务）
+    const activeTasks = project.tasks.filter((t) => t.status !== 'cancelled');
+    if (activeTasks.length === 0) {
       project.progress = 0;
     } else {
-      const doneTasks = allTasks.filter((t) => t.status === 'done').length;
-      project.progress = Math.round((doneTasks / allTasks.length) * 100);
+      const doneTasks = activeTasks.filter((t) => t.status === 'done').length;
+      project.progress = Math.round((doneTasks / activeTasks.length) * 100);
     }
 
     // 更新项目状态
@@ -458,21 +596,28 @@ class ProjectStore {
 
   /**
    * 获取项目摘要（供 Dashboard 使用）
+   * 注意：已取消的任务单独统计
    */
   getProjectsSummary() {
-    return this.data.projects.map((p) => ({
-      id: p.id,
-      name: p.name,
-      status: p.status,
-      owner: p.ownerName,
-      progress: p.progress,
-      milestoneCount: p.milestones.length,
-      taskCount: p.tasks.length,
-      tasksDone: p.tasks.filter((t) => t.status === 'done').length,
-      tasksBlocked: p.tasks.filter((t) => t.status === 'blocked').length,
-      tasksInProgress: p.tasks.filter((t) => t.status === 'in_progress').length,
-      updatedAt: p.updatedAt,
-    }));
+    return this.data.projects.map((p) => {
+      const activeTasks = p.tasks.filter((t) => t.status !== 'cancelled');
+      const cancelledTasks = p.tasks.filter((t) => t.status === 'cancelled');
+      
+      return {
+        id: p.id,
+        name: p.name,
+        status: p.status,
+        owner: p.ownerName,
+        progress: p.progress,
+        milestoneCount: p.milestones.filter((m) => m.status !== 'cancelled').length,
+        taskCount: activeTasks.length,
+        tasksDone: activeTasks.filter((t) => t.status === 'done').length,
+        tasksBlocked: activeTasks.filter((t) => t.status === 'blocked').length,
+        tasksInProgress: activeTasks.filter((t) => t.status === 'in_progress').length,
+        tasksCancelled: cancelledTasks.length,
+        updatedAt: p.updatedAt,
+      };
+    });
   }
 
   /**

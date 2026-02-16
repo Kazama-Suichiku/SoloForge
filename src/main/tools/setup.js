@@ -20,6 +20,7 @@ const { registerReportTools } = require('./report-tool');
 const { registerHistoryTools } = require('./history-tool');
 const { registerMemoryTools } = require('./memory-tools');
 const { registerTodoTools } = require('./todo-tools');
+const { registerContextTools } = require('./context-tools');
 const { browserPool } = require('./browser-pool');
 const { toolRegistry } = require('./tool-registry');
 const { logger } = require('../utils/logger');
@@ -48,6 +49,7 @@ function setupTools() {
   registerPMTools();
   registerMemoryTools();
   registerTodoTools();
+  registerContextTools();
 
   const tools = toolRegistry.getAll();
   logger.info(`已注册 ${tools.length} 个工具:`, tools.map((t) => t.name));

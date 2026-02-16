@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
+const { atomicWriteSync } = require('../utils/atomic-write');
 
 /**
  * 职级定义
@@ -24,20 +25,10 @@ const LEVELS = {
 };
 
 /**
- * 部门定义
+ * 部门定义 - 从 department-store 动态加载
+ * 保持向后兼容：DEPARTMENTS 仍然可以像对象一样使用
  */
-const DEPARTMENTS = {
-  EXECUTIVE: { id: 'executive', name: '高管办公室', color: '#8B5CF6' },
-  TECH: { id: 'tech', name: '技术部', color: '#3B82F6' },
-  FINANCE: { id: 'finance', name: '财务部', color: '#10B981' },
-  ADMIN: { id: 'admin', name: '行政部', color: '#F59E0B' },
-  HR: { id: 'hr', name: '人力资源部', color: '#EC4899' },
-  PRODUCT: { id: 'product', name: '产品部', color: '#6366F1' },
-  MARKETING: { id: 'marketing', name: '市场部', color: '#EF4444' },
-  SALES: { id: 'sales', name: '销售部', color: '#14B8A6' },
-  OPERATIONS: { id: 'operations', name: '运营部', color: '#F97316' },
-  LEGAL: { id: 'legal', name: '法务部', color: '#64748B' },
-};
+const { DEPARTMENTS, departmentStore } = require('./department-store');
 
 /**
  * 可用的 AI 模型列表
@@ -108,7 +99,8 @@ const DEFAULT_AGENT_CONFIGS = {
     role: 'secretary',
     title: '秘书',
     level: LEVELS.ASSISTANT.id,
-    department: DEPARTMENTS.ADMIN.id,
+    departments: [DEPARTMENTS.ADMIN.id],
+    department: DEPARTMENTS.ADMIN.id, // 兼容字段
     description: '老板的私人秘书，负责日常事务协调',
     avatar: '👩‍💼',
     model: 'claude-sonnet-4-5',
@@ -121,7 +113,8 @@ const DEFAULT_AGENT_CONFIGS = {
     role: 'ceo',
     title: '首席执行官',
     level: LEVELS.C_LEVEL.id,
-    department: DEPARTMENTS.EXECUTIVE.id,
+    departments: [DEPARTMENTS.EXECUTIVE.id],
+    department: DEPARTMENTS.EXECUTIVE.id, // 兼容字段
     description: '负责公司战略决策和整体运营',
     avatar: '👨‍💼',
     model: 'claude-sonnet-4-5',
@@ -134,7 +127,8 @@ const DEFAULT_AGENT_CONFIGS = {
     role: 'cto',
     title: '首席技术官',
     level: LEVELS.C_LEVEL.id,
-    department: DEPARTMENTS.TECH.id,
+    departments: [DEPARTMENTS.TECH.id],
+    department: DEPARTMENTS.TECH.id, // 兼容字段
     description: '负责技术架构和研发团队',
     avatar: '👨‍💻',
     model: 'claude-sonnet-4-5',
@@ -147,7 +141,8 @@ const DEFAULT_AGENT_CONFIGS = {
     role: 'cfo',
     title: '首席财务官',
     level: LEVELS.C_LEVEL.id,
-    department: DEPARTMENTS.FINANCE.id,
+    departments: [DEPARTMENTS.FINANCE.id],
+    department: DEPARTMENTS.FINANCE.id, // 兼容字段
     description: '负责 Token 消耗分析和 Token 预算管理',
     avatar: '💰',
     model: 'claude-sonnet-4-5',
@@ -160,7 +155,8 @@ const DEFAULT_AGENT_CONFIGS = {
     role: 'chro',
     title: '首席人力资源官',
     level: LEVELS.C_LEVEL.id,
-    department: DEPARTMENTS.HR.id,
+    departments: [DEPARTMENTS.HR.id],
+    department: DEPARTMENTS.HR.id, // 兼容字段
     description: '负责人事管理、组织架构和 Agent 招聘审批',
     avatar: '👥',
     model: 'claude-sonnet-4-5',
@@ -175,7 +171,8 @@ const DEFAULT_AGENT_CONFIGS = {
  * @property {string} name - 显示名称（可自定义）
  * @property {string} title - 职位头衔
  * @property {string} level - 职级 ID
- * @property {string} department - 部门 ID
+ * @property {string[]} departments - 所属部门 ID 列表（支持多部门）
+ * @property {string} [department] - 【兼容字段，已废弃】主部门 ID，请使用 departments
  * @property {string} [description] - 职责描述
  * @property {string} [avatar] - 头像（emoji 或 URL）
  * @property {'active'|'suspended'|'terminated'} [status] - Agent 状态
@@ -188,6 +185,58 @@ const DEFAULT_AGENT_CONFIGS = {
  * @property {Array<{date: string, fromLevel: string, toLevel: string, fromTitle: string, toTitle: string, reason: string}>} [promotionHistory] - 晋升/降级记录
  * @property {Array<{id: string, title: string, completed: boolean, completedAt: string|null}>} [onboardingChecklist] - 入职引导清单
  */
+
+/**
+ * 标准化部门字段：将旧的 department 字符串转换为 departments 数组
+ * @param {Object} config - Agent 配置对象
+ * @returns {Object} 标准化后的配置
+ */
+function normalizeDepartments(config) {
+  if (!config) return config;
+  
+  // 如果已有 departments 数组，确保它是有效的数组
+  if (Array.isArray(config.departments) && config.departments.length > 0) {
+    // 同时设置 department 为主部门（第一个），保持兼容
+    config.department = config.departments[0];
+    return config;
+  }
+  
+  // 如果只有旧的 department 字符串，转换为数组
+  if (config.department && typeof config.department === 'string') {
+    config.departments = [config.department];
+    return config;
+  }
+  
+  // 如果都没有，设置为空数组
+  config.departments = [];
+  return config;
+}
+
+/**
+ * 获取 Agent 的部门列表（兼容新旧格式）
+ * @param {Object} config - Agent 配置对象
+ * @returns {string[]} 部门 ID 列表
+ */
+function getAgentDepartments(config) {
+  if (!config) return [];
+  if (Array.isArray(config.departments) && config.departments.length > 0) {
+    return config.departments;
+  }
+  if (config.department && typeof config.department === 'string') {
+    return [config.department];
+  }
+  return [];
+}
+
+/**
+ * 获取 Agent 的主部门（第一个部门）
+ * @param {Object} config - Agent 配置对象
+ * @returns {string|null} 主部门 ID
+ */
+function getPrimaryDepartment(config) {
+  const depts = getAgentDepartments(config);
+  return depts[0] || null;
+}
 
 /**
  * Agent 配置存储管理器
@@ -220,24 +269,38 @@ class AgentConfigStore {
         // 合并默认配置和已保存配置
         for (const [id, defaultConfig] of Object.entries(DEFAULT_AGENT_CONFIGS)) {
           const savedConfig = data[id] || {};
-          this.configs.set(id, { ...defaultConfig, ...savedConfig });
+          const merged = { ...defaultConfig, ...savedConfig };
+          // 标准化部门字段（兼容旧数据）
+          normalizeDepartments(merged);
+          this.configs.set(id, merged);
           // 如果是新增的默认 Agent，标记需要保存
           if (!data[id]) {
             needsSave = true;
             logger.info(`新增默认 Agent 配置: ${id}`);
           }
+          // 如果旧数据没有 departments 字段，标记需要保存
+          if (!savedConfig.departments && savedConfig.department) {
+            needsSave = true;
+          }
         }
         // 加载动态创建的 Agent 配置
         for (const [id, config] of Object.entries(data)) {
           if (!this.configs.has(id)) {
+            // 标准化部门字段（兼容旧数据）
+            normalizeDepartments(config);
             this.configs.set(id, config);
+            // 如果旧数据没有 departments 字段，标记需要保存
+            if (!config.departments && config.department) {
+              needsSave = true;
+            }
           }
         }
         logger.info('Agent 配置已加载', { count: this.configs.size });
 
-        // 如果有新增配置，自动保存
+        // 如果有新增配置或数据迁移，自动保存
         if (needsSave) {
           this.saveToDisk();
+          logger.info('Agent 配置已迁移到多部门格式');
         }
       } else {
         // 使用默认配置
@@ -267,7 +330,8 @@ class AgentConfigStore {
         fs.mkdirSync(configDir, { recursive: true });
       }
       const data = Object.fromEntries(this.configs);
-      fs.writeFileSync(this._getConfigPath(), JSON.stringify(data, null, 2), 'utf-8');
+      // 使用原子写入，防止写入过程中崩溃导致文件损坏
+      atomicWriteSync(this._getConfigPath(), JSON.stringify(data, null, 2));
       logger.info('Agent 配置已保存');
     } catch (error) {
       logger.error('保存 Agent 配置失败', error);
@@ -339,6 +403,124 @@ class AgentConfigStore {
   }
 
   /**
+   * 获取 Agent 所属的所有部门
+   * @param {string} agentId
+   * @returns {string[]} 部门 ID 列表
+   */
+  getDepartments(agentId) {
+    const config = this.configs.get(agentId);
+    return getAgentDepartments(config);
+  }
+
+  /**
+   * 给 Agent 添加一个部门
+   * @param {string} agentId
+   * @param {string} departmentId
+   * @returns {{ success: boolean, error?: string }}
+   */
+  addDepartment(agentId, departmentId) {
+    const config = this.configs.get(agentId);
+    if (!config) {
+      return { success: false, error: `Agent ${agentId} 不存在` };
+    }
+    
+    // 确保 departments 是数组
+    if (!Array.isArray(config.departments)) {
+      config.departments = config.department ? [config.department] : [];
+    }
+    
+    // 检查是否已在该部门
+    if (config.departments.includes(departmentId)) {
+      return { success: false, error: `员工已在部门 ${departmentId}` };
+    }
+    
+    config.departments.push(departmentId);
+    // 更新兼容字段（主部门保持为第一个）
+    config.department = config.departments[0];
+    
+    this.configs.set(agentId, config);
+    this.saveToDisk();
+    this.notifySubscribers();
+    logger.info('Agent 添加部门', { agentId, departmentId, departments: config.departments });
+    return { success: true };
+  }
+
+  /**
+   * 从 Agent 移除一个部门
+   * @param {string} agentId
+   * @param {string} departmentId
+   * @returns {{ success: boolean, error?: string }}
+   */
+  removeDepartment(agentId, departmentId) {
+    const config = this.configs.get(agentId);
+    if (!config) {
+      return { success: false, error: `Agent ${agentId} 不存在` };
+    }
+    
+    // 确保 departments 是数组
+    if (!Array.isArray(config.departments)) {
+      config.departments = config.department ? [config.department] : [];
+    }
+    
+    // 检查是否在该部门
+    const index = config.departments.indexOf(departmentId);
+    if (index === -1) {
+      return { success: false, error: `员工不在部门 ${departmentId}` };
+    }
+    
+    // 至少保留一个部门
+    if (config.departments.length <= 1) {
+      return { success: false, error: '员工至少需要属于一个部门' };
+    }
+    
+    config.departments.splice(index, 1);
+    // 更新兼容字段（主部门保持为第一个）
+    config.department = config.departments[0];
+    
+    this.configs.set(agentId, config);
+    this.saveToDisk();
+    this.notifySubscribers();
+    logger.info('Agent 移除部门', { agentId, departmentId, departments: config.departments });
+    return { success: true };
+  }
+
+  /**
+   * 设置 Agent 的主部门（第一个部门）
+   * @param {string} agentId
+   * @param {string} departmentId
+   * @returns {{ success: boolean, error?: string }}
+   */
+  setPrimaryDepartment(agentId, departmentId) {
+    const config = this.configs.get(agentId);
+    if (!config) {
+      return { success: false, error: `Agent ${agentId} 不存在` };
+    }
+    
+    // 确保 departments 是数组
+    if (!Array.isArray(config.departments)) {
+      config.departments = config.department ? [config.department] : [];
+    }
+    
+    // 检查是否在该部门
+    const index = config.departments.indexOf(departmentId);
+    if (index === -1) {
+      return { success: false, error: `员工不在部门 ${departmentId}，请先添加该部门` };
+    }
+    
+    // 将该部门移到第一位
+    config.departments.splice(index, 1);
+    config.departments.unshift(departmentId);
+    // 更新兼容字段
+    config.department = departmentId;
+    
+    this.configs.set(agentId, config);
+    this.saveToDisk();
+    this.notifySubscribers();
+    logger.info('Agent 设置主部门', { agentId, departmentId, departments: config.departments });
+    return { success: true };
+  }
+
+  /**
    * 添加新 Agent 配置
    * @param {AgentConfig} config
    */
@@ -346,6 +528,8 @@ class AgentConfigStore {
     if (!config.id) {
       throw new Error('Agent ID 是必需的');
     }
+    // 标准化部门字段
+    normalizeDepartments(config);
     this.configs.set(config.id, config);
     this.saveToDisk();
     this.notifySubscribers();
@@ -472,7 +656,7 @@ class AgentConfigStore {
    * 标记 Agent 为已开除
    * @param {string} agentId
    * @param {string} reason - 开除原因
-   * @returns {{ success: boolean, error?: string, agent?: AgentConfig }}
+   * @returns {{ success: boolean, error?: string, agent?: AgentConfig, cancelledTasks?: Array }}
    */
   terminate(agentId, reason) {
     if (this.isCoreAgent(agentId)) {
@@ -492,8 +676,42 @@ class AgentConfigStore {
     this.configs.set(agentId, config);
     this.saveToDisk();
     this.notifySubscribers();
-    logger.info('Agent 已开除', { agentId, reason });
-    return { success: true, agent: config };
+
+    // 自动清理该员工的未完成任务
+    let cancelledTasks = [];
+    try {
+      const { operationsStore } = require('../operations/operations-store');
+      if (operationsStore) {
+        const result = operationsStore.cancelTasksByAssignee(
+          agentId,
+          `负责人 ${config.name} 已离职`,
+          config.name
+        );
+        cancelledTasks = result.cancelledTasks || [];
+        if (cancelledTasks.length > 0) {
+          logger.info(`员工离职，自动取消 ${cancelledTasks.length} 个任务`, {
+            agentId,
+            agentName: config.name,
+            tasks: cancelledTasks.map((t) => t.title),
+          });
+        }
+      }
+    } catch (e) {
+      logger.warn('员工离职时清理任务失败', { agentId, error: e.message });
+    }
+
+    // 清理该员工的通信队列和委派任务
+    try {
+      const { agentCommunication } = require('../collaboration/agent-communication');
+      if (agentCommunication) {
+        agentCommunication.clearAgentQueues(agentId);
+      }
+    } catch (e) {
+      logger.warn('员工离职时清理通信队列失败', { agentId, error: e.message });
+    }
+
+    logger.info('Agent 已开除', { agentId, reason, cancelledTaskCount: cancelledTasks.length });
+    return { success: true, agent: config, cancelledTasks };
   }
 
   /**
@@ -541,32 +759,53 @@ class AgentConfigStore {
   getOrganizationInfo() {
     const lines = ['# 公司组织架构\n'];
     
-    // 按部门分组（排除已开除的）
+    // 按部门分组（排除已开除的）- 支持多部门
     const byDepartment = new Map();
     for (const config of this.configs.values()) {
       const status = config.status || 'active';
       if (status === AGENT_STATUS.TERMINATED) continue;
 
-      const dept = DEPARTMENTS[config.department?.toUpperCase()] || { name: config.department || '未分配' };
-      if (!byDepartment.has(dept.id || dept.name)) {
-        byDepartment.set(dept.id || dept.name, { dept, members: [] });
+      // 获取该员工所属的所有部门
+      const depts = getAgentDepartments(config);
+      if (depts.length === 0) {
+        // 未分配部门
+        const unassigned = { id: 'unassigned', name: '未分配' };
+        if (!byDepartment.has('unassigned')) {
+          byDepartment.set('unassigned', { dept: unassigned, members: [] });
+        }
+        byDepartment.get('unassigned').members.push(config);
+      } else {
+        // 员工出现在每个所属部门中
+        for (const deptId of depts) {
+          const dept = DEPARTMENTS[deptId?.toUpperCase()] || { id: deptId, name: deptId || '未知部门' };
+          if (!byDepartment.has(dept.id || deptId)) {
+            byDepartment.set(dept.id || deptId, { dept, members: [] });
+          }
+          byDepartment.get(dept.id || deptId).members.push(config);
+        }
       }
-      byDepartment.get(dept.id || dept.name).members.push(config);
     }
 
     // 生成组织架构描述
     for (const { dept, members } of byDepartment.values()) {
       lines.push(`## ${dept.name}`);
-      // 按职级排序（高到低）
-      members.sort((a, b) => {
+      // 按职级排序（高到低），去重（同一员工不在同一部门重复显示）
+      const uniqueMembers = [...new Map(members.map(m => [m.id, m])).values()];
+      uniqueMembers.sort((a, b) => {
         const levelA = LEVELS[a.level?.toUpperCase()] || { rank: 0 };
         const levelB = LEVELS[b.level?.toUpperCase()] || { rank: 0 };
         return levelB.rank - levelA.rank;
       });
-      for (const member of members) {
+      for (const member of uniqueMembers) {
         const level = LEVELS[member.level?.toUpperCase()] || { name: member.level || '' };
         const statusTag = (member.status || 'active') === AGENT_STATUS.SUSPENDED ? '【停职中】' : '';
-        lines.push(`- **${member.name}**（${member.title}）- ${level.name} ${statusTag}`);
+        // 如果员工属于多个部门，显示其他部门
+        const memberDepts = getAgentDepartments(member);
+        const otherDepts = memberDepts.filter(d => d !== dept.id);
+        const crossDeptTag = otherDepts.length > 0 
+          ? `（兼任：${otherDepts.map(d => DEPARTMENTS[d?.toUpperCase()]?.name || d).join('、')}）`
+          : '';
+        lines.push(`- **${member.name}**（${member.title}）- ${level.name} ${statusTag}${crossDeptTag}`);
         if (member.description) {
           lines.push(`  - ${member.description}`);
         }
@@ -586,7 +825,8 @@ class AgentConfigStore {
     lines.push('当对话中提到以下人员时，你可以识别他们的身份：\n');
     
     for (const config of this.configs.values()) {
-      const dept = DEPARTMENTS[config.department?.toUpperCase()] || { name: config.department || '未知部门' };
+      const depts = getAgentDepartments(config);
+      const deptNames = depts.map(d => DEPARTMENTS[d?.toUpperCase()]?.name || d || '未知部门').join('、');
       const level = LEVELS[config.level?.toUpperCase()] || { name: config.level || '' };
       
       // 可能的称呼方式
@@ -600,7 +840,8 @@ class AgentConfigStore {
         names.push(config.name[0] + '工'); // 如"李工"
       }
 
-      lines.push(`- 提到「${names.join('」或「')}」时 → 指的是 ${dept.name} 的 ${config.title}（${config.name}），职级：${level.name}`);
+      const deptInfo = depts.length > 1 ? `（跨部门：${deptNames}）` : deptNames;
+      lines.push(`- 提到「${names.join('」或「')}」时 → 指的是 ${deptInfo} 的 ${config.title}（${config.name}），职级：${level.name}`);
     }
 
     return lines.join('\n');
@@ -690,7 +931,8 @@ class AgentConfigStore {
       if (!fs.existsSync(configDir)) {
         fs.mkdirSync(configDir, { recursive: true });
       }
-      fs.writeFileSync(this._getBossConfigPath(), JSON.stringify(this.bossConfig, null, 2), 'utf-8');
+      // 使用原子写入
+      atomicWriteSync(this._getBossConfigPath(), JSON.stringify(this.bossConfig, null, 2));
       logger.info('老板配置已保存', this.bossConfig);
     } catch (error) {
       logger.error('保存老板配置失败', error);
@@ -707,10 +949,15 @@ module.exports = {
   agentConfigStore,
   LEVELS,
   DEPARTMENTS,
+  departmentStore, // 新增：部门管理器实例
   DEFAULT_AGENT_CONFIGS,
   AVAILABLE_MODELS,
   CORE_AGENT_IDS,
   AGENT_STATUS,
   isModelMultimodal,
   createDefaultOnboardingChecklist,
+  // 多部门辅助函数
+  getAgentDepartments,
+  getPrimaryDepartment,
+  normalizeDepartments,
 };

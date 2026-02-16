@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
+const { atomicWriteSync } = require('../utils/atomic-write');
 const {
   createAgentRequest,
   validateAgentRequest,
@@ -82,7 +83,8 @@ class ApprovalQueue {
         lastUpdated: new Date().toISOString(),
         requests: this.requests,
       };
-      fs.writeFileSync(getQueueFile(), JSON.stringify(data, null, 2));
+      // 使用原子写入，防止写入过程中崩溃导致文件损坏
+      atomicWriteSync(getQueueFile(), JSON.stringify(data, null, 2));
     } catch (error) {
       logger.error('保存 Agent 招聘申请失败:', error);
     }
@@ -308,17 +310,16 @@ class ApprovalQueue {
 
     // 如果批准，设置预算并创建 Agent
     if (decision.approved) {
-      const budget = decision.assignedBudget || request.profile.tokenBudget || 100000;
+      // 预留 Agent ID（带随机后缀避免同毫秒冲突）
+      request.createdAgentId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      // 预留 Agent ID
-      request.createdAgentId = `agent-${Date.now()}`;
+      // 获取职级，用于初始化工资账户
+      const level = request.profile?.level || 'staff';
+      // 自定义日薪（如果审批时指定了）
+      const customSalary = decision.assignedBudget || request.profile?.tokenBudget || null;
 
-      // 设置预算
-      budgetManager.setAgentBudget(request.createdAgentId, {
-        dailyLimit: Math.min(budget, 100000),
-        totalLimit: budget,
-        enabled: true,
-      });
+      // 初始化工资账户（使用新的工资系统）
+      budgetManager.initSalaryAccount(request.createdAgentId, level, customSalary);
 
       // 真正创建 Agent 实例
       try {
@@ -413,6 +414,25 @@ class ApprovalQueue {
         .slice(0, 100);
       this.saveToDisk();
     }
+  }
+
+  /**
+   * 清空所有已处理的记录（保留 pending 和 discussing 的）
+   * @returns {{ success: boolean, clearedCount: number }}
+   */
+  clearProcessed() {
+    const pendingRequests = this.requests.filter(
+      (r) => r.status === 'pending' || r.status === 'discussing'
+    );
+    const clearedCount = this.requests.length - pendingRequests.length;
+    
+    if (clearedCount > 0) {
+      this.requests = pendingRequests;
+      this.saveToDisk();
+      logger.info(`清空了 ${clearedCount} 条已处理的招聘记录`);
+    }
+    
+    return { success: true, clearedCount };
   }
 }
 

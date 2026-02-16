@@ -87,11 +87,18 @@ const sendToAgentTool = {
 
     logger.info(`Agent 协作: ${agentId} 发送消息给 ${resolvedId}`);
 
+    // 从 context 获取调用链和嵌套深度（用于循环检测和深度限制）
+    const callChain = context.callChain || [];
+    const nestingDepth = context.nestingDepth || 0;
+
     const result = await agentCommunication.sendMessage({
       fromAgent: agentId,
       toAgent: resolvedId,
       message,
       conversationId: context.conversationId,
+      // 传递调用链和嵌套深度
+      callChain,
+      nestingDepth,
     });
 
     if (result.success) {
@@ -223,8 +230,8 @@ const delegateTaskTool = {
 
         const isRepo = await manager.isGitRepository();
         if (isRepo) {
-          // 用 taskId 的临时占位，委派后会更新
-          const tempTaskId = `${Date.now()}`;
+          // 用 taskId 的临时占位，委派后会更新（带随机后缀避免冲突）
+          const tempTaskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const branchResult = await manager.createTaskBranch(targetId, tempTaskId, {
             checkout: false,
           });
@@ -743,6 +750,14 @@ const submitDevPlanTool = {
       return { error: `找不到关联的任务: ${taskId}` };
     }
 
+    // 状态前置检查：防止对已取消/已完成的任务提交计划
+    if (task.status === 'cancelled') {
+      return { error: '此任务已被取消，无法提交开发计划。' };
+    }
+    if (task.status === 'completed') {
+      return { error: '此任务已完成，无法提交开发计划。' };
+    }
+
     if (!task.planApprovalRequired) {
       return { error: '此任务不需要开发计划审批，可以直接开始执行。' };
     }
@@ -1130,6 +1145,18 @@ const suspendSubordinateTool = {
       return { error: result.error };
     }
 
+    // 中止该 Agent 的活跃任务并清理通信队列
+    try {
+      const { chatManager } = require('../chat');
+      chatManager._abortTask(targetId, '停职');
+      chatManager._proactiveQueue.delete(targetId);
+
+      const { agentCommunication } = require('../collaboration/agent-communication');
+      agentCommunication.clearAgentQueues(targetId);
+    } catch (e) {
+      logger.warn('停职时清理任务/队列失败:', e.message);
+    }
+
     // 通知老板
     try {
       const { chatManager } = require('../chat');
@@ -1140,7 +1167,7 @@ const suspendSubordinateTool = {
       logger.warn('通知老板停职结果失败:', e.message);
     }
 
-    logger.info(`Agent 停职: ${agentId} 停职了 ${targetId}`, { reason });
+    logger.info(`Agent 停职: ${agentId} 停职了 ${targetId}，已中止相关任务`, { reason });
 
     return {
       success: true,
@@ -1152,7 +1179,7 @@ const suspendSubordinateTool = {
         status: 'suspended',
       },
       reason,
-      note: '停职期间该员工无法使用任何工具、无法与同事沟通。复职需要老板批准后由 CHRO 执行。',
+      note: '停职期间该员工无法使用任何工具、无法与同事沟通，所有进行中的任务已被中止。复职需要老板批准后由 CHRO 执行。',
     };
   },
 };
@@ -1290,8 +1317,10 @@ const cancelDelegatedTaskTool = {
       if (!task) {
         return { error: `未找到任务 ${task_id}，或你不是该任务的发起人` };
       }
-      if (task.status === 'completed' || task.status === 'cancelled') {
-        return { error: `任务 ${task_id} 已经是 ${task.status} 状态，无需取消` };
+      // 严格状态检查：只允许取消 pending、in_progress、awaiting_plan_approval 状态的任务
+      const cancellableStatuses = ['pending', 'in_progress', 'awaiting_plan_approval'];
+      if (!cancellableStatuses.includes(task.status)) {
+        return { error: `任务 ${task_id} 当前状态为 ${task.status}，无法取消（只能取消 pending/in_progress/awaiting_plan_approval 状态的任务）` };
       }
       agentCommunication.updateTask(task_id, {
         status: 'cancelled',
@@ -1336,6 +1365,160 @@ const cancelDelegatedTaskTool = {
   },
 };
 
+// ═══════════════════════════════════════════════════════════
+// 部门群聊工具
+// ═══════════════════════════════════════════════════════════
+
+const departmentGroup = require('../chat/department-group');
+
+/**
+ * 在部门群聊中发送消息
+ */
+const postToDepartmentTool = {
+  name: 'post_to_department',
+  description: `在部门群聊中发送消息，用于工作进度汇报和团队讨论。
+
+使用场景：
+- 汇报工作进度或任务完成情况
+- 与团队成员讨论工作相关问题
+- 通知团队重要信息
+
+注意：
+- 消息会发送到你所属的部门群聊
+- 老板和部门所有成员都能看到
+- 如果需要特定人回复，使用 mention 参数 @ 对方
+- 非工作内容请使用 send_to_agent 私信`,
+  category: 'collaboration',
+  parameters: {
+    content: {
+      type: 'string',
+      description: '消息内容',
+      required: true,
+    },
+    mention: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '要 @ 的同事 ID 列表（可选，被 @ 的人会收到通知并可能回复）',
+      required: false,
+    },
+  },
+  requiredPermissions: [],
+  async execute(args, context) {
+    const { content, mention = [] } = args;
+    const { agentId } = context;
+
+    if (!content || content.trim().length === 0) {
+      return { error: '消息内容不能为空' };
+    }
+
+    // 获取调用者所属的部门信息
+    const deptInfo = departmentGroup.getAgentDepartmentInfo(agentId);
+    if (!deptInfo) {
+      return { error: '你当前不属于任何部门群聊。只有 CXO 团队成员才能使用此功能。' };
+    }
+
+    // 发送消息到部门群聊
+    const result = departmentGroup.postToDepartment(
+      deptInfo.departmentId,
+      agentId,
+      content,
+      mention
+    );
+
+    if (!result.success) {
+      return { error: result.error || '发送失败' };
+    }
+
+    const callerConfig = agentConfigStore.get(agentId);
+    logger.info(`Agent ${agentId} 在部门群聊发送消息`, {
+      departmentId: deptInfo.departmentId,
+      contentLength: content.length,
+      requestedMentions: mention.length,
+      effectiveMentions: result.effectiveMentions?.length || 0,
+    });
+
+    // 构建返回消息
+    let message = '消息已发送到部门群聊';
+    if (result.filteredMentions?.length > 0) {
+      const filteredNames = result.filteredMentions
+        .map((id) => agentConfigStore.get(id)?.name || id)
+        .join('、');
+      message += `。注意：${filteredNames} 正在冷却中（30秒内已被触发过），本次 @ 未生效。`;
+    }
+
+    return {
+      success: true,
+      message,
+      departmentId: deptInfo.departmentId,
+      effectiveMentions: result.effectiveMentions?.length > 0 ? result.effectiveMentions : undefined,
+      filteredMentions: result.filteredMentions?.length > 0 ? result.filteredMentions : undefined,
+    };
+  },
+};
+
+/**
+ * 重命名部门群聊（仅限部门负责人）
+ */
+const renameDepartmentGroupTool = {
+  name: 'rename_department_group',
+  description: `重命名部门群聊。仅限部门负责人（CXO）使用。
+
+使用场景：
+- 自定义团队群聊名称
+- 更新群聊名称以反映团队变化`,
+  category: 'collaboration',
+  parameters: {
+    name: {
+      type: 'string',
+      description: '新的群聊名称',
+      required: true,
+    },
+  },
+  requiredPermissions: [],
+  async execute(args, context) {
+    const { name } = args;
+    const { agentId } = context;
+
+    if (!name || name.trim().length === 0) {
+      return { error: '群名不能为空' };
+    }
+
+    if (name.length > 50) {
+      return { error: '群名不能超过 50 个字符' };
+    }
+
+    // 检查调用者是否是 CXO
+    const callerConfig = agentConfigStore.get(agentId);
+    if (!callerConfig || callerConfig.level !== 'c_level') {
+      return { error: '只有部门负责人（C-Level）才能重命名部门群聊' };
+    }
+
+    const departmentId = callerConfig.department;
+    if (!departmentId) {
+      return { error: '无法确定你的部门' };
+    }
+
+    // 执行重命名
+    const result = departmentGroup.renameDepartmentGroup(departmentId, name.trim());
+
+    if (!result.success) {
+      return { error: result.error || '重命名失败' };
+    }
+
+    logger.info(`CXO ${agentId} 重命名部门群聊`, {
+      departmentId,
+      newName: name.trim(),
+    });
+
+    return {
+      success: true,
+      message: `部门群聊已重命名为「${name.trim()}」`,
+      departmentId,
+      newName: name.trim(),
+    };
+  },
+};
+
 /**
  * 注册所有协作工具
  */
@@ -1356,6 +1539,8 @@ function registerCollaborationTools() {
   toolRegistry.register(suspendSubordinateTool);
   toolRegistry.register(reinstateSubordinateTool);
   toolRegistry.register(cancelDelegatedTaskTool);
+  toolRegistry.register(postToDepartmentTool);
+  toolRegistry.register(renameDepartmentGroupTool);
 
   logger.info('Agent 协作工具已注册');
 }
@@ -1378,4 +1563,6 @@ module.exports = {
   suspendSubordinateTool,
   reinstateSubordinateTool,
   cancelDelegatedTaskTool,
+  postToDepartmentTool,
+  renameDepartmentGroupTool,
 };

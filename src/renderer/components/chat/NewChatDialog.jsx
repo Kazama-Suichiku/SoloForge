@@ -16,7 +16,10 @@ export default function NewChatDialog({ isOpen, onClose }) {
   const agentsMap = useAgentStore((s) => s.agents);
   const createGroupChat = useChatStore((s) => s.createGroupChat);
 
-  const agents = useMemo(() => Array.from(agentsMap.values()), [agentsMap]);
+  const agents = useMemo(
+    () => Array.from(agentsMap.values()).filter((a) => a.agentStatus !== 'terminated'),
+    [agentsMap]
+  );
 
   const [selectedAgents, setSelectedAgents] = useState([]);
   const [groupName, setGroupName] = useState('');

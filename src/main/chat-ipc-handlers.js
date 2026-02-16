@@ -8,6 +8,7 @@ const { ipcMain } = require('electron');
 const CHANNELS = require('../shared/ipc-channels');
 const { chatManager } = require('./chat');
 const { logger } = require('./utils/logger');
+const departmentGroup = require('./chat/department-group');
 
 /**
  * 设置聊天 IPC Handlers
@@ -96,6 +97,23 @@ function setupChatIpcHandlers(webContents) {
     });
     return result;
   });
+
+  // 清空已处理的开除记录
+  ipcMain.handle(CHANNELS.TERMINATION_CLEAR_PROCESSED, async () => {
+    logger.info('Dashboard: 清空已处理的开除记录');
+    return terminationQueue.clearProcessed();
+  });
+
+  // 获取所有部门群聊（前端初始化时同步）
+  ipcMain.handle(CHANNELS.CHAT_DEPT_GROUP_GET_ALL, async () => {
+    logger.info('Chat IPC: 获取所有部门群聊');
+    try {
+      return departmentGroup.getAllDepartmentGroups();
+    } catch (err) {
+      logger.error('获取部门群聊失败:', err);
+      return [];
+    }
+  });
 }
 
 /**
@@ -108,6 +126,8 @@ function removeChatIpcHandlers() {
   ipcMain.removeHandler(CHANNELS.AGENT_TASK_ABORT);
   ipcMain.removeHandler(CHANNELS.TERMINATION_GET_PENDING);
   ipcMain.removeHandler(CHANNELS.TERMINATION_DECIDE);
+  ipcMain.removeHandler(CHANNELS.TERMINATION_CLEAR_PROCESSED);
+  ipcMain.removeHandler(CHANNELS.CHAT_DEPT_GROUP_GET_ALL);
 }
 
 module.exports = {

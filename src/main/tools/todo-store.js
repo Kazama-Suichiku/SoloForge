@@ -197,6 +197,26 @@ class TodoStore {
   }
 
   /**
+   * 移除 Agent 的所有 TODO（开除时调用）
+   * @param {string} agentId
+   * @returns {number} 移除的 TODO 数量
+   */
+  removeAgent(agentId) {
+    if (!this._loaded) this.load();
+
+    const list = this._data.get(agentId) || [];
+    const count = list.length;
+
+    if (count > 0) {
+      this._data.delete(agentId);
+      this._save();
+      logger.info(`TodoStore: 已移除 Agent ${agentId} 的 ${count} 个 TODO`);
+    }
+
+    return count;
+  }
+
+  /**
    * 通知前端变更
    */
   _notifyChange(agentId) {
