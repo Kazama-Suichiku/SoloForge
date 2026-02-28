@@ -17,6 +17,7 @@ import {
   Dimensions,
   Image,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { storage } from '../core/storage';
 import { Agent } from '../core/config/agents';
 
@@ -215,6 +216,7 @@ export default function HRScreen() {
       const index = allAgents.findIndex((a: Agent) => a.id === editingAgent.id);
 
       if (index !== -1) {
+        const isImageAvatar = editForm.avatar.startsWith('data:image/') || editForm.avatar.startsWith('http');
         allAgents[index] = {
           ...allAgents[index],
           name: editForm.name,
@@ -224,6 +226,14 @@ export default function HRScreen() {
           level: editForm.level,
           reportsTo: editForm.reportsTo || undefined,
           avatar: editForm.avatar,
+          updatedAt: Date.now(),
+          ...(isImageAvatar ? {
+            avatarThumb: editForm.avatar,
+            avatarFull: editForm.avatar,
+          } : {
+            avatarThumb: undefined,
+            avatarFull: undefined,
+          }),
         };
         await storage.setAgents(allAgents);
         Alert.alert('成功', '员工信息已更新');
@@ -488,14 +498,50 @@ export default function HRScreen() {
                 ) : (
                   <Text style={styles.modalAvatar}>{editForm.avatar || editingAgent?.avatar || '👤'}</Text>
                 )}
+                <View style={styles.avatarButtons}>
+                  <TouchableOpacity
+                    style={styles.avatarPickButton}
+                    onPress={async () => {
+                      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                      if (status !== 'granted') {
+                        Alert.alert('权限不足', '需要相册权限才能选择头像');
+                        return;
+                      }
+                      const result = await ImagePicker.launchImageLibraryAsync({
+                        mediaTypes: ['images'],
+                        allowsEditing: true,
+                        aspect: [1, 1],
+                        quality: 0.6,
+                        base64: true,
+                      });
+                      if (!result.canceled && result.assets[0].base64) {
+                        const uri = result.assets[0].uri;
+                        const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
+                        const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+                        const base64Data = `data:${mime};base64,${result.assets[0].base64}`;
+                        setEditForm({ ...editForm, avatar: base64Data });
+                      }
+                    }}
+                  >
+                    <Text style={styles.avatarPickText}>📷 从相册选择</Text>
+                  </TouchableOpacity>
+                  {(editForm.avatar || '').startsWith('data:image/') && (
+                    <TouchableOpacity
+                      style={[styles.avatarPickButton, styles.avatarClearButton]}
+                      onPress={() => setEditForm({ ...editForm, avatar: '👤' })}
+                    >
+                      <Text style={styles.avatarPickText}>🗑️ 清除图片</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
 
-              <Text style={styles.label}>头像（Emoji 或保持当前图片）</Text>
+              <Text style={styles.label}>头像（输入 Emoji 或从相册选择图片）</Text>
               <TextInput
                 style={[styles.input, styles.emojiInput]}
-                value={(editForm.avatar || '').startsWith('data:image/') ? '📷 当前为图片' : editForm.avatar}
+                value={(editForm.avatar || '').startsWith('data:image/') ? '📷 已选择图片' : editForm.avatar}
                 onChangeText={(text) => {
-                  if (text !== '📷 当前为图片') {
+                  if (text !== '📷 已选择图片') {
                     setEditForm({ ...editForm, avatar: text });
                   }
                 }}
@@ -955,6 +1001,25 @@ const styles = StyleSheet.create({
   avatarSection: {
     alignItems: 'center',
     marginBottom: 16,
+  },
+  avatarButtons: {
+    flexDirection: 'row',
+    marginTop: 12,
+    gap: 8,
+  },
+  avatarPickButton: {
+    backgroundColor: '#4f46e5',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  avatarClearButton: {
+    backgroundColor: '#ef4444',
+  },
+  avatarPickText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   emojiInput: {
     fontSize: 28,

@@ -414,22 +414,23 @@ class CloudSyncService {
       });
     }
 
-    // 收集消息
+    // 收集消息（使用持久化的 updatedAt，避免不一致比较）
     for (const conv of conversations) {
       const messages = await storage.getMessages(conv.id);
       for (const msg of messages) {
+        const ts = new Date(msg.timestamp).getTime();
         data.messages.push({
           id: msg.id,
           conversationId: conv.id,
           role: msg.role,
           content: msg.content,
-          timestamp: new Date(msg.timestamp).getTime(),
-          updatedAt: new Date(msg.timestamp).getTime(),
+          timestamp: ts,
+          updatedAt: msg.updatedAt || ts,
         });
       }
     }
 
-    // 收集 Agents
+    // 收集 Agents（使用持久化的 updatedAt，避免每次都推全量）
     const agents = await storage.getAgents();
     for (const agent of agents) {
       data.agents.push({
@@ -446,11 +447,11 @@ class CloudSyncService {
         description: agent.description,
         model: agent.model,
         status: agent.status || 'active',
-        updatedAt: Date.now(),
+        updatedAt: (agent as any).updatedAt || Date.now(),
       });
     }
 
-    // 收集 Boss 配置
+    // 收集 Boss 配置（使用持久化的 updatedAt）
     const boss = await storage.getBossConfig();
     if (boss) {
       data.bossConfig = {
@@ -458,7 +459,7 @@ class CloudSyncService {
         avatar: boss.avatar,
         avatarThumb: boss.avatarThumb,
         avatarFull: boss.avatarFull,
-        updatedAt: Date.now(),
+        updatedAt: boss.updatedAt || Date.now(),
       };
     }
 
@@ -524,10 +525,13 @@ class CloudSyncService {
             role: msg.role,
             content: msg.content,
             timestamp: new Date(msg.timestamp).toISOString(),
+            updatedAt: msg.updatedAt,
           };
 
           if (existingIndex !== -1) {
-            if (msg.updatedAt > new Date(messages[existingIndex].timestamp).getTime()) {
+            const existingUpdatedAt = messages[existingIndex].updatedAt
+              || new Date(messages[existingIndex].timestamp).getTime();
+            if (msg.updatedAt > existingUpdatedAt) {
               messages[existingIndex] = newMsg;
             }
           } else {
@@ -544,7 +548,7 @@ class CloudSyncService {
       }
     }
 
-    // 合并 Agents
+    // 合并 Agents（保留 updatedAt 用于后续增量比较）
     if (remoteData.agents?.length) {
       const localAgents = await storage.getAgents();
       const agentMap = new Map(localAgents.map(a => [a.id, a]));
@@ -554,10 +558,12 @@ class CloudSyncService {
           agentMap.delete(agent.id);
         } else {
           const existing = agentMap.get(agent.id);
-          if (!existing || agent.updatedAt > ((existing as any).updatedAt || 0)) {
+          const existingUpdatedAt = (existing as any)?.updatedAt || 0;
+          if (!existing || agent.updatedAt > existingUpdatedAt) {
             agentMap.set(agent.id, {
               ...existing,
               ...agent,
+              updatedAt: agent.updatedAt,
             });
             stats.agents++;
           }

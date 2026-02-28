@@ -31,36 +31,58 @@ const API_URL = 'https://api.deepseek.com/chat/completions';
 const BUILTIN_API_KEY = 'sk-aacb18e63ffe48459c7badfa4c0a515d';
 
 /**
- * 清理消息历史，移除无效的 tool 消息
- * DeepSeek API 要求 tool 消息必须紧跟在有 tool_calls 的 assistant 消息之后
+ * 清理消息历史，确保 tool 消息结构合法
+ * DeepSeek API 要求：
+ * 1. tool 消息必须紧跟在有 tool_calls 的 assistant 消息之后
+ * 2. 每个 tool_call 都必须有对应的 tool 响应
  */
 function sanitizeMessages(messages: Message[]): Message[] {
   const result: Message[] = [];
-  
-  for (const msg of messages) {
-    // 直接丢弃所有 tool 角色的消息
-    if (msg.role === 'tool') {
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    if (msg.role === 'system' || msg.role === 'user') {
+      result.push({ role: msg.role, content: msg.content || '' });
       continue;
     }
-    
-    // assistant 消息：移除 tool_calls，只保留文本内容
+
     if (msg.role === 'assistant') {
-      result.push({
-        role: 'assistant',
-        content: msg.content || '(无内容)',
-      });
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+        result.push({
+          role: 'assistant',
+          content: msg.content || '',
+          tool_calls: msg.tool_calls,
+        });
+        let j = i + 1;
+        while (j < messages.length && messages[j].role === 'tool') {
+          const toolMsg = messages[j];
+          if (toolMsg.tool_call_id && toolCallIds.has(toolMsg.tool_call_id)) {
+            result.push({
+              role: 'tool',
+              content: toolMsg.content || '',
+              tool_call_id: toolMsg.tool_call_id,
+            });
+            toolCallIds.delete(toolMsg.tool_call_id);
+          }
+          j++;
+        }
+        for (const missingId of toolCallIds) {
+          result.push({
+            role: 'tool',
+            content: JSON.stringify({ error: '工具执行结果丢失' }),
+            tool_call_id: missingId,
+          });
+        }
+        i = j - 1;
+      } else {
+        result.push({ role: 'assistant', content: msg.content || '(无内容)' });
+      }
       continue;
-    }
-    
-    // user 和 system 消息直接保留
-    if (msg.content || msg.role === 'system') {
-      result.push({
-        role: msg.role,
-        content: msg.content || '',
-      });
     }
   }
-  
+
   return result;
 }
 
@@ -69,7 +91,6 @@ class LLMService {
 
   async initialize(): Promise<void> {
     this.apiKey = await storage.getApiKey();
-    // 如果没有设置，使用内置 Key
     if (!this.apiKey) {
       this.apiKey = BUILTIN_API_KEY;
       await storage.setApiKey(BUILTIN_API_KEY);
@@ -85,16 +106,28 @@ class LLMService {
     return this.apiKey;
   }
 
+  /**
+   * 非流式调用 - 用于工具调用轮次，确保拿到完整的 tool_calls
+   */
   async chat(
     messages: Message[],
     options: ChatOptions = {}
   ): Promise<{ content: string; toolCalls?: any[]; usage?: any }> {
-    if (!this.apiKey) {
-      throw new Error('API Key 未设置');
-    }
+    if (!this.apiKey) throw new Error('API Key 未设置');
 
-    // 清理消息历史，移除无效的 tool 消息
     const cleanMessages = sanitizeMessages(messages);
+    console.log('[LLM] chat 非流式请求, 消息数:', cleanMessages.length, 'tools:', options.tools?.length || 0);
+
+    const body: any = {
+      model: options.model || DEFAULT_MODEL,
+      messages: cleanMessages,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens || 4096,
+      stream: false,
+    };
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools;
+    }
 
     const response = await fetch(API_URL, {
       method: 'POST',
@@ -102,14 +135,7 @@ class LLMService {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify({
-        model: options.model || DEFAULT_MODEL,
-        messages: cleanMessages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens || 4096,
-        tools: options.tools,
-        stream: false,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -120,6 +146,10 @@ class LLMService {
     const data = await response.json();
     const choice = data.choices?.[0];
 
+    console.log('[LLM] chat 响应, finish_reason:', choice?.finish_reason,
+      'tool_calls:', choice?.message?.tool_calls?.length || 0,
+      'content_len:', choice?.message?.content?.length || 0);
+
     return {
       content: choice?.message?.content || '',
       toolCalls: choice?.message?.tool_calls,
@@ -127,6 +157,9 @@ class LLMService {
     };
   }
 
+  /**
+   * 流式调用 - 仅用于最终文本输出（无工具调用时）
+   */
   async chatStream(
     messages: Message[],
     options: ChatOptions,
@@ -138,25 +171,50 @@ class LLMService {
     }
 
     try {
-      // 清理消息历史，移除无效的 tool 消息
       const cleanMessages = sanitizeMessages(messages);
+      console.log('[LLM] chatStream 请求, 消息数:', cleanMessages.length, 'tools:', options.tools?.length || 0);
 
-      // React Native 不支持 ReadableStream，使用非流式请求模拟
-      // 先尝试流式，如果不支持则降级
+      // 如果有工具定义，使用非流式请求确保 tool_calls 完整
+      if (options.tools && options.tools.length > 0) {
+        const result = await this.chat(messages, { ...options, stream: false });
+
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          console.log('[LLM] 检测到工具调用:', result.toolCalls.map((tc: any) => tc.function?.name));
+          // 先输出文本内容（如果有的话）
+          if (result.content) {
+            callbacks.onToken(result.content);
+          }
+          for (const tc of result.toolCalls) {
+            callbacks.onToolCall?.(tc);
+          }
+          callbacks.onComplete(result.content, result.usage);
+          return;
+        }
+
+        // 没有工具调用，直接输出文本
+        if (result.content) {
+          callbacks.onToken(result.content);
+        }
+        callbacks.onComplete(result.content, result.usage);
+        return;
+      }
+
+      // 没有工具定义时，尝试流式输出
+      const body: any = {
+        model: options.model || DEFAULT_MODEL,
+        messages: cleanMessages,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens || 4096,
+        stream: true,
+      };
+
       const response = await fetch(API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({
-          model: options.model || DEFAULT_MODEL,
-          messages: cleanMessages,
-          temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens || 4096,
-          tools: options.tools,
-          stream: true,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -165,137 +223,25 @@ class LLMService {
         return;
       }
 
-      // React Native fetch 可能不支持 getReader()
-      // 尝试使用 getReader，如果失败则读取整个响应
-      let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-      try {
-        reader = response.body?.getReader() || null;
-      } catch (e) {
-        reader = null;
-      }
-
-      if (!reader) {
-        // 降级：读取整个响应并解析 SSE
-        const text = await response.text();
-        let fullContent = '';
-        let toolCalls: any[] = [];
-        let usage: any = null;
-
-        const lines = text.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') continue;
-
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta;
-
-              if (delta?.content) {
-                fullContent += delta.content;
-                callbacks.onToken(delta.content);
-              }
-
-              if (delta?.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  if (tc.index !== undefined) {
-                    if (!toolCalls[tc.index]) {
-                      toolCalls[tc.index] = {
-                        id: tc.id,
-                        type: tc.type,
-                        function: { name: '', arguments: '' },
-                      };
-                    }
-                    if (tc.function?.name) {
-                      toolCalls[tc.index].function.name = tc.function.name;
-                    }
-                    if (tc.function?.arguments) {
-                      toolCalls[tc.index].function.arguments += tc.function.arguments;
-                    }
-                  }
-                }
-              }
-
-              if (parsed.usage) {
-                usage = parsed.usage;
-              }
-            } catch {
-              // 忽略解析错误
-            }
-          }
-        }
-
-        if (toolCalls.length > 0 && callbacks.onToolCall) {
-          for (const tc of toolCalls) {
-            callbacks.onToolCall(tc);
-          }
-        }
-
-        callbacks.onComplete(fullContent, usage);
-        return;
-      }
-
-      // 如果支持 getReader，使用流式处理
-      const decoder = new TextDecoder();
+      // 解析 SSE 响应
+      const text = await response.text();
       let fullContent = '';
-      let toolCalls: any[] = [];
       let usage: any = null;
+      const lines = text.split('\n');
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') continue;
-
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta;
-
-              if (delta?.content) {
-                fullContent += delta.content;
-                callbacks.onToken(delta.content);
-              }
-
-              if (delta?.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  if (tc.index !== undefined) {
-                    if (!toolCalls[tc.index]) {
-                      toolCalls[tc.index] = {
-                        id: tc.id,
-                        type: tc.type,
-                        function: { name: '', arguments: '' },
-                      };
-                    }
-                    if (tc.function?.name) {
-                      toolCalls[tc.index].function.name = tc.function.name;
-                    }
-                    if (tc.function?.arguments) {
-                      toolCalls[tc.index].function.arguments += tc.function.arguments;
-                    }
-                  }
-                }
-              }
-
-              if (parsed.usage) {
-                usage = parsed.usage;
-              }
-            } catch {
-              // 忽略解析错误
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta;
+            if (delta?.content) {
+              fullContent += delta.content;
+              callbacks.onToken(delta.content);
             }
-          }
-        }
-      }
-
-      // 处理工具调用
-      if (toolCalls.length > 0 && callbacks.onToolCall) {
-        for (const tc of toolCalls) {
-          callbacks.onToolCall(tc);
+            if (parsed.usage) usage = parsed.usage;
+          } catch {}
         }
       }
 

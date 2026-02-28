@@ -125,13 +125,13 @@ class ChatManager {
     messages.push(userMessage);
     await storage.setMessages(conversationId, messages);
 
-    // 构建 LLM 消息（过滤掉 tool 相关消息，避免 API 报错）
-    const recentMessages = messages.slice(-20)
-      .filter(m => m.role === 'user' || m.role === 'assistant')
-      .map(m => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content || '(无内容)',
-      }));
+    // 构建 LLM 消息（保留 tool_calls 和 tool 响应，由 sanitizeMessages 保证格式合法）
+    const recentMessages = messages.slice(-30).map(m => ({
+      role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+      content: m.content || '',
+      ...(m.toolCalls?.length ? { tool_calls: m.toolCalls } : {}),
+      ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+    }));
 
     const llmMessages: Message[] = [
       {
@@ -206,89 +206,103 @@ class ChatManager {
   ): Promise<void> {
     const agent = await this.getAgent(agentId);
     const bossConfig = await storage.getBossConfig();
+    const agentTools = getToolsForAgent(agentId, agent?.role);
+    const MAX_TOOL_ITERATIONS = 20;
+    let currentToolCalls = toolCalls;
+    let iteration = 0;
 
-    // 添加助手消息（带工具调用）
-    const assistantMessage: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString(),
-      toolCalls,
-    };
-    messages.push(assistantMessage);
+    while (currentToolCalls.length > 0 && iteration < MAX_TOOL_ITERATIONS) {
+      iteration++;
+      console.log(`[ChatManager] 工具调用轮次 ${iteration}, 调用数: ${currentToolCalls.length}`);
 
-    // 执行每个工具
-    for (const toolCall of toolCalls) {
-      const toolName = toolCall.function?.name;
-      let args = {};
-      
-      try {
-        args = JSON.parse(toolCall.function?.arguments || '{}');
-      } catch {}
-
-      callbacks.onToolCall?.(toolName, args);
-
-      const result = await toolExecutor.execute(toolName, args, { agentId });
-      
-      callbacks.onToolResult?.(toolName, result);
-
-      // 添加工具结果消息
-      const toolMessage: ChatMessage = {
-        id: `msg-${Date.now()}-tool`,
-        role: 'tool',
-        content: JSON.stringify(result.result || { error: result.error }),
+      // 添加 assistant 消息（带 tool_calls）
+      const assistantMsg: ChatMessage = {
+        id: `msg-${Date.now()}-${iteration}`,
+        role: 'assistant',
+        content: '',
         timestamp: new Date().toISOString(),
-        toolCallId: toolCall.id,
+        toolCalls: currentToolCalls,
       };
-      messages.push(toolMessage);
+      messages.push(assistantMsg);
+
+      // 执行每个工具
+      for (const tc of currentToolCalls) {
+        const toolName = tc.function?.name;
+        let args = {};
+        try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+
+        callbacks.onToolCall?.(toolName, args);
+        const result = await toolExecutor.execute(toolName, args, { agentId });
+        callbacks.onToolResult?.(toolName, result);
+
+        const toolMsg: ChatMessage = {
+          id: `msg-${Date.now()}-tool-${tc.id}`,
+          role: 'tool',
+          content: JSON.stringify(result.result || { error: result.error }),
+          timestamp: new Date().toISOString(),
+          toolCallId: tc.id,
+        };
+        messages.push(toolMsg);
+      }
+
+      await storage.setMessages(conversationId, messages);
+
+      // 把工具结果送回 LLM，继续对话（带 tools 参数，允许再次调用工具）
+      const llmMessages: Message[] = [
+        { role: 'system', content: getAgentSystemPrompt(agent!, bossConfig.name) },
+        ...messages.slice(-40).map(m => ({
+          role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+          content: m.content,
+          ...(m.toolCalls?.length ? { tool_calls: m.toolCalls } : {}),
+          ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+        })),
+      ];
+
+      const result = await llm.chat(llmMessages, { tools: agentTools });
+
+      if (result.usage) {
+        await this.recordTokenUsage(agentId, result.usage);
+      }
+
+      if (result.toolCalls && result.toolCalls.length > 0) {
+        // LLM 要继续调用工具，进入下一轮
+        console.log(`[ChatManager] LLM 要求继续调用:`, result.toolCalls.map((tc: any) => tc.function?.name));
+        if (result.content) {
+          callbacks.onToken(result.content);
+        }
+        currentToolCalls = result.toolCalls;
+      } else {
+        // LLM 不再调工具，输出最终文本
+        if (result.content) {
+          callbacks.onToken(result.content);
+        }
+        const finalMsg: ChatMessage = {
+          id: `msg-${Date.now()}-final`,
+          role: 'assistant',
+          content: result.content,
+          timestamp: new Date().toISOString(),
+        };
+        messages.push(finalMsg);
+        await storage.setMessages(conversationId, messages);
+        await this.updateConversationTime(conversationId);
+        callbacks.onComplete(finalMsg);
+        return;
+      }
     }
 
-    await storage.setMessages(conversationId, messages);
-
-    // 继续对话，让 LLM 根据工具结果回复
-    const llmMessages: Message[] = [
-      {
-        role: 'system',
-        content: getAgentSystemPrompt(agent!, bossConfig.name),
-      },
-      ...messages.slice(-30).map(m => ({
-        role: m.role as 'user' | 'assistant' | 'system' | 'tool',
-        content: m.content,
-        tool_calls: m.toolCalls,
-        tool_call_id: m.toolCallId,
-      })),
-    ];
-
-    let fullContent = '';
-
-    await llm.chatStream(
-      llmMessages,
-      { stream: true },
-      {
-        onToken: (token) => {
-          fullContent += token;
-          callbacks.onToken(token);
-        },
-        onComplete: async (content, usage) => {
-          if (usage) {
-            await this.recordTokenUsage(agentId, usage);
-          }
-
-          const finalMessage: ChatMessage = {
-            id: `msg-${Date.now()}`,
-            role: 'assistant',
-            content: fullContent,
-            timestamp: new Date().toISOString(),
-          };
-          messages.push(finalMessage);
-          await storage.setMessages(conversationId, messages);
-          await this.updateConversationTime(conversationId);
-
-          callbacks.onComplete(finalMessage);
-        },
-        onError: callbacks.onError,
-      }
-    );
+    if (iteration >= MAX_TOOL_ITERATIONS) {
+      console.warn('[ChatManager] 达到最大工具调用轮数');
+      const maxMsg: ChatMessage = {
+        id: `msg-${Date.now()}-max`,
+        role: 'assistant',
+        content: '（已达到最大工具调用次数）',
+        timestamp: new Date().toISOString(),
+      };
+      messages.push(maxMsg);
+      await storage.setMessages(conversationId, messages);
+      await this.updateConversationTime(conversationId);
+      callbacks.onComplete(maxMsg);
+    }
   }
 
   private async recordTokenUsage(agentId: string, usage: any): Promise<void> {
