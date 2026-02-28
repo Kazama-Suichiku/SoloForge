@@ -154,6 +154,9 @@ export default function HRScreen() {
     loadAgents();
   };
 
+  const pendingAgentRef = React.useRef<Agent | null>(null);
+  const [pickingAvatar, setPickingAvatar] = useState(false);
+
   const openEditModal = (agent: Agent) => {
     setEditingAgent(agent);
     setEditForm({
@@ -166,6 +169,46 @@ export default function HRScreen() {
       avatar: agent.avatar || '',
     });
   };
+
+  const pickAvatarFromLibrary = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('权限不足', '需要相册权限才能选择头像');
+      return;
+    }
+    pendingAgentRef.current = editingAgent;
+    setEditingAgent(null);
+    setPickingAvatar(true);
+  };
+
+  useEffect(() => {
+    if (!pickingAvatar) return;
+    setPickingAvatar(false);
+
+    (async () => {
+      try {
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'],
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.6,
+          base64: true,
+        });
+        if (!result.canceled && result.assets[0].base64) {
+          const uri = result.assets[0].uri;
+          const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
+          const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+          const base64Data = `data:${mime};base64,${result.assets[0].base64}`;
+          setEditForm(prev => ({ ...prev, avatar: base64Data }));
+        }
+      } catch (e) {
+        console.error('Image picker error:', e);
+      } finally {
+        setEditingAgent(pendingAgentRef.current);
+        pendingAgentRef.current = null;
+      }
+    })();
+  }, [pickingAvatar]);
 
   const renderAvatar = (
     avatar: string,
@@ -501,27 +544,7 @@ export default function HRScreen() {
                 <View style={styles.avatarButtons}>
                   <TouchableOpacity
                     style={styles.avatarPickButton}
-                    onPress={async () => {
-                      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-                      if (status !== 'granted') {
-                        Alert.alert('权限不足', '需要相册权限才能选择头像');
-                        return;
-                      }
-                      const result = await ImagePicker.launchImageLibraryAsync({
-                        mediaTypes: ['images'],
-                        allowsEditing: true,
-                        aspect: [1, 1],
-                        quality: 0.6,
-                        base64: true,
-                      });
-                      if (!result.canceled && result.assets[0].base64) {
-                        const uri = result.assets[0].uri;
-                        const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
-                        const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-                        const base64Data = `data:${mime};base64,${result.assets[0].base64}`;
-                        setEditForm({ ...editForm, avatar: base64Data });
-                      }
-                    }}
+                    onPress={pickAvatarFromLibrary}
                   >
                     <Text style={styles.avatarPickText}>📷 从相册选择</Text>
                   </TouchableOpacity>

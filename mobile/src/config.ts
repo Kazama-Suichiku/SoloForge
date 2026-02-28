@@ -50,7 +50,7 @@ export const config = {
   APP_NAME: 'SoloForge Mobile',
   
   // 版本号
-  VERSION: '2.5.3',
+  VERSION: '2.5.4',
 };
 
 export default config;
