@@ -1,0 +1,11 @@
+name = "soloforge-sync"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "soloforge-sync"
+database_id = "d98d234e-81e3-4317-8bb1-667be929f2c1"
+
+[vars]
+SYNC_SECRET = "soloforge-sync-secret-change-me"
