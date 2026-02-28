@@ -155,7 +155,6 @@ export default function HRScreen() {
   };
 
   const pendingAgentRef = React.useRef<Agent | null>(null);
-  const [pickingAvatar, setPickingAvatar] = useState(false);
 
   const openEditModal = (agent: Agent) => {
     setEditingAgent(agent);
@@ -178,14 +177,8 @@ export default function HRScreen() {
     }
     pendingAgentRef.current = editingAgent;
     setEditingAgent(null);
-    setPickingAvatar(true);
-  };
 
-  useEffect(() => {
-    if (!pickingAvatar) return;
-    setPickingAvatar(false);
-
-    (async () => {
+    setTimeout(async () => {
       try {
         const result = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ['images'],
@@ -207,8 +200,8 @@ export default function HRScreen() {
         setEditingAgent(pendingAgentRef.current);
         pendingAgentRef.current = null;
       }
-    })();
-  }, [pickingAvatar]);
+    }, 500);
+  };
 
   const renderAvatar = (
     avatar: string,

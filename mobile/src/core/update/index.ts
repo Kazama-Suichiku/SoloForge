@@ -7,8 +7,8 @@ import { Alert, Linking, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const UPDATE_CHECK_KEY = '@soloforge/last_update_check';
-const CURRENT_VERSION = '2.5.4';
-const CURRENT_VERSION_CODE = 254;
+const CURRENT_VERSION = '2.5.5';
+const CURRENT_VERSION_CODE = 255;
 const DEFAULT_SERVER_URL = 'https://soloforge-sync.fengzhongcuizhu.workers.dev';
 
 interface VersionInfo {
