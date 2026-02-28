@@ -1,0 +1,24 @@
+[
+  {
+    "id": "mem-1771420702734-ej2zye4iv",
+    "type": "fact",
+    "content": "测试记忆内容",
+    "summary": "测试摘要",
+    "scope": "shared",
+    "agentId": null,
+    "source": {
+      "type": "system",
+      "conversationId": null,
+      "taskId": null
+    },
+    "tags": [],
+    "relatedAgents": [],
+    "relatedMemoryIds": [],
+    "createdAt": 1771420702734,
+    "lastAccessedAt": 1771420702734,
+    "accessCount": 0,
+    "importance": 0.6,
+    "archived": false,
+    "supersededBy": null
+  }
+]

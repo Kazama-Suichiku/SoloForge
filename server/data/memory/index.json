@@ -1,0 +1,16 @@
+[
+  {
+    "id": "mem-1771420702734-ej2zye4iv",
+    "type": "fact",
+    "scope": "shared",
+    "agentId": null,
+    "tags": [],
+    "importance": 0.6,
+    "createdAt": 1771420702734,
+    "lastAccessedAt": 1771420702736,
+    "accessCount": 1,
+    "archived": false,
+    "supersededBy": null,
+    "summary": "测试摘要"
+  }
+]
