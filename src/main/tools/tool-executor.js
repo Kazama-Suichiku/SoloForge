@@ -759,6 +759,19 @@ class ToolExecutor {
 
   /**
    * 执行多个工具调用
+   *
+   * Phase 0 改动：通信类工具并行执行。
+   *   - 通信类工具（category === 'collaboration' 或 'group_chat'，
+   *     即 send_to_agent / delegate_task / post_to_department / create_group_chat / notify_boss 等）
+   *     用 Promise.all 并行执行，减少秘书给多人发消息时的等待时间。
+   *   - 非通信类工具（file / shell / git 等）保持串行 await，避免并发副作用。
+   *   - 结果按原始 toolCalls 顺序合并返回（不改变顺序），onProgress 仍按每个工具完成时触发。
+   *   - callChain / nestingDepth 逻辑在 executeTool 内部，并行不影响其正确性。
+   *
+   * 实现策略：分段处理。遍历 toolCalls，把「连续的通信类调用」累积成一个批次，
+   * 遇到非通信类或数组末尾时 flush 批次（Promise.all 并行），非通信类单独串行 await。
+   * 这样既实现了通信类并行，又保持了非通信类的串行语义和结果顺序。
+   *
    * @param {Array<{name: string, arguments: Object}>} toolCalls
    * @param {Object} context
    * @param {Function} [onProgress] - 进度回调，每个工具完成时调用
@@ -766,9 +779,18 @@ class ToolExecutor {
    * @returns {Promise<Array<{name: string, success: boolean, result?: any, error?: string, duration: number}>>}
    */
   async executeToolCalls(toolCalls, context = {}, onProgress = null) {
-    const results = [];
+    const results = new Array(toolCalls.length);
 
-    for (const call of toolCalls) {
+    // 判断单个工具是否属于通信类（可并行）
+    const _isCommunicationTool = (call) => {
+      const resolvedName = TOOL_NAME_ALIASES[call.name] || call.name;
+      const tool = toolRegistry.get(resolvedName);
+      if (!tool) return false;
+      return tool.category === 'collaboration' || tool.category === 'group_chat';
+    };
+
+    // 执行单个调用并填充 results[idx]，同时触发 onProgress
+    const _execOne = async (call, idx) => {
       const startTime = Date.now();
       const result = await this.executeTool(call.name, call.arguments, context);
       const duration = Date.now() - startTime;
@@ -777,7 +799,7 @@ class ToolExecutor {
         ...result,
         duration,
       };
-      results.push(entry);
+      results[idx] = entry;
 
       if (onProgress) {
         // 前端预览结果：对象直接发送（Electron IPC 支持结构化克隆），字符串截断
@@ -796,7 +818,36 @@ class ToolExecutor {
           duration,
         });
       }
+    };
+
+    // 并行执行一个通信类批次（idx 列表），用 Promise.all
+    const _flushBatch = async (batch) => {
+      if (batch.length === 0) return;
+      if (batch.length === 1) {
+        // 单个无需 Promise.all，直接执行
+        const { call, idx } = batch[0];
+        await _execOne(call, idx);
+        return;
+      }
+      await Promise.all(batch.map(({ call, idx }) => _execOne(call, idx)));
+    };
+
+    // 分段遍历
+    let batch = []; // 累积通信类调用 { call, idx }
+    for (let i = 0; i < toolCalls.length; i++) {
+      const call = toolCalls[i];
+      if (_isCommunicationTool(call)) {
+        batch.push({ call, idx: i });
+      } else {
+        // 遇到非通信类：先 flush 通信批次
+        await _flushBatch(batch);
+        batch = [];
+        // 串行执行非通信类
+        await _execOne(call, i);
+      }
     }
+    // 末尾 flush
+    await _flushBatch(batch);
 
     return results;
   }

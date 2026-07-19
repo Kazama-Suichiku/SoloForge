@@ -1,19 +1,18 @@
 import { useState, useCallback, useMemo } from 'react';
 import { CheckCircleIcon } from '@heroicons/react/24/outline';
-import { FlagIcon as FlagSolidIcon } from '@heroicons/react/24/solid';
+import { FolderIcon } from '@heroicons/react/24/outline';
 import {
-  STATUS_COLORS,
+  STATUS_TONES,
   STATUS_LABELS,
-  PRIORITY_COLORS,
+  PRIORITY_TONES,
   PRIORITY_LABELS,
   PAGE_SIZE,
 } from './constants';
 import { formatDate } from './utils';
-import { ChevronIcon, DetailField, EmptyState, Pagination } from './ui';
-import { FolderIcon } from '@heroicons/react/24/outline';
+import { ChevronIcon, DetailField, EmptyState, Pagination, Badge, StatusDot } from './ui';
 
 /**
- * 任务看板列表
+ * 任务看板列表 —— Linear 风格紧凑行 + pill badge
  * props: { tasks, goals, allTasks, onRefresh }
  */
 export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
@@ -54,9 +53,9 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
             <button
               onClick={handleClearCancelled}
               disabled={isClearing}
-              className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+              className="px-2 py-1 text-xs text-danger hover:text-danger-hover rounded-sm transition-colors-fast disabled:opacity-50"
             >
-              {isClearing ? '清空中...' : `清空已取消 (${cancelledCount})`}
+              {isClearing ? '清空中…' : `清空已取消 (${cancelledCount})`}
             </button>
           </div>
         )}
@@ -84,9 +83,9 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
           <button
             onClick={handleClearCancelled}
             disabled={isClearing}
-            className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+            className="px-2 py-1 text-xs text-danger hover:text-danger-hover rounded-sm transition-colors-fast disabled:opacity-50"
           >
-            {isClearing ? '清空中...' : `清空已取消 (${cancelledCount})`}
+            {isClearing ? '清空中…' : `清空已取消 (${cancelledCount})`}
           </button>
         </div>
       )}
@@ -98,12 +97,25 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
           return (
             <div
               key={task.id}
-              className={`rounded-lg transition-colors ${
+              className={`group relative rounded-md ${
                 isExpanded
-                  ? 'bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800'
-                  : 'hover:bg-[var(--bg-hover)] border border-transparent'
+                  ? 'border border-border-default'
+                  : 'border border-transparent hover:border-border-default'
               }`}
             >
+              {/* Emil: hover 用 opacity 背景层（固定半透明 + opacity 过渡，不触发 background-color 重绘） */}
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ backgroundColor: 'var(--bg-hover)' }}
+              />
+              {isExpanded && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-md"
+                  style={{ backgroundColor: 'var(--bg-hover)', opacity: 1 }}
+                />
+              )}
               <button
                 type="button"
                 className="w-full flex items-center gap-3 p-2.5 text-left"
@@ -111,34 +123,34 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
               >
                 <ChevronIcon expanded={isExpanded} />
                 {/* 优先级小圆点 */}
-                <span className={`w-2 h-2 rounded-full shrink-0 ${PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.low}`} />
+                <StatusDot tone={PRIORITY_TONES[task.priority] || 'neutral'} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-text-primary truncate">{task.title}</p>
-                  <div className="flex items-center gap-2 text-xs text-text-secondary">
+                  <div className="flex items-center gap-1.5 text-xs text-text-tertiary">
                     <span>{task.assignee}</span>
-                    <span>·</span>
+                    <span className="text-text-quaternary">·</span>
                     <span>{new Date(task.createdAt).toLocaleDateString()}</span>
                     {task.projectName && (
                       <>
-                        <span>·</span>
-                        <span className="text-purple-500 dark:text-purple-400 truncate max-w-[100px]" title={task.projectName}>
+                        <span className="text-text-quaternary">·</span>
+                        <span className="text-text-tertiary truncate max-w-[100px]" title={task.projectName}>
                           {task.projectName}
                         </span>
                       </>
                     )}
                   </div>
                 </div>
-                <span className={`px-2 py-0.5 text-xs rounded-full shrink-0 ${STATUS_COLORS[task.status] || STATUS_COLORS.todo}`}>
+                <Badge tone={STATUS_TONES[task.status] || 'neutral'}>
                   {STATUS_LABELS[task.status] || task.status}
-                </span>
+                </Badge>
               </button>
 
               {isExpanded && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--border-color)]/50 ml-9">
+                <div className="px-3 pb-3 pt-2 ml-9 mr-3 border-t border-border-subtle">
                   {task.description && (
-                    <div className="mb-3">
-                      <span className="text-xs text-text-muted">描述</span>
-                      <p className="text-sm text-text-primary mt-0.5 whitespace-pre-wrap">
+                    <div className="mb-3 mt-2">
+                      <span className="text-xs text-text-quaternary">描述</span>
+                      <p className="text-sm text-text-secondary mt-1 whitespace-pre-wrap leading-snug">
                         {task.description}
                       </p>
                     </div>
@@ -146,10 +158,10 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <span className="text-xs text-text-muted">优先级</span>
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        <span className={`w-2 h-2 rounded-full ${PRIORITY_COLORS[task.priority]}`} />
-                        <span className="text-sm text-text-primary">
+                      <span className="text-xs text-text-quaternary">优先级</span>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <StatusDot tone={PRIORITY_TONES[task.priority] || 'neutral'} />
+                        <span className="text-sm text-text-secondary">
                           {PRIORITY_LABELS[task.priority] || task.priority}
                         </span>
                       </div>
@@ -163,26 +175,23 @@ export default function TasksList({ tasks, goals, allTasks, onRefresh }) {
                     )}
                   </div>
 
-                  {/* 关联项目 */}
+                  {/* 关联项目 —— 中性边框行，无紫色 */}
                   {task.projectId && (
-                    <div className="mt-3 p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg flex items-center gap-2">
-                      <FolderIcon className="w-4 h-4 text-purple-500 shrink-0" />
+                    <div className="mt-3 p-2 rounded-md border border-border-subtle flex items-center gap-2">
+                      <FolderIcon className="w-3.5 h-3.5 text-text-quaternary shrink-0" />
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-xs text-purple-600 dark:text-purple-400 font-medium">项目</span>
-                        <span className="text-sm text-text-primary truncate">{task.projectName || task.projectId}</span>
+                        <span className="text-xs text-text-quaternary">项目</span>
+                        <span className="text-sm text-text-secondary truncate">{task.projectName || task.projectId}</span>
                       </div>
                     </div>
                   )}
 
-                  {/* 关联目标 */}
+                  {/* 关联目标 —— 中性边框行，无蓝色 */}
                   {linkedGoal && (
-                    <div className="mt-2 p-2 bg-bg-muted rounded-lg flex items-center gap-2">
-                      <FlagSolidIcon className="w-4 h-4 text-blue-500 shrink-0" />
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">目标</span>
-                        <span className="text-sm text-text-primary truncate">{linkedGoal.title}</span>
-                        <span className="text-xs text-text-muted shrink-0">{linkedGoal.progress}%</span>
-                      </div>
+                    <div className="mt-2 p-2 rounded-md border border-border-subtle flex items-center gap-2">
+                      <span className="text-xs text-text-quaternary shrink-0">目标</span>
+                      <span className="text-sm text-text-secondary truncate">{linkedGoal.title}</span>
+                      <span className="text-xs text-text-quaternary shrink-0 ml-auto font-mono">{linkedGoal.progress}%</span>
                     </div>
                   )}
                 </div>

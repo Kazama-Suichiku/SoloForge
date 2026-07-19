@@ -5,7 +5,7 @@ import { formatDateTime } from './utils';
 import { ChevronIcon, DetailField, EmptyState, Pagination, ProgressBar } from './ui';
 
 /**
- * KPI 指标列表
+ * KPI 指标列表 —— 大数值 32px weight 590，进度条用 accent 半透明
  * props: { kpis: Array }
  */
 export default function KPIsList({ kpis }) {
@@ -21,7 +21,8 @@ export default function KPIsList({ kpis }) {
 
   return (
     <div>
-      <div className="space-y-2">
+      {/* P2-9: KPI 列表 stagger 入场，40ms 递增 */}
+      <div className="space-y-1.5 stagger">
         {display.map((kpi) => {
           const isExpanded = expandedId === kpi.id;
           const progressNum = parseInt(kpi.progress) || 0;
@@ -31,48 +32,66 @@ export default function KPIsList({ kpis }) {
           return (
             <div
               key={kpi.id}
-              className={`rounded-lg border transition-colors ${
+              className={`group relative rounded-md border transition-colors-fast ${
                 isExpanded
-                  ? 'bg-blue-50/50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800'
-                  : 'bg-bg-muted border-[var(--border-color)] hover:border-[var(--border-color)]'
+                  ? 'bg-bg-hover border-border-default'
+                  : 'border-border-subtle hover:border-border-default'
               }`}
             >
+              {/* Emil: hover 用 opacity 背景层（不触发 background-color 重绘） */}
+              {!isExpanded && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ backgroundColor: 'var(--bg-hover)' }}
+                />
+              )}
               <button
                 type="button"
-                className="w-full p-3 text-left"
+                className="relative w-full p-3 text-left"
                 onClick={() => setExpandedId(isExpanded ? null : kpi.id)}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <ChevronIcon expanded={isExpanded} />
                     <div>
-                      <h4 className="font-medium text-sm text-text-primary">{kpi.name}</h4>
-                      <p className="text-xs text-text-secondary">{kpi.owner}</p>
+                      <h4 className="text-sm font-ui text-text-primary">{kpi.name}</h4>
+                      <p className="text-xs text-text-tertiary mt-0.5">{kpi.owner}</p>
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-semibold text-text-primary">{kpi.current}</p>
-                    <p className="text-xs text-text-secondary">目标: {kpi.target}</p>
+                    {/* Emil: 大数值 32px weight 590 / -0.022em（与 StatCard 统一） */}
+                    <p
+                      className="text-[32px] font-title text-text-primary leading-none tracking-tightest"
+                      style={{ fontWeight: 590, letterSpacing: '-0.022em' }}
+                    >
+                      {kpi.current}
+                    </p>
+                    <p className="text-xs text-text-quaternary mt-1">目标 {kpi.target}</p>
                   </div>
                 </div>
                 <div className="mt-2 flex items-center gap-2 pl-6">
                   <ProgressBar
                     value={progressNum}
                     size="sm"
-                    color={isOnTrack ? 'green' : isAtRisk ? 'red' : 'yellow'}
+                    tone={isOnTrack ? 'success' : isAtRisk ? 'danger' : 'warning'}
                   />
-                  <span className={`text-xs whitespace-nowrap ${isOnTrack ? 'text-green-500' : isAtRisk ? 'text-red-500' : 'text-yellow-500'}`}>
+                  <span
+                    className={`text-xs whitespace-nowrap font-mono ${
+                      isOnTrack ? 'text-success' : isAtRisk ? 'text-danger' : 'text-warning'
+                    }`}
+                  >
                     {kpi.progress}
                   </span>
                 </div>
               </button>
 
               {isExpanded && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--border-color)]/50 ml-6 mr-3">
+                <div className="px-3 pb-3 pt-2 ml-6 mr-3 border-t border-border-subtle">
                   {kpi.description && (
-                    <div className="mb-3">
-                      <span className="text-xs text-text-muted">描述</span>
-                      <p className="text-sm text-text-primary mt-0.5 whitespace-pre-wrap">
+                    <div className="mb-3 mt-2">
+                      <span className="text-xs text-text-quaternary">描述</span>
+                      <p className="text-sm text-text-secondary mt-1 whitespace-pre-wrap leading-snug">
                         {kpi.description}
                       </p>
                     </div>
@@ -83,8 +102,8 @@ export default function KPIsList({ kpis }) {
                     <DetailField label="周期" value={kpi.period} />
                     {kpi.direction && (
                       <div>
-                        <span className="text-xs text-text-muted">方向</span>
-                        <p className="text-sm text-text-primary mt-0.5">
+                        <span className="text-xs text-text-quaternary">方向</span>
+                        <p className="text-sm text-text-secondary mt-1">
                           {KPI_DIRECTION_LABELS[kpi.direction] || kpi.direction}
                         </p>
                       </div>
@@ -93,17 +112,18 @@ export default function KPIsList({ kpis }) {
 
                   {kpi.history && kpi.history.length > 0 && (
                     <div className="mt-3">
-                      <span className="text-xs text-text-muted">
+                      <span className="text-xs text-text-quaternary">
                         变更历史（最近 {Math.min(kpi.history.length, 5)} 条）
                       </span>
                       <div className="mt-1 space-y-1">
                         {kpi.history.slice(-5).reverse().map((entry, idx) => (
                           <div
                             key={idx}
-                            className="flex items-center justify-between text-xs p-1.5 bg-bg-elevated rounded"
+                            className="flex items-center justify-between text-xs p-1.5 rounded-sm"
+                            style={{ backgroundColor: 'rgba(255,255,255,0.02)' }}
                           >
-                            <span className="text-text-secondary">{formatDateTime(entry.date)}</span>
-                            <span className="font-medium text-text-primary">{entry.value}</span>
+                            <span className="text-text-tertiary">{formatDateTime(entry.date)}</span>
+                            <span className="font-ui text-text-secondary font-mono">{entry.value}</span>
                           </div>
                         ))}
                       </div>

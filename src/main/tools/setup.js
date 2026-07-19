@@ -11,6 +11,7 @@ const { registerHRTools } = require('./hr-tools');
 const { registerRecruitTools } = require('./recruit-tools');
 const { registerOperationsTools } = require('./operations-tools');
 const { registerCollaborationTools } = require('./collaboration-tools');
+const { registerOrgChartTools } = require('./org-chart-tools');
 const { registerPMTools } = require('./pm-tools');
 const { registerShellTool } = require('./shell-tool');
 const { registerGitTools } = require('./git-tool');
@@ -21,6 +22,7 @@ const { registerHistoryTools } = require('./history-tool');
 const { registerMemoryTools } = require('./memory-tools');
 const { registerTodoTools } = require('./todo-tools');
 const { registerContextTools } = require('./context-tools');
+const { registerPermissionTools } = require('./permission-tools');
 const { browserPool } = require('./browser-pool');
 const { toolRegistry } = require('./tool-registry');
 const { logger } = require('../utils/logger');
@@ -46,10 +48,12 @@ function setupTools() {
   registerRecruitTools();
   registerOperationsTools();
   registerCollaborationTools();
+  registerOrgChartTools();
   registerPMTools();
   registerMemoryTools();
   registerTodoTools();
   registerContextTools();
+  registerPermissionTools();
 
   const tools = toolRegistry.getAll();
   logger.info(`已注册 ${tools.length} 个工具:`, tools.map((t) => t.name));

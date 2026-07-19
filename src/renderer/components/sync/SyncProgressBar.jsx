@@ -4,6 +4,8 @@
  * 由于主进程 cloud-sync 未发布 sync:progress 事件（已确认 preload 无对应通道），
  * 本组件表现为「同步中」的不确定进度条（indeterminate），而非精确百分比。
  *
+ * Linear 风格：进度条用 accent 色。
+ *
  * 使用方式：
  *   <SyncProgressBar active={syncing} label="正在同步..." />
  *
@@ -22,9 +24,10 @@ export default function SyncProgressBar({ active, label = '正在同步...', cla
   if (!active) return null;
   return (
     <div className={`w-full ${className}`} role="status" aria-live="polite">
-      <div className="flex items-center gap-2 mb-1 text-xs text-[var(--text-secondary)]">
+      <div className="flex items-center gap-2 mb-1 text-xs text-text-secondary">
         <svg
-          className="w-3.5 h-3.5 animate-spin text-[var(--color-primary)]"
+          className="w-3.5 h-3.5 animate-spin"
+          style={{ color: 'var(--accent)' }}
           fill="none"
           viewBox="0 0 24 24"
           aria-hidden="true"
@@ -42,11 +45,15 @@ export default function SyncProgressBar({ active, label = '正在同步...', cla
         </svg>
         <span>{label}</span>
       </div>
-      <div className="w-full h-1.5 bg-[var(--bg-elevated)] rounded-full overflow-hidden">
+      <div
+        className="w-full h-1.5 rounded-full overflow-hidden"
+        style={{ backgroundColor: 'var(--bg-surface)' }}
+      >
         <div
-          className="h-full bg-[var(--color-primary)] rounded-full"
+          className="h-full rounded-full"
           style={{
             width: '40%',
+            backgroundColor: 'var(--accent)',
             animation: 'sync-progress-slide 1.2s ease-in-out infinite',
           }}
         />

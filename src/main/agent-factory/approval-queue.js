@@ -336,6 +336,34 @@ class ApprovalQueue {
       } catch (error) {
         logger.error('动态 Agent 创建异常:', error);
       }
+
+      // Phase 2-C：招聘时按申请中指定的 tools 授予新员工工具权限
+      // 招聘申请的 tools 列表位于 request.profile.tools（AgentProfile.tools），
+      // 兼容 request.tools 的直传写法。由审批者（decision.reviewerId）作为授权人。
+      try {
+        const { permissionManager } = require('../permission/permission-manager');
+        const requestedTools = Array.isArray(request.tools)
+          ? request.tools
+          : Array.isArray(request.profile?.tools)
+            ? request.profile.tools
+            : [];
+        if (requestedTools.length > 0) {
+          permissionManager.grantTools(
+            request.createdAgentId,
+            requestedTools,
+            decision.reviewerId || 'chro',
+            '招聘时指定工具权限'
+          );
+          logger.info('招聘授权工具权限:', {
+            agentId: request.createdAgentId,
+            tools: requestedTools,
+            by: decision.reviewerId,
+          });
+        }
+      } catch (error) {
+        // 授权失败不应影响 Agent 创建结果，仅记录
+        logger.warn('招聘时授予工具权限失败（不影响 Agent 创建）:', error?.message);
+      }
     }
 
     this.saveToDisk();

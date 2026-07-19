@@ -1,10 +1,21 @@
 /**
- * SoloForge - 聊天主视图
+ * SoloForge - 聊天主视图（Linear 风格重构）
  * 组合对话列表、消息流、输入框
  * @module components/chat/ChatView
+ *
+ * 布局:
+ *   ┌───────────────┬──────────────────────────┐
+ *   │ 左侧栏(可折叠) │ 右主区                    │
+ *   │  - 极简标题栏  │  - 顶部细栏(Agent+状态)    │
+ *   │  - 导航ghost  │  - 消息流                  │
+ *   │  - 巡查开关   │  - 输入区                  │
+ *   │  - 会话列表   │                            │
+ *   └───────────────┴──────────────────────────┘
+ * 全部使用新 Linear 设计 Token（CSS 变量），不依赖 Tailwind 颜色类名。
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import './emil-styles.css';
 import ConversationList from './ConversationList';
 import MessageList from './MessageList';
 import ChatInput from './ChatInput';
@@ -43,9 +54,11 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
     return currentConvParticipants?.find((p) => p !== 'user') || null;
   }, [currentConvType, currentConvParticipants]);
 
-  const targetAgentStatus = useAgentStore((s) =>
-    targetAgentId ? s.agents.get(targetAgentId)?.status : null
+  const targetAgent = useAgentStore((s) =>
+    targetAgentId ? s.agents.get(targetAgentId) : null
   );
+  const targetAgentStatus = targetAgent?.status ?? null;
+  const targetAgentName = targetAgent?.name ?? null;
 
   // 检查当前对话的 Agent 是否正在工作
   const isAgentWorking = targetAgentStatus === 'working';
@@ -75,13 +88,16 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
 
   // 可拖拽侧栏宽度
   const [sidebarWidth, setSidebarWidth] = useState(288); // 默认 w-72 = 288px
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isDragging = useRef(false);
   const startX = useRef(0);
   const startWidth = useRef(288);
 
   const DEFAULT_SIDEBAR_WIDTH = 288;
+  const COLLAPSED_WIDTH = 0;
 
   const handleDragStart = useCallback((e) => {
+    if (sidebarCollapsed) return;
     isDragging.current = true;
     startX.current = e.clientX;
     startWidth.current = sidebarWidth;
@@ -105,11 +121,17 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
 
     document.addEventListener('mousemove', handleDragMove);
     document.addEventListener('mouseup', handleDragEnd);
-  }, [sidebarWidth]);
+  }, [sidebarWidth, sidebarCollapsed]);
 
   // 双击恢复默认宽度
   const handleDragDoubleClick = useCallback(() => {
     setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+    setSidebarCollapsed(false);
+  }, []);
+
+  // 折叠/展开侧边栏
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((v) => !v);
   }, []);
 
   const handleSend = useCallback(
@@ -134,53 +156,124 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
     [currentConversationId, sendMessage, updateMessage, onSendMessage]
   );
 
+  // Agent 状态圆点颜色
+  const agentDotColor = isAgentWorking
+    ? 'var(--accent)'
+    : targetAgentStatus === 'error'
+      ? 'var(--color-danger, #f87171)'
+      : targetAgentStatus === 'idle'
+        ? 'var(--text-tertiary, #8a8f98)'
+        : 'var(--text-quaternary, #62666d)';
+  const agentStatusLabel = isAgentWorking
+    ? '工作中'
+    : targetAgentStatus === 'error'
+      ? '异常'
+      : targetAgentStatus === 'idle'
+        ? '在线'
+        : '离线';
+
   return (
-    <div className="flex h-screen bg-bg-base text-text-primary">
-      {/* 左侧边栏 - 对话列表（可拖拽调整宽度） */}
+    <div
+      className="flex h-screen overflow-hidden"
+      style={{
+        background: 'var(--bg-base, #08090a)',
+        color: 'var(--text-primary, #f7f8f8)',
+      }}
+    >
+      {/* ========== 左侧栏 - 对话列表（可拖拽调整宽度 / 可折叠） ========== */}
       <aside
-        className="shrink-0 border-r border-[var(--border-color)] bg-bg-elevated flex flex-col"
-        style={{ width: sidebarWidth }}
+        className="shrink-0 flex flex-col overflow-hidden emil-sidebar-collapse glass-heavy"
+        style={{
+          width: sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth,
+          borderRight: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+        }}
       >
         {/* macOS 标题栏占位（可拖拽区域） */}
         <div className="shrink-0 h-8 drag-region" />
 
-        {/* 头部带主题切换和设置 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]">
-          <div className="min-w-0">
-            <h1 className="text-xl font-bold text-text-primary">SoloForge</h1>
-            {currentCompany && (
-              <button
-                onClick={switchCompany}
-                className="text-xs text-text-secondary hover:text-[var(--color-primary)] transition-colors truncate max-w-full text-left"
-                title="点击切换公司"
+        {/* 极简标题栏 */}
+        <div
+          className="shrink-0 flex items-center justify-between px-3 h-11"
+          style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))' }}
+        >
+          <div className="min-w-0 flex items-center gap-2">
+            {/* 折叠按钮 */}
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              className="shrink-0 p-1 rounded-md emil-pressable emil-ghost-hover"
+              style={{
+                color: 'var(--text-tertiary, #8a8f98)',
+                background: 'transparent',
+              }}
+              title={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                  d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            <div className="min-w-0">
+              <h1
+                className="text-[13px] truncate"
+                style={{
+                  color: 'var(--text-primary, #f7f8f8)',
+                  fontWeight: 590,
+                  letterSpacing: '-0.012em',
+                }}
               >
-                🏢 {currentCompany.name}
-              </button>
-            )}
+                SoloForge
+              </h1>
+              {currentCompany && (
+                <button
+                  type="button"
+                  onClick={switchCompany}
+                  className="block text-[11px] truncate max-w-full text-left emil-ghost-hover"
+                  style={{ color: 'var(--text-tertiary, #8a8f98)' }}
+                  title="点击切换公司"
+                >
+                  🏢 {currentCompany.name}
+                </button>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+
+          {/* ghost 风格导航按钮 */}
+          <div className="flex items-center gap-1 shrink-0">
             {onOpenDashboard && (
               <button
+                type="button"
                 onClick={onOpenDashboard}
-                className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-text-secondary"
+                className="p-1.5 rounded-md emil-pressable emil-ghost-hover"
+                style={{
+                  color: 'var(--text-tertiary, #8a8f98)',
+                  background: 'rgba(255,255,255,0.02)',
+                  border: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+                }}
                 title="运营仪表板"
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
                     d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
               </button>
             )}
             {onOpenSettings && (
               <button
+                type="button"
                 onClick={onOpenSettings}
-                className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-text-secondary"
+                className="p-1.5 rounded-md emil-pressable emil-ghost-hover"
+                style={{
+                  color: 'var(--text-tertiary, #8a8f98)',
+                  background: 'rgba(255,255,255,0.02)',
+                  border: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+                }}
                 title="设置"
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
                     d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
                     d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                 </svg>
               </button>
@@ -189,29 +282,35 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
           </div>
         </div>
 
-        {/* 任务巡查开关 */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border-color)]/50">
-          <span className="text-xs text-text-secondary select-none">任务巡查</span>
+        {/* 任务巡查开关（极简行） */}
+        <div
+          className="shrink-0 flex items-center justify-between px-3 h-9"
+          style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))' }}
+        >
+          <span
+            className="text-[12px] select-none"
+            style={{ color: 'var(--text-tertiary, #8a8f98)' }}
+          >
+            任务巡查
+          </span>
           <button
             type="button"
             role="switch"
             aria-checked={patrolEnabled}
             onClick={handlePatrolToggle}
-            className={`
-              relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full
-              transition-colors duration-200 ease-in-out focus:outline-none
-              ${patrolEnabled
-                ? 'bg-[var(--color-primary)]'
-                : 'bg-gray-300 dark:bg-gray-600'
-              }
-            `}
+            className="relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full emil-pressable emil-toggle-track focus:outline-none"
+            style={{
+              background: patrolEnabled
+                ? 'var(--accent, #5e6ad2)'
+                : 'rgba(255,255,255,0.08)',
+            }}
           >
             <span
-              className={`
-                pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm
-                transform transition-transform duration-200 ease-in-out mt-0.5
-                ${patrolEnabled ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}
-              `}
+              className="pointer-events-none inline-block h-3 w-3 rounded-full bg-white emil-toggle-thumb"
+              style={{
+                transform: patrolEnabled ? 'translateX(14px)' : 'translateX(2px)',
+                marginTop: '2px',
+              }}
             />
           </button>
         </div>
@@ -222,22 +321,96 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
         </div>
       </aside>
 
-      {/* 拖拽手柄（双击恢复默认宽度） */}
-      <div
-        className="shrink-0 w-1 cursor-col-resize hover:bg-[var(--color-primary)]/30 active:bg-[var(--color-primary)]/50 transition-colors"
-        onMouseDown={handleDragStart}
-        onDoubleClick={handleDragDoubleClick}
-      />
+      {/* 拖拽手柄（双击恢复默认宽度；折叠时隐藏） */}
+      {!sidebarCollapsed && (
+        <div
+          className="shrink-0 w-1 cursor-col-resize emil-drag-handle"
+          onMouseDown={handleDragStart}
+          onDoubleClick={handleDragDoubleClick}
+        />
+      )}
 
-      {/* 右侧主区域 - TODO + 消息流 + 输入框 */}
-      <main className="flex-1 flex flex-col overflow-hidden">
+      {/* ========== 右侧主区域 ========== */}
+      <main
+        className="flex-1 flex flex-col overflow-hidden"
+        style={{
+          background: 'var(--bg-base, #08090a)',
+        }}
+      >
+        {/* 顶部细栏：当前 Agent 名 + 状态圆点 —— 液态玻璃 */}
+        <div
+          className="shrink-0 flex items-center justify-between px-4 h-11 drag-region glass-medium"
+          style={{
+            borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+          }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {targetAgentName ? (
+              <>
+                <span
+                  key={targetAgentStatus || 'offline'}
+                  className="emil-dot-enter inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: agentDotColor }}
+                  title={agentStatusLabel}
+                />
+                <span
+                  className="text-[13px] truncate"
+                  style={{
+                    color: 'var(--text-primary, #f7f8f8)',
+                    fontWeight: 510,
+                    letterSpacing: '-0.012em',
+                  }}
+                >
+                  {targetAgentName}
+                </span>
+                <span
+                  className="text-[12px] shrink-0"
+                  style={{ color: 'var(--text-tertiary, #8a8f98)' }}
+                >
+                  · {agentStatusLabel}
+                </span>
+              </>
+            ) : currentConvType === 'department' || currentConvType === 'group' ? (
+              <>
+                <span
+                  className="inline-flex items-center justify-center w-4 h-4 rounded shrink-0"
+                  style={{
+                    background: 'rgba(255,255,255,0.04)',
+                    color: 'var(--text-tertiary, #8a8f98)',
+                    fontSize: '10px',
+                  }}
+                >
+                  #
+                </span>
+                <span
+                  className="text-[13px] truncate"
+                  style={{
+                    color: 'var(--text-primary, #f7f8f8)',
+                    fontWeight: 510,
+                    letterSpacing: '-0.012em',
+                  }}
+                >
+                  {currentConv?.name || '群聊'}
+                </span>
+              </>
+            ) : (
+              <span
+                className="text-[13px]"
+                style={{ color: 'var(--text-tertiary, #8a8f98)' }}
+              >
+                选择一个对话开始
+              </span>
+            )}
+          </div>
+        </div>
+
         <TodoPanel
           collapsed={todoCollapsed}
           onToggle={() => setTodoCollapsed((v) => !v)}
         />
         <MessageList />
-        <ChatInput 
-          onSend={handleSend} 
+        <ChatInput
+          onSend={handleSend}
           onSilenceGroup={onSilenceGroup}
           disabled={isAgentWorking}
           placeholder={isAgentWorking ? '等待 Agent 响应中...' : '输入消息...'}

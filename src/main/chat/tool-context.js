@@ -19,6 +19,7 @@ const { agentConfigStore } = require('../config/agent-config-store');
 const { historyManager, PAGE_SIZE } = require('./history-manager');
 const { setConversationHistory } = require('../tools/history-tool');
 const { estimateTokens, estimateMessages, getAvailableBudget } = require('../llm/token-estimator');
+const { permissionManager } = require('../permission/permission-manager');
 
 /**
  * 生成当前权限的上下文描述，注入到工具提示中
@@ -50,6 +51,12 @@ function getPermissionContext() {
 
 /**
  * 获取 Agent 可用的原始工具定义列表（用于传递给 LLM Provider 的原生工具调用）
+ *
+ * Phase 2-C：改用 PermissionManager.getAccessibleTools(agentId) 过滤。
+ * PermissionManager 内部已处理 role/level/category 维度的权限过滤，
+ * 因此这里不再需要原先的 7 个硬编码 if。
+ * 仍保留 suspended/terminated 状态检查（早返回 []）。
+ *
  * @param {Object} chatManager
  * @param {string} agentId
  */
@@ -63,36 +70,21 @@ function getToolDefinitionsForAgent(chatManager, agentId) {
     return [];
   }
 
-  let availableTools = allTools;
-  const role = agent?.role || agentConfig?.role;
-  const level = agentConfig?.level;
-
-  if (role !== 'cfo') {
-    availableTools = availableTools.filter((t) => t.category !== 'cfo');
-  }
-  if (role !== 'chro') {
-    availableTools = availableTools.filter((t) => t.category !== 'hr');
-  }
-  const cxoRoles = ['ceo', 'cto', 'cfo'];
-  const isCxo = cxoRoles.includes(role) || level === 'c_level';
-  if (!isCxo && role !== 'chro') {
-    availableTools = availableTools.filter((t) => t.category !== 'recruit');
-  }
-  if (role !== 'secretary') {
-    availableTools = availableTools.filter((t) => t.category !== 'dismiss_confirm');
-  }
-  const isLeader = isCxo || ['manager', 'director', 'vp'].includes(level);
-  if (!isLeader) {
-    availableTools = availableTools.filter((t) => t.category !== 'dev_plan_review');
-  }
-  if (!isCxo && role !== 'chro') {
-    availableTools = availableTools.filter((t) => t.category !== 'suspension');
-  }
-  if (role !== 'secretary' && !isCxo && role !== 'chro') {
-    availableTools = availableTools.filter((t) => t.category !== 'group_chat');
+  // 用 PermissionManager 过滤：返回该 Agent 可用的工具名列表
+  // 秘书 / CXO / roleDefaults / 显式授权等规则全部在内部处理
+  let accessibleNames;
+  try {
+    accessibleNames = new Set(permissionManager.getAccessibleTools(agentId));
+  } catch (err) {
+    // PermissionManager 异常时降级：放行全部（避免完全阻断业务）
+    logger.warn('getToolDefinitionsForAgent: permissionManager 降级放行全部工具:', err?.message);
+    return allTools;
   }
 
-  return availableTools;
+  // chatManager.getAgent(agentId) 保留调用以保持向后兼容（部分实现依赖其副作用）
+  void agent;
+
+  return allTools.filter((t) => accessibleNames.has(t.name));
 }
 
 /**

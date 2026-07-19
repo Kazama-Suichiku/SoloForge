@@ -6,6 +6,8 @@
  *  - 对文档类（operations/projects/budgets）做行级文本 diff
  *    （读取本地文件当前内容与最近一次 pull 的远程内容对比；不引入第三方 diff 库）
  *
+ * Linear 风格：diff 视图用半透明绿/红背景。
+ *
  * 数据来源：
  *  - conflicts: Array<{ type, op, count, detail? }> （来自 sync-store.extractChanges）
  *  - documentDiffs: 可选的 prop，父组件可传入 { [dataType]: { before, after } } 用于精确 diff
@@ -28,14 +30,14 @@ import {
 
 // ─── 文档类型标签映射 ─────────────────────────────────────────
 const TYPE_META = {
-  conversations: { label: '会话', icon: ChatBubbleLeftRightIcon, color: 'text-blue-500' },
-  messages:      { label: '消息', icon: ChatBubbleLeftRightIcon, color: 'text-blue-400' },
-  agents:        { label: 'Agent', icon: UserGroupIcon, color: 'text-purple-500' },
-  boss:          { label: 'Boss 配置', icon: CpuChipIcon, color: 'text-amber-500' },
-  documents:     { label: '文档', icon: DocumentTextIcon, color: 'text-emerald-500' },
-  operations:    { label: '运营', icon: ClipboardDocumentCheckIcon, color: 'text-emerald-600' },
-  projects:      { label: '项目', icon: ClipboardDocumentCheckIcon, color: 'text-emerald-600' },
-  budgets:       { label: '预算', icon: ClipboardDocumentCheckIcon, color: 'text-emerald-600' },
+  conversations: { label: '会话', icon: ChatBubbleLeftRightIcon, color: 'var(--accent)' },
+  messages:      { label: '消息', icon: ChatBubbleLeftRightIcon, color: 'var(--accent)' },
+  agents:        { label: 'Agent', icon: UserGroupIcon, color: 'var(--accent)' },
+  boss:          { label: 'Boss 配置', icon: CpuChipIcon, color: 'var(--color-warning)' },
+  documents:     { label: '文档', icon: DocumentTextIcon, color: 'var(--color-success)' },
+  operations:    { label: '运营', icon: ClipboardDocumentCheckIcon, color: 'var(--color-success)' },
+  projects:      { label: '项目', icon: ClipboardDocumentCheckIcon, color: 'var(--color-success)' },
+  budgets:       { label: '预算', icon: ClipboardDocumentCheckIcon, color: 'var(--color-success)' },
 };
 
 // ─── 简单行级 diff（LCS，O(n*m)）─────────────────────────────
@@ -92,26 +94,26 @@ function lineDiff(beforeText, afterText) {
 
 // ─── 单条变更摘要行 ─────────────────────────────────────────
 function ChangeRow({ change }) {
-  const meta = TYPE_META[change.type] || { label: change.type, icon: ArrowsRightLeftIcon, color: 'text-gray-500' };
+  const meta = TYPE_META[change.type] || { label: change.type, icon: ArrowsRightLeftIcon, color: 'var(--text-tertiary)' };
   const Icon = meta.icon;
   const isPull = change.op === 'pull';
   const OpIcon = isPull ? ArrowDownTrayIcon : ArrowUpTrayIcon;
-  const opColor = isPull ? 'text-blue-500' : 'text-emerald-500';
+  const opColor = isPull ? 'var(--accent)' : 'var(--color-success)';
   const opLabel = isPull ? '拉取' : '推送';
 
   return (
-    <div className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-[var(--bg-elevated)] transition-colors">
-      <Icon className={`w-4 h-4 ${meta.color} flex-shrink-0`} aria-hidden="true" />
-      <span className="text-sm text-[var(--text-primary)] flex-shrink-0">{meta.label}</span>
-      <span className={`inline-flex items-center gap-1 text-xs ${opColor} flex-shrink-0`}>
+    <div className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-bg-hover transition-colors">
+      <Icon className="w-4 h-4 flex-shrink-0" style={{ color: meta.color }} aria-hidden="true" />
+      <span className="text-sm text-text-primary flex-shrink-0">{meta.label}</span>
+      <span className="inline-flex items-center gap-1 text-xs flex-shrink-0" style={{ color: opColor }}>
         <OpIcon className="w-3.5 h-3.5" aria-hidden="true" />
         {opLabel}
       </span>
-      <span className="text-sm font-mono text-[var(--text-secondary)]">
+      <span className="text-sm font-mono text-text-secondary">
         ×{change.count}
       </span>
       {change.detail && change.detail.length > 0 && (
-        <span className="text-xs text-[var(--text-tertiary)] truncate" title={change.detail.map((d) => d.id).join(', ')}>
+        <span className="text-xs text-text-tertiary truncate" title={change.detail.map((d) => d.id).join(', ')}>
           {change.detail.map((d) => d.dataType || d.id).join(', ')}
         </span>
       )}
@@ -130,46 +132,58 @@ function DocumentDiff({ dataType, before, after }) {
   const meta = TYPE_META[dataType] || TYPE_META.documents;
 
   return (
-    <div className="border border-[var(--border-color)] rounded-md overflow-hidden">
+    <div className="card !p-0 overflow-hidden">
       <button
         type="button"
         onClick={() => setCollapsed((c) => !c)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] transition-colors text-left"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-bg-hover transition-colors text-left"
         aria-expanded={!collapsed}
       >
-        <meta.icon className={`w-4 h-4 ${meta.color}`} aria-hidden="true" />
-        <span className="text-sm font-medium text-[var(--text-primary)]">{meta.label}</span>
-        <span className="text-xs text-[var(--text-secondary)] font-mono">{dataType}</span>
+        <meta.icon className="w-4 h-4" style={{ color: meta.color }} aria-hidden="true" />
+        <span className="text-sm font-ui text-text-primary">{meta.label}</span>
+        <span className="text-xs text-text-secondary font-mono">{dataType}</span>
         <span className="ml-auto flex items-center gap-2 text-xs">
-          <span className="text-green-600 dark:text-green-400">+{added}</span>
-          <span className="text-red-600 dark:text-red-400">-{deleted}</span>
-          <span className="text-[var(--text-tertiary)]">{collapsed ? '展开' : '折叠'}</span>
+          <span style={{ color: 'var(--color-success)' }}>+{added}</span>
+          <span style={{ color: 'var(--color-danger)' }}>-{deleted}</span>
+          <span className="text-text-tertiary">{collapsed ? '展开' : '折叠'}</span>
         </span>
       </button>
       {!collapsed && (
-        <div className="max-h-72 overflow-auto font-mono text-xs leading-relaxed bg-[var(--bg-base)]">
+        <div
+          className="max-h-72 overflow-auto font-mono text-xs leading-relaxed"
+          style={{ backgroundColor: 'var(--bg-base)', fontFamily: 'var(--font-mono)' }}
+        >
           {diff.length === 0 && (
-            <div className="px-3 py-2 text-[var(--text-tertiary)] italic">无内容</div>
+            <div className="px-3 py-2 text-text-tertiary italic">无内容</div>
           )}
           {diff.map((line, idx) => {
-            let cls = 'text-[var(--text-secondary)]';
+            let cls = 'text-text-secondary';
             let prefix = ' ';
             let bg = '';
             if (line.op === 'add') {
-              cls = 'text-green-700 dark:text-green-300';
+              cls = '';
               prefix = '+';
-              bg = 'bg-green-50 dark:bg-green-900/20';
+              // 半透明绿背景
+              bg = 'rgba(74,222,128,0.10)';
             } else if (line.op === 'del') {
-              cls = 'text-red-700 dark:text-red-300';
+              cls = '';
               prefix = '-';
-              bg = 'bg-red-50 dark:bg-red-900/20';
+              // 半透明红背景
+              bg = 'rgba(248,113,113,0.10)';
             }
+            const lineColor =
+              line.op === 'add' ? 'var(--color-success)' :
+              line.op === 'del' ? 'var(--color-danger)' :
+              'var(--text-secondary)';
             return (
-              <div key={idx} className={`flex ${bg}`}>
-                <span className="select-none w-8 flex-shrink-0 text-right pr-2 text-[var(--text-tertiary)] border-r border-[var(--border-color)]">
+              <div key={idx} className="flex" style={{ backgroundColor: bg }}>
+                <span
+                  className="select-none w-8 flex-shrink-0 text-right pr-2 border-r"
+                  style={{ color: 'var(--text-tertiary)', borderColor: 'var(--border-default)' }}
+                >
                   {idx + 1}
                 </span>
-                <span className={`pl-2 pr-3 whitespace-pre-wrap break-all ${cls}`}>
+                <span className="pl-2 pr-3 whitespace-pre-wrap break-all" style={{ color: lineColor }}>
                   <span className="select-none mr-1 opacity-60">{prefix}</span>
                   {line.text || '\u00a0'}
                 </span>
@@ -196,15 +210,15 @@ export default function ConflictDiff({ conflicts = [], documentDiffs = {}, onCle
   return (
     <div className={`flex flex-col gap-2 ${className}`}>
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
-          <ArrowsRightLeftIcon className="w-4 h-4 text-[var(--text-secondary)]" aria-hidden="true" />
+        <h3 className="text-sm font-ui text-text-primary flex items-center gap-2">
+          <ArrowsRightLeftIcon className="w-4 h-4 text-text-secondary" aria-hidden="true" />
           最近变更
         </h3>
         {hasChanges && onClear && (
           <button
             type="button"
             onClick={onClear}
-            className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
+            className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
           >
             清空
           </button>
@@ -212,13 +226,13 @@ export default function ConflictDiff({ conflicts = [], documentDiffs = {}, onCle
       </div>
 
       {!hasChanges && docTypes.length === 0 && (
-        <div className="text-sm text-[var(--text-tertiary)] py-6 text-center italic">
+        <div className="text-sm text-text-tertiary py-6 text-center italic">
           最近一次同步无变更
         </div>
       )}
 
       {hasChanges && (
-        <div className="flex flex-col divide-y divide-[var(--border-color)]">
+        <div className="flex flex-col divide-y divide-border-default">
           {conflicts.map((c, idx) => (
             <ChangeRow key={`${c.type}-${c.op}-${idx}`} change={c} />
           ))}

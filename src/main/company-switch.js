@@ -47,6 +47,13 @@ const { attachmentManager } = require('./attachments/attachment-manager');
 const { chatManager } = require('./chat');
 const departmentGroup = require('./chat/department-group');
 
+// Phase 1-5 新增的 store / 运行时模块：公司切换时需要 reinitialize
+const { commEventStore } = require('./collaboration/comm-event-store');
+const { groupHistoryStore } = require('./chat/group-history-store');
+const { groupQueue } = require('./chat/group-queue');
+const { agentPermissionStore } = require('./permission/permission-store');
+const { traceStore } = require('./collaboration/trace-store');
+
 // ─── STORES 数组（声明式依赖顺序，P1-10）──────────────────────
 // 数组顺序即为初始化顺序，按依赖拓扑排序。
 // dependsOn 字段仅做文档化声明（数组已排好），便于后人理解依赖关系。
@@ -79,12 +86,26 @@ const STORES = [
     dependsOn: ['agentConfigStore'] },
   { name: 'agentCommunication',  store: agentCommunication,
     dependsOn: ['agentConfigStore'] },
+  // Phase 1-B：通信事件存储（公司切换时清空 + 从新路径加载）
+  { name: 'commEventStore',      store: commEventStore,
+    dependsOn: ['agentConfigStore'] },
   { name: 'devPlanQueue',       store: devPlanQueue,
     dependsOn: ['agentConfigStore'] },
   { name: 'approvalQueue',      store: approvalQueue,
     dependsOn: ['agentConfigStore'] },
   { name: 'terminationQueue',  store: terminationQueue,
     dependsOn: ['agentConfigStore'] },
+  // Phase 2-A：Agent 权限持久化（每 Agent 的 PermissionSet）
+  { name: 'agentPermissionStore', store: agentPermissionStore,
+    dependsOn: ['agentConfigStore'] },
+  // Phase 3-A：群聊历史 + 群聊排队（公司切换时清空内存队列 + 从新路径加载历史）
+  { name: 'groupHistoryStore',  store: groupHistoryStore,
+    dependsOn: ['agentConfigStore'] },
+  { name: 'groupQueue',          store: groupQueue,
+    dependsOn: ['groupHistoryStore'] },
+  // Phase 5-A：跨 Agent 全链路追踪 span 存储
+  { name: 'traceStore',         store: traceStore,
+    dependsOn: [] },
   { name: 'tokenTracker',       store: tokenTracker,
     dependsOn: [],
     reinitialize: () => { tokenTracker.reinitialize(); tokenTracker.purgeZeroTokenRecords(); } },
@@ -349,6 +370,16 @@ async function initializeForCompany(accountId, companyId) {
     chatManager.initToolExecutor();
     memoryManager.initialize(llmManager);
     memoryManager.startMaintenanceSchedule();
+  }
+
+  // 3.5 Phase 1-C / 5：注入 chatManager 到 OrgChartService（getTeamStatus 依赖 activeTasks）
+  //   - 即使 llmManager 未就绪也注入：orgChartService.getTeamStatus 在 chatManager.activeTasks
+  //     为空 Map 时会优雅返回 idle 状态，不依赖 LLM。
+  try {
+    const { orgChartService } = require('./collaboration/org-chart-service');
+    orgChartService.setChatManager(chatManager);
+  } catch (e) {
+    logger.warn('注入 chatManager 到 orgChartService 失败:', e.message);
   }
 
   // 4. 恢复已批准的动态 Agent

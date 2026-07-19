@@ -1,6 +1,6 @@
 /**
  * SoloForge - 公司选择页面
- * 展示公司列表卡片，支持创建新公司
+ * 展示公司列表卡片，支持创建新公司，Linear 风格
  */
 import { useState, useCallback } from 'react';
 import { useAuthStore } from '../store/auth-store';
@@ -34,60 +34,65 @@ function CreateCompanyModal({ isOpen, onClose, onCreate }) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50"
+      onClick={onClose}
+    >
       <div
-        className="bg-bg-elevated rounded-2xl shadow-xl border border-border-primary p-6 w-full max-w-md mx-4"
+        className="surface rounded-xl shadow-dialog w-full max-w-md mx-4 overflow-hidden"
         onClick={e => e.stopPropagation()}
+        style={{
+          // Emil: 弹窗从 scale(0.95)+opacity:0 入场，200ms cubic-bezier(0.23,1,0.32,1)
+          animation: 'companyModalEnter 200ms cubic-bezier(0.23,1,0.32,1) both',
+        }}
       >
-        <h3 className="text-lg font-semibold text-text-primary mb-4">创建新公司</h3>
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <style>{`
+          @keyframes companyModalEnter {
+            from { opacity: 0; transform: scale(0.95); }
+            to   { opacity: 1; transform: scale(1); }
+          }
+        `}</style>
+        <div className="px-6 py-4 border-b border-border-default">
+          <h3 className="text-base font-ui text-text-primary">创建新公司</h3>
+        </div>
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1.5">公司名称</label>
+            <label className="block text-xs font-ui text-text-tertiary mb-1.5">公司名称</label>
             <input
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
               required
               autoFocus
-              className="w-full px-4 py-2.5 bg-bg-base border border-border-primary rounded-xl
-                       text-text-primary placeholder-text-muted
-                       focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 outline-none
-                       transition-all duration-200"
+              className="input"
               placeholder="例：我的创业公司"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-text-secondary mb-1.5">公司描述（可选）</label>
+            <label className="block text-xs font-ui text-text-tertiary mb-1.5">公司描述（可选）</label>
             <textarea
               value={description}
               onChange={e => setDescription(e.target.value)}
               rows={3}
-              className="w-full px-4 py-2.5 bg-bg-base border border-border-primary rounded-xl
-                       text-text-primary placeholder-text-muted
-                       focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 outline-none
-                       transition-all duration-200 resize-none"
+              className="input resize-none"
               placeholder="简单描述一下你的公司..."
             />
           </div>
           {error && (
-            <div className="px-4 py-2.5 bg-red-500/10 border border-red-500/20 rounded-xl">
-              <p className="text-sm text-red-500">{error}</p>
-            </div>
+            <p className="text-sm text-danger">{error}</p>
           )}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-2 justify-end">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 py-2.5 px-4 bg-bg-base border border-border-primary text-text-primary
-                       rounded-xl hover:bg-bg-muted transition-colors"
+              className="btn-ghost"
             >
               取消
             </button>
             <button
               type="submit"
               disabled={loading}
-              className="flex-1 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium
-                       rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="btn-primary"
             >
               {loading ? '创建中...' : '创建'}
             </button>
@@ -120,83 +125,118 @@ export default function CompanySelectPage() {
 
   return (
     <div className="min-h-screen bg-bg-base">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-border-primary">
-        <div className="flex items-center gap-3">
-          <span className="text-xl">🏢</span>
-          <span className="font-semibold text-text-primary">SoloForge</span>
+      {/* 顶部栏 */}
+      <div className="flex items-center justify-between px-6 py-3.5 border-b border-border-default bg-bg-panel">
+        <div className="flex items-center gap-2">
+          <span className="font-ui font-title tracking-tightest text-text-primary">SoloForge</span>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <span className="text-sm text-text-secondary">
             {currentAccount?.username}
           </span>
-          <button
-            onClick={logout}
-            className="text-sm text-text-secondary hover:text-red-500 transition-colors"
-          >
+          <button onClick={logout} className="btn-ghost">
             退出登录
           </button>
         </div>
       </div>
 
-      {/* Main content */}
+      {/* 主内容 */}
       <div className="max-w-4xl mx-auto px-6 py-12">
-        <div className="text-center mb-10">
-          <h1 className="text-2xl font-bold text-text-primary mb-2">选择公司</h1>
-          <p className="text-text-secondary">选择一个公司进入，或创建新的公司</p>
+        <div className="flex items-center justify-between mb-10">
+          <div>
+            <h1 className="text-2xl font-title tracking-tighter text-text-primary">选择公司</h1>
+            <p className="text-sm text-text-secondary mt-1">选择一个公司进入，或创建新的公司</p>
+          </div>
+          <button onClick={() => setShowCreateModal(true)} className="btn-ghost">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            新建公司
+          </button>
         </div>
 
         {error && (
-          <div className="mb-6 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-xl text-center">
-            <p className="text-sm text-red-500">{error}</p>
-          </div>
+          <p className="mb-6 text-sm text-danger text-center">{error}</p>
         )}
 
-        {/* Company grid */}
+        {/* 公司网格 */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-          {companies.map(company => (
-            <button
-              key={company.id}
-              onClick={() => handleSelect(company.id)}
-              disabled={selectingId === company.id}
-              className="group text-left p-6 bg-bg-elevated border border-border-primary rounded-2xl
-                       hover:border-blue-500/50 hover:shadow-lg hover:shadow-blue-500/5
-                       transition-all duration-200 disabled:opacity-70"
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center
-                              group-hover:bg-blue-500/20 transition-colors">
-                  <span className="text-lg">🏗️</span>
+          {/* stagger 入场 keyframes（仅本页局部） */}
+          <style>{`
+            @keyframes companyCardEnter {
+              from { opacity: 0; transform: translateY(6px); }
+              to   { opacity: 1; transform: translateY(0); }
+            }
+          `}</style>
+          {companies.map((company, idx) => {
+            const isSelecting = selectingId === company.id;
+            return (
+              <button
+                key={company.id}
+                onClick={() => handleSelect(company.id)}
+                disabled={isSelecting}
+                className={`card text-left p-5
+                  ${isSelecting ? 'border-accent' : ''}`}
+                style={{
+                  // Emil: 同时过渡 transform + border-color（避免 transition-transform 覆盖 .card 的 border-color transition）
+                  transition: 'transform 160ms cubic-bezier(0.23,1,0.32,1), border-color 160ms cubic-bezier(0.23,1,0.32,1), background-color 160ms cubic-bezier(0.23,1,0.32,1)',
+                  // stagger 入场 50ms 延迟
+                  animation: `companyCardEnter 300ms cubic-bezier(0.23,1,0.32,1) ${idx * 50}ms both`,
+                  // 选中态 accent 边框用过渡而非跳变
+                  borderColor: isSelecting ? 'var(--accent)' : undefined,
+                }}
+                onMouseEnter={(e) => {
+                  // Emil: 卡片 hover translateY(-2px) + border-color 过渡（仅 pointer:fine 设备）
+                  if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    if (!isSelecting) e.currentTarget.style.borderColor = 'var(--border-strong)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = '';
+                  if (!isSelecting) e.currentTarget.style.borderColor = '';
+                }}
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <div
+                    className="w-9 h-9 rounded-md flex items-center justify-center border border-border-default"
+                    style={{ backgroundColor: 'var(--accent-subtle)' }}
+                  >
+                    <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                    </svg>
+                  </div>
+                  {isSelecting && (
+                    <svg className="w-4 h-4 text-accent animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  )}
                 </div>
-                {selectingId === company.id && (
-                  <div className="w-5 h-5 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+                <h3 className="font-ui text-text-primary mb-1">{company.name}</h3>
+                {company.description && (
+                  <p className="text-sm text-text-secondary line-clamp-2">
+                    {company.description}
+                  </p>
                 )}
-              </div>
-              <h3 className="font-semibold text-text-primary mb-1 group-hover:text-blue-500 transition-colors">
-                {company.name}
-              </h3>
-              {company.description && (
-                <p className="text-sm text-text-secondary line-clamp-2">
-                  {company.description}
+                <p className="text-xs text-text-tertiary mt-3">
+                  创建于 {new Date(company.createdAt).toLocaleDateString('zh-CN')}
                 </p>
-              )}
-              <p className="text-xs text-text-muted mt-3">
-                创建于 {new Date(company.createdAt).toLocaleDateString('zh-CN')}
-              </p>
-            </button>
-          ))}
+              </button>
+            );
+          })}
 
-          {/* Create new company button */}
+          {/* 创建新公司卡片（虚线占位） */}
           <button
             onClick={() => setShowCreateModal(true)}
-            className="p-6 border-2 border-dashed border-border-primary rounded-2xl
-                     hover:border-blue-500/50 hover:bg-blue-500/5
-                     transition-all duration-200 flex flex-col items-center justify-center min-h-[160px]"
+            className="p-5 border border-dashed border-border-default rounded-lg
+                     hover:border-accent hover:bg-bg-hover
+                     transition-colors flex flex-col items-center justify-center min-h-[140px]"
           >
-            <div className="w-10 h-10 bg-bg-base rounded-xl flex items-center justify-center mb-3">
-              <span className="text-2xl text-text-muted">+</span>
-            </div>
-            <span className="text-sm font-medium text-text-secondary">创建新公司</span>
+            <svg className="w-5 h-5 text-text-tertiary mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            <span className="text-sm text-text-secondary">创建新公司</span>
           </button>
         </div>
 

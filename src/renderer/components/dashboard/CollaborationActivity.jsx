@@ -1,16 +1,15 @@
 import { useState, useCallback } from 'react';
 import {
-  ArrowsRightLeftIcon,
   ChevronRightIcon,
   ChatBubbleLeftIcon,
   ClipboardDocumentCheckIcon,
 } from '@heroicons/react/24/outline';
 import { PAGE_SIZE } from './constants';
 import { formatDateTime } from './utils';
-import { ChevronIcon, DetailField, EmptyState, Pagination } from './ui';
+import { ChevronIcon, DetailField, EmptyState, Pagination, Badge } from './ui';
 
 /**
- * Agent 协作活动列表
+ * Agent 协作活动列表 —— 消息预览 text-secondary，pill badge
  * props: { activities: Array, onRefresh: Function }
  */
 export default function CollaborationActivity({ activities, onRefresh }) {
@@ -75,12 +74,27 @@ export default function CollaborationActivity({ activities, onRefresh }) {
   }, [onRefresh]);
 
   if (!activities || activities.length === 0) {
-    return <EmptyState icon={ArrowsRightLeftIcon} message="暂无协作记录" />;
+    return <EmptyState icon={ChatBubbleLeftIcon} message="暂无协作记录" />;
   }
 
   const totalPages = Math.ceil(activities.length / PAGE_SIZE);
   const startIdx = (currentPage - 1) * PAGE_SIZE;
   const displayActivities = activities.slice(startIdx, startIdx + PAGE_SIZE);
+
+  // 状态 → badge tone 映射
+  const statusTone = (status) => {
+    if (status === 'completed' || status === 'responded') return 'success';
+    if (status === 'failed') return 'danger';
+    if (status === 'in_progress') return 'accent';
+    return 'warning'; // pending
+  };
+  const statusLabel = (status) => {
+    if (status === 'responded') return '已回复';
+    if (status === 'completed') return '已完成';
+    if (status === 'failed') return '失败';
+    if (status === 'in_progress') return '进行中';
+    return '待处理';
+  };
 
   return (
     <div>
@@ -91,19 +105,19 @@ export default function CollaborationActivity({ activities, onRefresh }) {
             <button
               onClick={handleClearStale}
               disabled={isClearing}
-              className="px-2 py-1 text-xs text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded transition-colors disabled:opacity-50"
+              className="px-2 py-1 text-xs text-warning hover:text-warning rounded-sm transition-colors-fast disabled:opacity-50"
               title="关闭超过 1 天未完成的任务"
             >
-              {isClearing ? '处理中...' : `关闭超时任务`}
+              {isClearing ? '处理中…' : `关闭超时任务`}
             </button>
           )}
           {completedCount > 0 && (
             <button
               onClick={handleClearCompleted}
               disabled={isClearing}
-              className="px-2 py-1 text-xs text-blue-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors disabled:opacity-50"
+              className="px-2 py-1 text-xs text-text-tertiary hover:text-text-secondary rounded-sm transition-colors-fast disabled:opacity-50"
             >
-              {isClearing ? '处理中...' : `清空已完成 (${completedCount})`}
+              {isClearing ? '处理中…' : `清空已完成 (${completedCount})`}
             </button>
           )}
         </div>
@@ -113,67 +127,61 @@ export default function CollaborationActivity({ activities, onRefresh }) {
           const key = activity.id || idx;
           const isExpanded = expandedId === key;
           const TypeIcon = activity.type === 'message' ? ChatBubbleLeftIcon : ClipboardDocumentCheckIcon;
-          const typeColor = activity.type === 'message' ? 'text-blue-500' : 'text-purple-500';
 
           return (
             <div
               key={key}
-              className={`rounded-lg transition-colors ${
+              className={`group relative rounded-md border ${
                 isExpanded
-                  ? 'bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800'
-                  : 'hover:bg-[var(--bg-hover)] border border-transparent'
+                  ? 'border-border-default'
+                  : 'border-transparent hover:border-border-default'
               }`}
             >
+              {/* Emil: hover opacity 背景层（不触发 background-color 重绘） */}
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ backgroundColor: 'var(--bg-hover)' }}
+              />
+              {isExpanded && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-md"
+                  style={{ backgroundColor: 'var(--bg-hover)', opacity: 1 }}
+                />
+              )}
               <button
                 type="button"
                 className="w-full flex items-start gap-2.5 p-2.5 text-left"
                 onClick={() => setExpandedId(isExpanded ? null : key)}
               >
                 <ChevronIcon expanded={isExpanded} />
-                <div className="w-6 h-6 rounded-full bg-bg-muted flex items-center justify-center shrink-0 mt-0.5">
-                  <TypeIcon className={`w-3.5 h-3.5 ${typeColor}`} />
+                <div className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}>
+                  <TypeIcon className="w-3 h-3 text-text-quaternary" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1 text-xs text-text-secondary">
-                    <span className="font-medium text-text-primary">{activity.from}</span>
-                    <ChevronRightIcon className="w-3 h-3 text-text-muted" />
-                    <span className="font-medium text-text-primary">{activity.to}</span>
-                    <span className="text-text-muted mx-0.5">|</span>
-                    <span className="text-text-muted">{formatDateTime(activity.timestamp)}</span>
+                  <div className="flex items-center gap-1 text-xs text-text-tertiary">
+                    <span className="font-ui text-text-secondary">{activity.from}</span>
+                    <ChevronRightIcon className="w-3 h-3 text-text-quaternary" />
+                    <span className="font-ui text-text-secondary">{activity.to}</span>
+                    <span className="text-text-quaternary mx-0.5">·</span>
+                    <span className="text-text-quaternary">{formatDateTime(activity.timestamp)}</span>
                   </div>
                   <p className="text-sm text-text-secondary truncate mt-0.5">{activity.summary}</p>
                 </div>
-                <span
-                  className={`px-1.5 py-0.5 text-xs rounded shrink-0 ${
-                    activity.status === 'completed' || activity.status === 'responded'
-                      ? 'bg-green-100 text-green-600 dark:bg-green-900 dark:text-green-300'
-                      : activity.status === 'failed'
-                        ? 'bg-red-100 text-red-600 dark:bg-red-900 dark:text-red-300'
-                        : 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900 dark:text-yellow-300'
-                  }`}
-                >
-                  {activity.status === 'responded' ? '已回复' :
-                   activity.status === 'completed' ? '已完成' :
-                   activity.status === 'failed' ? '失败' :
-                   activity.status === 'in_progress' ? '进行中' : '待处理'}
-                </span>
+                <Badge tone={statusTone(activity.status)} className="shrink-0">
+                  {statusLabel(activity.status)}
+                </Badge>
               </button>
 
               {isExpanded && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--border-color)]/50 ml-9">
+                <div className="px-3 pb-3 pt-2 ml-9 mr-3 border-t border-border-subtle">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className={`px-2 py-0.5 text-xs rounded-full ${
-                      activity.type === 'message'
-                        ? 'bg-blue-100 text-blue-600 dark:bg-blue-900 dark:text-blue-300'
-                        : 'bg-purple-100 text-purple-600 dark:bg-purple-900 dark:text-purple-300'
-                    }`}>
+                    <Badge tone={activity.type === 'message' ? 'accent' : 'warning'}>
                       {activity.type === 'message' ? '消息' : '委派任务'}
-                    </span>
+                    </Badge>
                     {activity.type === 'task' && activity.priority && (
-                      <span className={`text-xs ${
-                        activity.priority <= 2 ? 'text-red-500' :
-                        activity.priority <= 3 ? 'text-yellow-500' : 'text-text-muted'
-                      }`}>
+                      <span className={`text-xs ${activity.priority <= 2 ? 'text-danger' : activity.priority <= 3 ? 'text-warning' : 'text-text-quaternary'}`}>
                         优先级 {activity.priority}
                       </span>
                     )}
@@ -181,10 +189,10 @@ export default function CollaborationActivity({ activities, onRefresh }) {
 
                   {activity.content && (
                     <div className="mb-3">
-                      <span className="text-xs text-text-muted">
+                      <span className="text-xs text-text-quaternary">
                         {activity.type === 'message' ? '发送内容' : '任务描述'}
                       </span>
-                      <div className="mt-1 p-2 bg-bg-elevated rounded text-sm text-text-primary whitespace-pre-wrap max-h-32 overflow-auto">
+                      <div className="mt-1 p-2 rounded-md border border-border-subtle text-sm text-text-secondary whitespace-pre-wrap max-h-32 overflow-auto leading-snug">
                         {activity.content}
                       </div>
                     </div>
@@ -192,8 +200,8 @@ export default function CollaborationActivity({ activities, onRefresh }) {
 
                   {activity.type === 'message' && activity.response && (
                     <div className="mb-3">
-                      <span className="text-xs text-text-muted">回复内容</span>
-                      <div className="mt-1 p-2 bg-green-50 dark:bg-green-950/30 rounded text-sm text-text-primary whitespace-pre-wrap max-h-32 overflow-auto">
+                      <span className="text-xs text-text-quaternary">回复内容</span>
+                      <div className="mt-1 p-2 rounded-md border border-border-subtle text-sm text-text-secondary whitespace-pre-wrap max-h-32 overflow-auto leading-snug">
                         {activity.response}
                       </div>
                     </div>
@@ -201,8 +209,8 @@ export default function CollaborationActivity({ activities, onRefresh }) {
 
                   {activity.type === 'task' && activity.result && (
                     <div className="mb-3">
-                      <span className="text-xs text-text-muted">执行结果</span>
-                      <div className="mt-1 p-2 bg-green-50 dark:bg-green-950/30 rounded text-sm text-text-primary whitespace-pre-wrap max-h-32 overflow-auto">
+                      <span className="text-xs text-text-quaternary">执行结果</span>
+                      <div className="mt-1 p-2 rounded-md border border-border-subtle text-sm text-text-secondary whitespace-pre-wrap max-h-32 overflow-auto leading-snug">
                         {activity.result}
                       </div>
                     </div>
@@ -216,7 +224,7 @@ export default function CollaborationActivity({ activities, onRefresh }) {
                   </div>
 
                   {activity.type === 'task' && activity.discussionCount > 0 && (
-                    <div className="mt-2 flex items-center gap-1.5 text-xs text-text-secondary">
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-text-tertiary">
                       <ChatBubbleLeftIcon className="w-3.5 h-3.5" />
                       <span>{activity.discussionCount} 条讨论记录</span>
                     </div>

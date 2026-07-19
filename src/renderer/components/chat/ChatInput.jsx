@@ -2,6 +2,15 @@
  * SoloForge - 聊天输入框组件
  * 支持多行输入、Enter 发送、Shift+Enter 换行、@mention、图片粘贴/拖拽/选择、语音输入
  *
+ * Linear 风格（批次1-C）：
+ *   - 输入框：半透明背景（rgba 0.02），细边框，6px 圆角，focus 时 accent 边框
+ *   - 发送按钮：accent 实色（#5e6ad2），白色图标，6px 圆角
+ *   - 附件按钮：ghost 风格（半透明背景）
+ *   - 录音按钮：ghost 风格
+ *   - @提及下拉：var(--bg-surface) + 多层阴影 + 细边框
+ *   - 拖拽区域：虚线边框 + 半透明背景
+ *   - 停止生成按钮：danger 色半透明
+ *
  * 职责拆分（Phase 1 批次 4b）：
  *   - 语音录制 → use-audio-recorder.js（AudioContext + WAV 编码 + STT）
  *   - 拖拽/粘贴/选择图片附件 → use-drop-zone.js
@@ -249,19 +258,84 @@ export default function ChatInput({
     onSilenceGroup(currentConversationId);
   }, [currentConversationId, onSilenceGroup]);
 
+  // ─────────────────────────────────────────────────────────
+  // Linear 风格样式常量
+  // ─────────────────────────────────────────────────────────
+  const accent = 'var(--accent)';
+  const accentHover = 'var(--accent-hover)';
+
+  // 输入框：半透明背景（rgba 0.02）+ 细边框 + 6px 圆角 + focus 时 accent 边框 + translateY(-1px) 微浮起
+  const inputBaseStyle = {
+    background: 'rgba(255, 255, 255, 0.02)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    border: '1px solid var(--border-default)',
+    borderRadius: 'var(--radius-md)',
+    color: 'var(--text-primary)',
+    transition: 'border-color 0.15s, box-shadow 0.15s, transform 0.15s cubic-bezier(0.23, 1, 0.32, 1)',
+  };
+  const inputFocusStyle = {
+    borderColor: accent,
+    boxShadow: '0 0 0 3px rgba(94, 106, 210, 0.18)',
+    transform: 'translateY(-1px)',
+  };
+
+  // ghost 按钮：半透明背景 + 细边框
+  const ghostButtonStyle = {
+    background: 'rgba(255, 255, 255, 0.04)',
+    border: '1px solid var(--border-default)',
+    color: 'var(--text-secondary)',
+    borderRadius: 'var(--radius-md)',
+    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+  };
+
+  // 发送按钮：accent 实色 + 白色图标 + 6px 圆角
+  const sendButtonStyle = {
+    background: accent,
+    color: '#ffffff',
+    border: '1px solid transparent',
+    borderRadius: 'var(--radius-md)',
+    transition: 'background 0.15s',
+  };
+  const sendButtonDisabledStyle = {
+    background: 'rgba(255, 255, 255, 0.04)',
+    color: 'var(--text-quaternary)',
+    border: '1px solid var(--border-default)',
+    borderRadius: 'var(--radius-md)',
+    cursor: 'not-allowed',
+  };
+
+  // 录音按钮 active 态：danger 半透明
+  const recordActiveStyle = {
+    background: 'rgba(239, 68, 68, 0.18)',
+    border: '1px solid rgba(239, 68, 68, 0.5)',
+    color: '#ef4444',
+    borderRadius: 'var(--radius-md)',
+  };
+
   return (
     <div
-      className={`shrink-0 px-6 py-4 border-t border-[var(--border-color)] bg-bg-base transition-colors ${
-        isDragOver ? 'ring-2 ring-[var(--color-primary)]/50 bg-[var(--color-primary)]/5' : ''
-      }`}
+      className="shrink-0 px-6 py-4 transition-colors"
+      style={{
+        borderTop: '1px solid var(--border-default)',
+        background: 'var(--bg-base)',
+        boxShadow: isDragOver ? 'inset 0 0 0 2px rgba(94, 106, 210, 0.4)' : 'none',
+      }}
       onDragOver={supportsImageInput ? handleDragOver : undefined}
       onDragLeave={supportsImageInput ? handleDragLeave : undefined}
       onDrop={supportsImageInput ? handleDrop : undefined}
     >
-      {/* 拖拽提示覆盖层 */}
+      {/* 拖拽提示覆盖层：虚线边框 + 半透明背景 */}
       {supportsImageInput && isDragOver && (
-        <div className="flex items-center justify-center py-4 mb-3 border-2 border-dashed border-[var(--color-primary)]/50 rounded-xl bg-[var(--color-primary)]/5">
-          <div className="flex items-center gap-2 text-[var(--color-primary)]">
+        <div
+          className="flex items-center justify-center py-4 mb-3"
+          style={{
+            border: `2px dashed ${accent}`,
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(94, 106, 210, 0.05)',
+          }}
+        >
+          <div className="flex items-center gap-2" style={{ color: accent }}>
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -277,7 +351,12 @@ export default function ChatInput({
           {attachments.map((att) => (
             <div
               key={att.id}
-              className="relative group w-20 h-20 rounded-xl overflow-hidden border border-[var(--border-color)] bg-bg-elevated"
+              className="relative group w-20 h-20 overflow-hidden"
+              style={{
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-default)',
+                background: 'var(--bg-surface)',
+              }}
             >
               <img
                 src={`sf-local://${att.path}`}
@@ -287,13 +366,19 @@ export default function ChatInput({
               <button
                 type="button"
                 onClick={() => removeAttachment(att.id)}
-                className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/80"
+                className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ background: 'rgba(0, 0, 0, 0.6)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(0, 0, 0, 0.8)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(0, 0, 0, 0.6)'; }}
               >
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
-              <div className="absolute bottom-0 inset-x-0 bg-black/40 px-1 py-0.5 text-[10px] text-white truncate">
+              <div
+                className="absolute bottom-0 inset-x-0 px-1 py-0.5 text-[10px] text-white truncate"
+                style={{ background: 'rgba(0, 0, 0, 0.4)' }}
+              >
                 {att.filename}
               </div>
             </div>
@@ -301,51 +386,79 @@ export default function ChatInput({
         </div>
       )}
 
-      {/* 录音中状态 */}
+      {/* 录音中状态：danger 色半透明 */}
       {isRecording && (
-        <div className="flex items-center gap-3 mb-3 px-4 py-2.5 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-xl">
+        <div
+          className="flex items-center gap-3 mb-3 px-4 py-2.5"
+          style={{
+            background: 'rgba(239, 68, 68, 0.10)',
+            border: '1px solid rgba(239, 68, 68, 0.35)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
           <span className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: 'rgba(248, 113, 113, 0.9)' }}></span>
+            <span className="relative inline-flex rounded-full h-3 w-3" style={{ background: '#ef4444' }}></span>
           </span>
-          <span className="text-sm text-red-600 dark:text-red-400 font-medium">
+          <span className="text-sm font-medium" style={{ color: '#f87171' }}>
             录音中 {formatRecordingTime(recordingTime)}
           </span>
           <button
             type="button"
             onClick={stopRecording}
-            className="ml-auto text-xs px-2.5 py-1 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
+            className="ml-auto text-xs px-2.5 py-1 text-white transition-colors"
+            style={{
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(239, 68, 68, 0.85)',
+            }}
           >停止
           </button>
         </div>
       )}
 
-      {/* 转写中状态 */}
+      {/* 转写中状态：accent 半透明（原蓝色改 accent） */}
       {isTranscribing && (
-        <div className="flex items-center gap-2 mb-3 px-4 py-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-xl">
-          <svg className="w-4 h-4 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+        <div
+          className="flex items-center gap-2 mb-3 px-4 py-2"
+          style={{
+            background: 'rgba(94, 106, 210, 0.10)',
+            border: '1px solid rgba(94, 106, 210, 0.35)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
+          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" style={{ color: accent }}>
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
           </svg>
-          <span className="text-sm text-blue-600 dark:text-blue-400">语音识别中...</span>
+          <span className="text-sm" style={{ color: accent }}>语音识别中…</span>
         </div>
       )}
 
       <div className="flex items-end gap-3">
-        {/* 图片选择按钮（仅当 Agent 支持多模态时显示） */}
+        {/* 图片选择按钮（仅当 Agent 支持多模态时显示）—— ghost 风格 */}
         {supportsImageInput && (
-        <button
-          type="button"
-          onClick={handleSelectImages}
-          disabled={disabled || !currentConversationId}
-          className="shrink-0 w-9 h-9 mb-0.5 rounded-lg flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-[var(--border-color)]/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          title="添加图片"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
-        </button>
+          <button
+            type="button"
+            onClick={handleSelectImages}
+            disabled={disabled || !currentConversationId}
+            className="shrink-0 w-9 h-9 mb-0.5 flex items-center justify-center transition-colors disabled:cursor-not-allowed"
+            style={ghostButtonStyle}
+            onMouseEnter={(e) => {
+              if (disabled || !currentConversationId) return;
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+              e.currentTarget.style.color = 'var(--text-secondary)';
+            }}
+            title="添加图片"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </button>
         )}
 
         {/* 输入框 */}
@@ -359,14 +472,40 @@ export default function ChatInput({
             placeholder={placeholder}
             disabled={disabled || !currentConversationId}
             rows={1}
-            className="w-full resize-none rounded-2xl border border-[var(--border-color)] bg-bg-elevated px-4 py-3 text-sm text-text-primary placeholder:text-text-secondary focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/50 disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{ minHeight: '44px', maxHeight: '150px' }}
+            className="w-full resize-none px-4 py-3 text-sm placeholder:text-text-secondary focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              ...inputBaseStyle,
+              minHeight: '44px',
+              maxHeight: '150px',
+            }}
+            onFocus={(e) => {
+              Object.assign(e.currentTarget.style, inputFocusStyle);
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.borderColor = 'var(--border-default)';
+              e.currentTarget.style.boxShadow = 'none';
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
           />
 
-          {/* @mention 菜单 */}
+          {/* @mention 菜单：var(--bg-surface) + 多层阴影 + 细边框；emil-pill-enter scale(0.95)+opacity 入场 */}
           {showMentionMenu && filteredAgents.length > 0 && (
-            <div className="absolute bottom-full left-0 mb-2 w-64 bg-bg-elevated border border-[var(--border-color)] rounded-xl shadow-lg overflow-hidden">
-              <div className="px-3 py-2 text-xs text-text-secondary border-b border-[var(--border-color)]">
+            <div
+              className="absolute bottom-full left-0 mb-2 w-64 overflow-hidden emil-pill-enter"
+              style={{
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.5)',
+              }}
+            >
+              <div
+                className="px-3 py-2 text-xs"
+                style={{
+                  color: 'var(--text-tertiary)',
+                  borderBottom: '1px solid var(--border-subtle)',
+                }}
+              >
                 选择要 @ 的成员
               </div>
               {filteredAgents.map((agent, idx) => (
@@ -374,16 +513,25 @@ export default function ChatInput({
                   key={agent.id}
                   type="button"
                   onClick={() => insertMention(agent)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
-                    idx === mentionIndex
-                      ? 'bg-[var(--color-primary)]/15'
-                      : 'hover:bg-[var(--border-color)]/30'
-                  }`}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors emil-ghost-hover"
+                  style={{
+                    background: idx === mentionIndex ? 'rgba(94, 106, 210, 0.15)' : 'transparent',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (idx !== mentionIndex) {
+                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    if (idx !== mentionIndex) {
+                      e.currentTarget.style.background = 'transparent';
+                    }
+                  }}
                 >
-                  <AgentAvatar avatar={agent.avatar} fallback="🤖" size="xs" />
+                  <AgentAvatar avatar={agent.avatar} fallback="" size="xs" />
                   <div>
-                    <p className="text-sm font-medium text-text-primary">{agent.name}</p>
-                    <p className="text-xs text-text-secondary">@{agent.id}</p>
+                    <p className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{agent.name}</p>
+                    <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>@{agent.id}</p>
                   </div>
                 </button>
               ))}
@@ -391,12 +539,26 @@ export default function ChatInput({
           )}
         </div>
 
-        {/* 群聊"肃静！"按钮 */}
+        {/* 群聊"肃静！"按钮：danger 色半透明 */}
         {isGroupChat && (
           <button
             type="button"
             onClick={handleSilence}
-            className="shrink-0 h-11 px-3 rounded-xl flex items-center justify-center gap-1.5 transition-all text-sm font-bold border-2 border-red-500/50 text-red-400 hover:bg-red-500/15 hover:border-red-500 hover:text-red-300 active:scale-95"
+            className="shrink-0 h-11 px-3 flex items-center justify-center gap-1.5 transition-all text-sm font-bold active:scale-95"
+            style={{
+              borderRadius: 'var(--radius-md)',
+              border: '1.5px solid rgba(239, 68, 68, 0.5)',
+              color: '#f87171',
+              background: 'rgba(239, 68, 68, 0.08)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+              e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.8)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.08)';
+              e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+            }}
             title="停止群聊中所有人发言"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -409,16 +571,23 @@ export default function ChatInput({
           </button>
         )}
 
-        {/* 语音输入按钮 */}
+        {/* 语音输入按钮：ghost 风格；录音中变 danger 半透明 + emil-record-pulse 脉冲 */}
         <button
           type="button"
           onClick={toggleRecording}
           disabled={disabled || !currentConversationId || isTranscribing}
-          className={`shrink-0 w-11 h-11 rounded-full flex items-center justify-center transition-colors ${
-            isRecording
-              ? 'bg-red-500 text-white hover:bg-red-600 animate-pulse'
-              : 'bg-[var(--border-color)]/50 text-text-secondary hover:text-text-primary hover:bg-[var(--border-color)]'
-          } disabled:opacity-40 disabled:cursor-not-allowed`}
+          className={`shrink-0 w-11 h-11 flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed${isRecording ? ' emil-record-pulse' : ''}`}
+          style={isRecording ? recordActiveStyle : ghostButtonStyle}
+          onMouseEnter={(e) => {
+            if (isRecording || disabled || !currentConversationId || isTranscribing) return;
+            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
+            e.currentTarget.style.color = 'var(--text-primary)';
+          }}
+          onMouseLeave={(e) => {
+            if (isRecording) return;
+            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+            e.currentTarget.style.color = 'var(--text-secondary)';
+          }}
           title={isRecording ? '停止录音' : '语音输入'}
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -426,24 +595,27 @@ export default function ChatInput({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
             ) : (
-              <>
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              </>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
             )}
           </svg>
         </button>
 
-        {/* 发送按钮 */}
+        {/* 发送按钮：accent 实色 + 白色图标 + 6px 圆角；emil-pressable 按压迫反馈 */}
         <button
           type="button"
           onClick={handleSend}
           disabled={!canSend}
-          className={`shrink-0 w-11 h-11 rounded-full flex items-center justify-center transition-colors ${
-            canSend
-              ? 'bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary)]/90'
-              : 'bg-[var(--border-color)] text-text-secondary cursor-not-allowed'
-          }`}
+          className="shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable"
+          style={canSend ? sendButtonStyle : sendButtonDisabledStyle}
+          onMouseEnter={(e) => {
+            if (!canSend) return;
+            e.currentTarget.style.background = accentHover;
+          }}
+          onMouseLeave={(e) => {
+            if (!canSend) return;
+            e.currentTarget.style.background = accent;
+          }}
           title="发送 (Enter)"
         >
           <svg
@@ -463,7 +635,7 @@ export default function ChatInput({
       </div>
 
       {/* 提示文字 */}
-      <p className="text-xs text-text-secondary mt-2 text-center">
+      <p className="text-xs mt-2 text-center" style={{ color: 'var(--text-quaternary)' }}>
         Enter 发送，Shift + Enter 换行，@ 提及成员{supportsImageInput ? '，可粘贴/拖拽图片' : ''}
       </p>
     </div>

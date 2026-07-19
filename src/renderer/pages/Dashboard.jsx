@@ -4,7 +4,7 @@ import { ChevronLeftIcon, ChartBarIcon, ArrowPathIcon } from '@heroicons/react/2
 // ─────────────────────────────────────────────────────────────
 // Dashboard 子组件（拆分自本文件，按职责独立维护）
 // ─────────────────────────────────────────────────────────────
-import { StatCard, Panel } from '../components/dashboard/ui.jsx';
+import { StatCard, Panel, Badge, StatusDot } from '../components/dashboard/ui.jsx';
 import GoalsList from '../components/dashboard/GoalsList.jsx';
 import TasksList from '../components/dashboard/TasksList.jsx';
 import KPIsList from '../components/dashboard/KPIsList.jsx';
@@ -17,7 +17,7 @@ import ProjectsPanel from '../components/dashboard/ProjectsPanel.jsx';
 import AgentTaskPanel from '../components/dashboard/AgentTaskPanel.jsx';
 
 // ─────────────────────────────────────────────────────────────
-// 运营仪表板主组件
+// 运营仪表板主组件 —— Linear 风格 Monitor 面
 // ─────────────────────────────────────────────────────────────
 //
 // 职责（拆分后仅保留）：
@@ -31,6 +31,7 @@ import AgentTaskPanel from '../components/dashboard/AgentTaskPanel.jsx';
 //   [AgentTaskPanel] 2s 轮询 Agent 任务 + 1s tick 刷新已用时 —— 自管理清理
 export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [data, setData] = useState({
     summary: null,
     goals: [],
@@ -44,6 +45,8 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
   });
 
   const loadData = useCallback(async () => {
+    // 触发 opacity 闪现；首次加载时主内容不可见（显示 spinner），闪现无副作用
+    setRefreshing(true);
     try {
       const [summary, goals, tasks, kpis, recruitRequests, terminationRequests, collaboration, projects] = await Promise.all([
         window.electronAPI.getOperationsSummary(),
@@ -71,6 +74,7 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
       console.error('加载仪表板数据失败:', error);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
@@ -87,9 +91,28 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
     return (
       <div className="h-full flex items-center justify-center bg-bg-base">
         <div className="text-center">
-          <div className="w-10 h-10 border-3 border-gray-300 dark:border-gray-600 border-t-gray-900 dark:border-t-white rounded-full animate-spin mx-auto" />
-          <p className="mt-4 text-sm text-text-secondary">加载仪表板...</p>
+          {/* Emil: 入场 scale(0.95)+opacity:0 → 1 */}
+          <div
+            className="w-8 h-8 rounded-full animate-spin mx-auto"
+            style={{
+              border: '2px solid rgba(255,255,255,0.08)',
+              borderTopColor: 'var(--accent)',
+              animation: 'dashLoaderEnter 280ms cubic-bezier(0.23,1,0.32,1) both, spin 700ms linear infinite',
+            }}
+          />
+          <p
+            className="mt-3 text-sm text-text-tertiary"
+            style={{ animation: 'dashLoaderEnter 280ms 60ms cubic-bezier(0.23,1,0.32,1) both' }}
+          >
+            加载仪表板…
+          </p>
         </div>
+        <style>{`
+          @keyframes dashLoaderEnter {
+            from { opacity: 0; transform: scale(0.95); }
+            to   { opacity: 1; transform: scale(1); }
+          }
+        `}</style>
       </div>
     );
   }
@@ -108,82 +131,84 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
       {/* macOS 标题栏占位 */}
       <div className="shrink-0 h-8 drag-region" />
 
-      <div className="max-w-7xl mx-auto py-6 px-6">
-        {/* 头部 */}
-        <div className="flex items-center justify-between mb-8">
+      <div className="max-w-[1400px] mx-auto px-6 py-6">
+        {/* 头部：极简标题 + ghost 返回 */}
+        <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             {onBack && (
-              <button
-                onClick={onBack}
-                className="p-1.5 hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
-              >
-                <ChevronLeftIcon className="w-5 h-5 text-text-secondary" />
+              <button onClick={onBack} className="btn-ghost !p-1.5" aria-label="返回">
+                <ChevronLeftIcon className="w-4 h-4" />
               </button>
             )}
             <div>
-              <h1 className="text-xl font-semibold text-text-primary">运营仪表板</h1>
-              <p className="text-xs text-text-muted mt-0.5">公司运营状况概览</p>
+              <h1 className="text-[15px] font-title tracking-tighter text-text-primary leading-tight">
+                运营仪表板
+              </h1>
+              <p className="text-xs text-text-quaternary mt-0.5 leading-tight">公司运营状况概览</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* CFO 控制台入口 */}
+            {/* CFO 控制台入口 —— ghost 风格，无绿色装饰 */}
             {onOpenCFO && (
-              <button
-                onClick={onOpenCFO}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 rounded-lg transition-colors"
-              >
-                <ChartBarIcon className="w-4 h-4" />
-                <span className="text-xs font-medium">CFO 控制台</span>
+              <button onClick={onOpenCFO} className="btn-ghost">
+                <ChartBarIcon className="w-3.5 h-3.5" />
+                <span>CFO 控制台</span>
               </button>
             )}
-            {/* H: 刷新按钮降权 -- ghost 样式 */}
             <button
               onClick={loadData}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded-lg transition-colors"
+              className="btn-ghost"
+              style={{ opacity: refreshing ? 0.5 : 1, transition: 'opacity 200ms cubic-bezier(0.23,1,0.32,1)' }}
             >
-              <ArrowPathIcon className="w-4 h-4" />
-              <span className="text-xs">刷新</span>
+              <ArrowPathIcon className="w-3.5 h-3.5" />
+              <span>刷新</span>
             </button>
           </div>
         </div>
 
-        {/* B: 统计卡片 -- 左侧彩条，无 emoji 图标 */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+        {/* KPI 统计行 —— 6 列密度，紧凑 StatCard；Emil: stagger 入场 40ms + 刷新时 opacity 闪现 */}
+        <div
+          className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6 stagger"
+          style={{
+            opacity: refreshing ? 0.5 : 1,
+            transition: 'opacity 200ms cubic-bezier(0.23,1,0.32,1)',
+          }}
+        >
           <StatCard
             title="目标总数"
             value={goalStats.total || 0}
             subtitle={`进行中 ${goalStats.inProgress || 0} · 平均 ${goalStats.avgProgress || 0}%`}
-            color="blue"
+            tone="accent"
           />
           <StatCard
             title="任务总数"
             value={taskStats.total || 0}
             subtitle={`待办 ${taskStats.todo || 0} · 高优 ${taskStats.highPriority || 0}`}
-            color="green"
+            tone="success"
           />
           <StatCard
             title="KPI 指标"
             value={kpiStats.total || 0}
             subtitle={`达标 ${kpiStats.onTrack || 0} · 风险 ${kpiStats.atRisk || 0}`}
-            color="purple"
+            tone="accent"
           />
           <StatCard
             title="招聘审批"
             value={recruitRequests.filter((r) => r.status === 'pending' || r.status === 'discussing').length}
             subtitle={`总计 ${recruitRequests.length} 个申请`}
-            color="yellow"
+            tone="warning"
           />
           <StatCard
             title="开除审批"
             value={(terminationRequests || []).filter((r) => r.status === 'pending').length}
             subtitle={`总计 ${(terminationRequests || []).length} 个申请`}
-            color="red"
+            tone="danger"
           />
           <StatCard
             title="团队协作"
             value={(collabStats.messageCount || 0) + (collabStats.taskCount || 0)}
             subtitle={`消息 ${collabStats.messageCount || 0} · 委派 ${collabStats.taskCount || 0}`}
-            color="cyan"
+            tone="accent"
           />
         </div>
 
@@ -193,30 +218,30 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
         {/* Agent 工作状态面板 */}
         <AgentTaskPanel />
 
-        {/* A: 两栏布局 */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* 主体两栏布局 —— Monitor 面密度优先；Emil: 面板 stagger 入场 */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 dashPanels">
           {/* 左栏 */}
-          <div className="space-y-6">
-            {/* E: 任务看板提到更显眼的位置 */}
+          <div className="space-y-4">
+            {/* 任务看板 */}
             <Panel title="任务看板" trailing={`${tasks.length} 个任务`}>
               <TasksList tasks={tasks} goals={goals} allTasks={rawTasks} onRefresh={loadData} />
               {tasks.length > 0 && (
-                <div className="mt-4 pt-3 border-t border-[var(--border-color)]/50">
-                  <div className="flex flex-wrap gap-3 text-xs text-text-secondary">
+                <div className="mt-3 pt-3 border-t border-border-subtle">
+                  <div className="flex flex-wrap gap-3 text-xs text-text-tertiary">
                     <span className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-500" />
+                      <StatusDot tone="neutral" />
                       待办 {taskStats.todo || 0}
                     </span>
                     <span className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-blue-500" />
+                      <StatusDot tone="accent" />
                       进行中 {taskStats.inProgress || 0}
                     </span>
                     <span className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-yellow-500" />
+                      <StatusDot tone="warning" />
                       审核 {taskStats.review || 0}
                     </span>
                     <span className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-green-500" />
+                      <StatusDot tone="success" />
                       完成 {taskStats.done || 0}
                     </span>
                   </div>
@@ -236,7 +261,7 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
           </div>
 
           {/* 右栏 */}
-          <div className="space-y-6">
+          <div className="space-y-4">
             {/* 预算审批 */}
             <Panel title="预算审批" trailing="Agent 预算管理">
               <BudgetApprovalPanel onRefresh={loadData} />
@@ -246,7 +271,7 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
             <Panel title="Agent 协作" trailing={`${collabStats.pendingTasks || 0} 待处理`}>
               <CollaborationActivity activities={collabStats.recentActivity} onRefresh={loadData} />
               {(collabStats.messageCount > 0 || collabStats.taskCount > 0) && (
-                <div className="mt-3 pt-3 border-t border-[var(--border-color)] flex gap-4 text-xs text-text-muted">
+                <div className="mt-3 pt-3 border-t border-border-subtle flex gap-4 text-xs text-text-quaternary">
                   <span>消息: {collabStats.messageCount || 0}</span>
                   <span>委派: {collabStats.taskCount || 0}</span>
                   <span>完成: {collabStats.completedTasks || 0}</span>
@@ -276,6 +301,26 @@ export default function Dashboard({ onBack, onOpenCFO, isActive = true }) {
             </Panel>
           </div>
         </div>
+
+        {/* 面板 stagger 入场：每项 40ms 延迟，仅本页局部 keyframes */}
+        <style>{`
+          @keyframes dashPanelEnter {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: translateY(0); }
+          }
+          .dashPanels > div > .panel {
+            opacity: 0;
+            animation: dashPanelEnter 280ms cubic-bezier(0.23,1,0.32,1) both;
+          }
+          .dashPanels > div:nth-child(1) > .panel:nth-child(1) { animation-delay: 0ms; }
+          .dashPanels > div:nth-child(1) > .panel:nth-child(2) { animation-delay: 40ms; }
+          .dashPanels > div:nth-child(1) > .panel:nth-child(3) { animation-delay: 80ms; }
+          .dashPanels > div:nth-child(2) > .panel:nth-child(1) { animation-delay: 40ms; }
+          .dashPanels > div:nth-child(2) > .panel:nth-child(2) { animation-delay: 80ms; }
+          .dashPanels > div:nth-child(2) > .panel:nth-child(3) { animation-delay: 120ms; }
+          .dashPanels > div:nth-child(2) > .panel:nth-child(4) { animation-delay: 160ms; }
+          .dashPanels > div:nth-child(2) > .panel:nth-child(5) { animation-delay: 200ms; }
+        `}</style>
       </div>
     </div>
   );

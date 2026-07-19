@@ -1,0 +1,270 @@
+/**
+ * SoloForge — Emil 精修样式（聊天界面系列）
+ *
+ * 落实 Emil Kowalski 设计原则：
+ *  - 只动 transform / opacity（代码块/工具卡片折叠用 max-height，为允许例外）
+ *  - ease-out 用 cubic-bezier(0.23,1,0.32,1)
+ *  - 入场从 scale(0.95)+opacity:0 起，绝不用 scale(0)
+ *  - hover 动画一律 @media (hover:hover) and (pointer:fine) gate
+ *  - 尊重 prefers-reduced-motion：保留 opacity/color，移除 transform 位移
+ *
+ * 仅作用于 src/renderer/components/chat/ 下组件，不污染全局。
+ * 由 ChatView.jsx 顶部 import 一次（Vite 自动去重）。
+ */
+
+/* ============ Emil 缓动曲线 ============ */
+:root {
+  --emil-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --emil-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --emil-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ============ 侧栏折叠：width 用 drawer 曲线，280ms（这是 emil 允许的位移例外） ============ */
+.emil-sidebar-collapse {
+  transition: width 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ============ 拖拽手柄 hover：accent 半透明 ============ */
+.emil-drag-handle {
+  background-color: transparent;
+  transition: background-color 140ms var(--emil-ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .emil-drag-handle:hover {
+    background-color: rgba(94, 106, 210, 0.3);
+  }
+}
+
+/* ============ 巡查开关：thumb 用 transform translateX 而非背景过渡 ============ */
+.emil-toggle-track {
+  transition: background-color 180ms var(--emil-ease-out);
+}
+
+.emil-toggle-thumb {
+  transition: transform 200ms var(--emil-ease-out);
+}
+
+/* ============ 会话项入场（stagger 由 --emil-i 控制） ============ */
+.emil-conv-item {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: emilConvIn 200ms var(--emil-ease-out) forwards;
+  animation-delay: calc(var(--emil-i, 0) * 30ms);
+}
+
+@keyframes emilConvIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============ 选中态：accent 竖线 scaleX 入场 + 背景透明度入场 ============ */
+.emil-select-layer {
+  opacity: 0;
+  animation: emilSelectFade 180ms var(--emil-ease-out) forwards;
+}
+
+.emil-select-bar {
+  transform: scaleX(0);
+  transform-origin: top left;
+  animation: emilSelectBarIn 220ms var(--emil-ease-out) forwards;
+}
+
+@keyframes emilSelectFade {
+  to { opacity: 1; }
+}
+
+@keyframes emilSelectBarIn {
+  to { transform: scaleX(1); }
+}
+
+/* ============ 消息气泡入场 ============ */
+.emil-msg-enter {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: emilMsgIn 200ms var(--emil-ease-out) forwards;
+}
+
+@keyframes emilMsgIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============ pill badge 入场（scale + opacity） ============ */
+.emil-pill-enter {
+  opacity: 0;
+  transform: scale(0.95);
+  animation: emilPillIn 160ms var(--emil-ease-out) forwards;
+}
+
+@keyframes emilPillIn {
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ============ Agent 状态点入场（opacity + scale） ============ */
+.emil-dot-enter {
+  opacity: 0;
+  transform: scale(0.6);
+  animation: emilDotIn 200ms var(--emil-ease-out) forwards;
+}
+
+@keyframes emilDotIn {
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ============ 代码块：左侧 accent 竖线 ============ */
+.emil-code-block {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 12px 14px 12px 16px; /* 左侧多留 2px 给竖线 */
+  overflow-x: auto;
+}
+
+.emil-code-block::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 2px 0 0 2px;
+  opacity: 0.7;
+}
+
+/* ============ 工具卡片折叠：max-height 过渡（允许例外） + 箭头旋转 ============ */
+.emil-collapse {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 220ms var(--emil-ease-out), opacity 180ms var(--emil-ease-out);
+}
+
+.emil-collapse[data-open='true'] {
+  max-height: 400px;
+  opacity: 1;
+}
+
+.emil-arrow {
+  transition: transform 160ms var(--emil-ease-out);
+  transform: rotate(0deg);
+}
+
+.emil-arrow[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+/* ============ 选中态：accent 半透明背景（opacity 过渡，不用边框突变） ============ */
+.emil-selected-bg {
+  opacity: 0;
+  transition: opacity 160ms var(--emil-ease-out);
+}
+
+.emil-selected-bg[data-active='true'] {
+  opacity: 1;
+}
+
+/* ============ 滚动到底部按钮：translateY + opacity 入场 ============ */
+.emil-scroll-btn {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 180ms var(--emil-ease-out), transform 180ms var(--emil-ease-out);
+}
+
+.emil-scroll-btn[data-show='true'] {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* ============ 录音按钮脉冲（transform scale，不闪背景） ============ */
+.emil-record-pulse {
+  animation: emilRecordPulse 1.4s var(--emil-ease-in-out) infinite;
+}
+
+@keyframes emilRecordPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+/* ============ 触摸设备 hover gate：仅在 hover+fine 指针生效 ============ */
+@media (hover: hover) and (pointer: fine) {
+  .emil-avatar-hover {
+    transition: transform 160ms var(--emil-ease-out);
+  }
+  .emil-avatar-hover:hover {
+    transform: scale(1.05);
+  }
+
+  .emil-lift-hover {
+    transition: transform 140ms var(--emil-ease-out);
+  }
+  .emil-lift-hover:hover {
+    transform: scale(1.05);
+  }
+
+  .emil-ghost-hover {
+    transition: background-color var(--emil-ease-out) 140ms, color 140ms var(--emil-ease-out),
+      border-color 140ms var(--emil-ease-out);
+  }
+  .emil-ghost-hover:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+}
+
+/* ============ 按压迫迫反馈（通用，所有指针设备） ============ */
+.emil-pressable {
+  transition: transform 140ms var(--emil-ease-out);
+}
+
+.emil-pressable:active {
+  transform: scale(0.97);
+}
+
+/* ============ reduced motion：保留 opacity/color，移除位移/scale ============ */
+@media (prefers-reduced-motion: reduce) {
+  .emil-conv-item,
+  .emil-msg-enter,
+  .emil-pill-enter,
+  .emil-dot-enter {
+    animation-duration: 200ms;
+    transform: none !important;
+  }
+  .emil-select-bar {
+    transform: none !important;
+    animation: none !important;
+    opacity: 1;
+  }
+  .emil-collapse {
+    transition: opacity 180ms var(--emil-ease-out);
+  }
+  .emil-scroll-btn {
+    transform: none !important;
+  }
+  .emil-record-pulse {
+    animation: none !important;
+  }
+  .emil-pressable:active {
+    transform: none !important;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .emil-avatar-hover:hover,
+    .emil-lift-hover:hover {
+      transform: none !important;
+    }
+  }
+}

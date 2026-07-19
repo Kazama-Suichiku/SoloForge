@@ -117,6 +117,7 @@ const DEFAULT_AGENT_CONFIGS = {
     model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
+    reportsTo: 'ceo', // 向 CEO 汇报
   },
   ceo: {
     id: 'ceo',
@@ -131,6 +132,7 @@ const DEFAULT_AGENT_CONFIGS = {
     model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
+    reportsTo: null, // CEO 向老板/用户汇报
   },
   cto: {
     id: 'cto',
@@ -145,6 +147,7 @@ const DEFAULT_AGENT_CONFIGS = {
     model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
+    reportsTo: 'ceo', // 向 CEO 汇报
   },
   cfo: {
     id: 'cfo',
@@ -159,6 +162,7 @@ const DEFAULT_AGENT_CONFIGS = {
     model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
+    reportsTo: 'ceo', // 向 CEO 汇报
   },
   chro: {
     id: 'chro',
@@ -173,6 +177,7 @@ const DEFAULT_AGENT_CONFIGS = {
     model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
+    reportsTo: 'ceo', // 向 CEO 汇报
   },
 };
 
@@ -184,6 +189,7 @@ const DEFAULT_AGENT_CONFIGS = {
  * @property {string} level - 职级 ID
  * @property {string[]} departments - 所属部门 ID 列表（支持多部门）
  * @property {string} [department] - 【兼容字段，已废弃】主部门 ID，请使用 departments
+ * @property {string|null} [reportsTo] - 直接上级 Agent ID；CEO 为 null（向老板/用户汇报）
  * @property {string} [description] - 职责描述
  * @property {string} [avatar] - 头像（emoji 或 URL）
  * @property {'active'|'suspended'|'terminated'} [status] - Agent 状态

@@ -1,10 +1,33 @@
 /**
  * SoloForge - 组织架构图组件
- * 可视化展示部门层级和汇报关系
+ * 可视化展示部门层级和汇报关系。Linear 风格：.card 节点 + rgba(255,255,255,0.1) 连接线。
  */
 import { useState } from 'react';
 import AgentAvatar from './AgentAvatar';
 import { useAgentStore } from '../store/agent-store';
+
+/** 连接线统一用半透明白色 */
+const LINE_COLOR = 'rgba(255,255,255,0.1)';
+
+/**
+ * P2-5: 将 hex 颜色转为标准 rgba 字符串，避免 `${color}20` 字符串拼接 alpha
+ * 兼容 #rgb / #rrggbb；alpha 为 0-1 浮点。
+ */
+function hexToRgba(hex, alpha = 1) {
+  if (!hex || typeof hex !== 'string') return null;
+  let h = hex.trim().replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return null;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/** 安全的部门 tint 色：hex 优先用 rgba，否则回退到中性半透明 */
+function deptTint(color, alpha) {
+  return hexToRgba(color, alpha) || 'rgba(255,255,255,0.04)';
+}
 
 /**
  * 人员节点组件
@@ -15,29 +38,30 @@ function PersonNode({ config, level, dept, isLast, onClick, isSelected }) {
       {/* 连接线 */}
       <div className="flex flex-col items-center mr-3">
         {/* 垂直线（上半部分） */}
-        <div className="w-0.5 h-4 bg-gray-300 dark:bg-gray-600" />
+        <div className="w-px h-4" style={{ backgroundColor: LINE_COLOR }} />
         {/* 节点圆点 */}
         <div
-          className="w-3 h-3 rounded-full border-2 flex-shrink-0 z-10"
+          className="w-2.5 h-2.5 rounded-full border-2 flex-shrink-0 z-10"
           style={{
-            borderColor: dept.color || '#6b7280',
-            backgroundColor: isSelected ? (dept.color || '#6b7280') : 'white',
+            borderColor: dept.color || 'var(--text-tertiary)',
+            backgroundColor: isSelected ? (dept.color || 'var(--accent)') : 'transparent',
           }}
         />
         {/* 垂直线（下半部分） */}
-        {!isLast && <div className="w-0.5 flex-1 bg-gray-300 dark:bg-gray-600 min-h-[20px]" />}
+        {!isLast && <div className="w-px flex-1 min-h-[20px]" style={{ backgroundColor: LINE_COLOR }} />}
       </div>
 
-      {/* 人员卡片 */}
+      {/* 人员卡片：.card 类 */}
       <div
         onClick={onClick}
-        className={`
-          flex-1 p-3 rounded-lg border cursor-pointer transition-all mb-2
-          ${isSelected
-            ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 shadow-sm'
-            : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-gray-300 dark:hover:border-gray-600'
-          }
-        `}
+        className={`card flex-1 cursor-pointer mb-2 transition-colors ${
+          isSelected ? '' : 'card-hover'
+        }`}
+        style={{
+          borderColor: isSelected ? 'var(--accent)' : undefined,
+          // P2-3: 选中态 border-color 160ms ease-out 过渡
+          transition: 'border-color 160ms var(--ease-out)',
+        }}
       >
         <div className="flex items-center gap-3">
           {/* 头像 */}
@@ -45,20 +69,20 @@ function PersonNode({ config, level, dept, isLast, onClick, isSelected }) {
             avatar={config.avatar}
             fallback="👤"
             size="md"
-            bgStyle={{ backgroundColor: `${dept.color}20` || '#f3f4f6' }}
+            bgStyle={{ backgroundColor: deptTint(dept.color, 0.1) }}
             bgClass=""
           />
 
           {/* 信息 */}
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-medium text-gray-900 dark:text-gray-100">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-ui text-sm text-text-primary">
                 {config.name}
               </span>
               <span
                 className="px-1.5 py-0.5 text-xs rounded"
                 style={{
-                  backgroundColor: `${dept.color}15`,
+                  backgroundColor: deptTint(dept.color, 0.08),
                   color: dept.color,
                 }}
               >
@@ -66,17 +90,20 @@ function PersonNode({ config, level, dept, isLast, onClick, isSelected }) {
               </span>
               {/* 跨部门标记 */}
               {config.isMultiDepartment && !config.isPrimaryDepartment && (
-                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                <span
+                  className="px-1.5 py-0.5 text-xs rounded"
+                  style={{ backgroundColor: 'var(--accent-subtle)', color: 'var(--accent)' }}
+                >
                   兼职
                 </span>
               )}
             </div>
-            <div className="text-sm text-gray-500 dark:text-gray-400 truncate">
+            <div className="text-sm text-text-secondary truncate">
               {config.title}
             </div>
             {/* 显示其他部门 */}
             {config.isMultiDepartment && config.crossDepartments?.length > 0 && (
-              <div className="text-xs text-purple-500 dark:text-purple-400 mt-0.5">
+              <div className="text-xs mt-0.5" style={{ color: 'var(--accent)' }}>
                 {config.isPrimaryDepartment ? '兼任' : '主职'}：{config.crossDepartments.join('、')}
               </div>
             )}
@@ -84,10 +111,11 @@ function PersonNode({ config, level, dept, isLast, onClick, isSelected }) {
 
           {/* 编辑图标 */}
           <svg
-            className="w-4 h-4 text-gray-400 flex-shrink-0"
+            className="w-4 h-4 text-text-tertiary flex-shrink-0"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
+            aria-hidden="true"
           >
             <path
               strokeLinecap="round"
@@ -123,16 +151,16 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
     <div className="relative">
       {/* 部门头部 */}
       <div
-        className="flex items-center gap-3 p-4 rounded-t-xl cursor-pointer"
-        style={{ backgroundColor: `${dept.color}15` }}
+        className="flex items-center gap-3 p-4 rounded-t-lg cursor-pointer"
+        style={{ backgroundColor: deptTint(dept.color, 0.08) }}
         onClick={() => setExpanded(!expanded)}
       >
         {/* 部门图标 */}
         <div
-          className="w-10 h-10 rounded-lg flex items-center justify-center"
+          className="w-9 h-9 rounded-md flex items-center justify-center"
           style={{ backgroundColor: dept.color }}
         >
-          <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -143,21 +171,22 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
         </div>
 
         {/* 部门信息 */}
-        <div className="flex-1">
-          <div className="font-semibold text-gray-900 dark:text-gray-100">
+        <div className="flex-1 min-w-0">
+          <div className="font-ui text-text-primary truncate">
             {dept.name}
           </div>
-          <div className="text-sm text-gray-500 dark:text-gray-400">
+          <div className="text-sm text-text-secondary">
             {members.length} 名成员
           </div>
         </div>
 
         {/* 展开/收起 */}
         <svg
-          className={`w-5 h-5 text-gray-500 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          className={`w-4 h-4 text-text-tertiary transition-transform ${expanded ? 'rotate-180' : ''}`}
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
@@ -166,15 +195,14 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
       {/* 成员列表 */}
       {expanded && (
         <div
-          className="border-l-4 border-b border-r rounded-b-xl p-4 bg-white dark:bg-gray-900
-                     border-gray-200 dark:border-gray-700"
-          style={{ borderLeftColor: dept.color }}
+          className="border-l-2 border-b border-r rounded-b-lg p-4 bg-bg-surface"
+          style={{ borderColor: 'var(--border-default)', borderLeftColor: dept.color }}
         >
           {/* 部门负责人 */}
           {leader && (
             <div className="mb-4">
-              <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="text-xs text-text-tertiary uppercase tracking-wider mb-2 flex items-center gap-2">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -186,26 +214,24 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
               </div>
               <div
                 onClick={() => onSelectMember(leader)}
-                className={`
-                  p-4 rounded-lg border-2 cursor-pointer transition-all
-                  ${selectedId === leader.id
-                    ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                    : 'border-dashed border-gray-300 dark:border-gray-600 hover:border-gray-400'
-                  }
-                `}
-                style={{ borderColor: selectedId === leader.id ? undefined : `${dept.color}50` }}
+                className={`card cursor-pointer transition-colors ${selectedId === leader.id ? '' : 'card-hover'}`}
+                style={{
+                  borderColor: selectedId === leader.id ? 'var(--accent)' : undefined,
+                  // P2-3: 选中态 border-color 160ms ease-out 过渡
+                  transition: 'border-color 160ms var(--ease-out)',
+                }}
               >
                 <div className="flex items-center gap-4">
                   <AgentAvatar
                     avatar={leader.avatar}
                     fallback="👤"
                     size="xl"
-                    bgStyle={{ backgroundColor: `${dept.color}20` }}
+                    bgStyle={{ backgroundColor: deptTint(dept.color, 0.1) }}
                     bgClass=""
                   />
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-base font-ui text-text-primary">
                         {leader.name}
                       </span>
                       <span
@@ -216,22 +242,25 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
                       </span>
                       {/* 跨部门标记 */}
                       {leader.isMultiDepartment && !leader.isPrimaryDepartment && (
-                        <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+                        <span
+                          className="px-2 py-0.5 text-xs rounded-full"
+                          style={{ backgroundColor: 'var(--accent-subtle)', color: 'var(--accent)' }}
+                        >
                           兼职
                         </span>
                       )}
                     </div>
-                    <div className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                    <div className="text-sm text-text-secondary mt-0.5">
                       {leader.title}
                     </div>
                     {/* 显示其他部门 */}
                     {leader.isMultiDepartment && leader.crossDepartments?.length > 0 && (
-                      <div className="text-xs text-purple-500 dark:text-purple-400 mt-1">
+                      <div className="text-xs mt-1" style={{ color: 'var(--accent)' }}>
                         {leader.isPrimaryDepartment ? '兼任' : '主职'}：{leader.crossDepartments.join('、')}
                       </div>
                     )}
                     {leader.description && (
-                      <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                      <div className="text-xs text-text-tertiary mt-1">
                         {leader.description}
                       </div>
                     )}
@@ -244,8 +273,8 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
           {/* 其他成员 */}
           {otherMembers.length > 0 && (
             <div>
-              <div className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="text-xs text-text-tertiary uppercase tracking-wider mb-2 flex items-center gap-2">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -255,12 +284,12 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
                 </svg>
                 团队成员
                 {leader && (
-                  <span className="text-gray-400">
+                  <span className="text-text-tertiary">
                     → 向 {leader.name} 汇报
                   </span>
                 )}
               </div>
-              <div className="pl-4 border-l-2 border-gray-200 dark:border-gray-700">
+              <div className="pl-3 border-l-2" style={{ borderColor: LINE_COLOR }}>
                 {otherMembers.map((member, index) => (
                   <PersonNode
                     key={member.id}
@@ -278,7 +307,7 @@ function DepartmentCard({ dept, members, levels, onSelectMember, selectedId }) {
 
           {/* 空部门提示 */}
           {members.length === 0 && (
-            <div className="text-center py-8 text-gray-400 dark:text-gray-500">
+            <div className="text-center py-8 text-text-tertiary">
               暂无成员
             </div>
           )}
@@ -345,26 +374,31 @@ export default function OrgChart({ configs, levels, departments, onSelectMember,
       {/* 老板位置（在组织架构顶端） */}
       <div className="flex justify-center mb-8">
         <div className="text-center">
-          <div className="mx-auto shadow-lg">
+          <div className="mx-auto">
             <AgentAvatar
               avatar={bossConfig.avatar}
               fallback="👑"
               size="2xl"
-              bgClass="bg-gradient-to-br from-yellow-400 to-orange-500 text-white"
+              bgClass="border border-border-default"
+              bgStyle={{
+                // P2-4: 老板头像渐变用语义 token（warning → accent），避免硬编码颜色
+                background: 'linear-gradient(135deg, var(--color-warning), var(--accent))',
+                color: 'white',
+              }}
             />
           </div>
-          <div className="mt-2 font-semibold text-gray-900 dark:text-gray-100">{bossConfig.name || '老板'}</div>
-          <div className="text-sm text-gray-500 dark:text-gray-400">所有部门向您汇报</div>
+          <div className="mt-2 font-ui text-text-primary">{bossConfig.name || '老板'}</div>
+          <div className="text-sm text-text-secondary">所有部门向您汇报</div>
         </div>
       </div>
 
       {/* 汇报线 */}
       <div className="flex justify-center">
-        <div className="w-0.5 h-8 bg-gradient-to-b from-orange-400 to-gray-300 dark:to-gray-600" />
+        <div className="w-px h-8" style={{ backgroundColor: LINE_COLOR }} />
       </div>
 
-      {/* 部门网格 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* 部门网格 —— P2-9: 部门卡片 stagger 入场，40ms 递增 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 stagger">
         {sortedDeptIds.map((deptId) => {
           const dept = departments.find((d) => d.id === deptId) || {
             id: deptId,
@@ -387,22 +421,25 @@ export default function OrgChart({ configs, levels, departments, onSelectMember,
       </div>
 
       {/* 图例 */}
-      <div className="mt-8 p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-        <div className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">图例说明</div>
+      <div className="card mt-8">
+        <div className="text-sm font-ui text-text-secondary mb-3">图例说明</div>
         <div className="flex flex-wrap gap-4 text-sm">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full border-2 border-gray-400 bg-white" />
-            <span className="text-gray-600 dark:text-gray-400">团队成员</span>
+            <div
+              className="w-3 h-3 rounded-full border-2"
+              style={{ borderColor: 'var(--text-tertiary)', backgroundColor: 'transparent' }}
+            />
+            <span className="text-text-secondary">团队成员</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-blue-500" />
-            <span className="text-gray-600 dark:text-gray-400">当前选中</span>
+            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />
+            <span className="text-text-secondary">当前选中</span>
           </div>
           <div className="flex items-center gap-2">
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-4 h-4 text-text-tertiary" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
-            <span className="text-gray-600 dark:text-gray-400">汇报关系</span>
+            <span className="text-text-secondary">汇报关系</span>
           </div>
         </div>
       </div>

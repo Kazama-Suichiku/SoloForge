@@ -72,12 +72,12 @@ function ContextMenu({ x, y, onDelete, onToggleSelect, onClose, isSelectMode }) 
     <div
       ref={menuRef}
       style={style}
-      className="bg-bg-elevated border border-[var(--border-color)] rounded-lg shadow-xl py-1 min-w-[140px] animate-scale-in"
+      className="glass-medium rounded-lg shadow-xl py-1 min-w-[140px] animate-scale-in"
     >
       <button
         type="button"
         onClick={onDelete}
-        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -88,7 +88,7 @@ function ContextMenu({ x, y, onDelete, onToggleSelect, onClose, isSelectMode }) 
       <button
         type="button"
         onClick={onToggleSelect}
-        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-primary hover:bg-[var(--bg-hover)] transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-primary hover:bg-bg-hover transition-colors"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -118,13 +118,13 @@ function ImageLightbox({ src, onClose }) {
   return (
     <div
       ref={lightboxRef}
-      className="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center animate-fade-in"
+      className="fixed inset-0 z-[9999] bg-[rgba(0,0,0,0.8)] flex items-center justify-center animate-fade-in"
       onClick={onClose}
     >
       <button
         type="button"
         onClick={onClose}
-        className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors"
+        className="absolute top-4 right-4 w-10 h-10 rounded-full bg-[var(--text-primary)]/10 hover:bg-[var(--text-primary)]/20 text-[var(--text-primary)] flex items-center justify-center transition-colors"
       >
         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -146,7 +146,7 @@ function ImageLightbox({ src, onClose }) {
 
 function SelectionBar({ selectedCount, onDeleteSelected, onSelectAll, onCancelSelect }) {
   return (
-    <div className="shrink-0 px-4 py-2.5 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-200 dark:border-blue-800 flex items-center justify-between">
+    <div className="shrink-0 px-4 py-2.5 bg-accent-subtle border-b border-accent/30 flex items-center justify-between">
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -155,7 +155,7 @@ function SelectionBar({ selectedCount, onDeleteSelected, onSelectAll, onCancelSe
         >
           取消
         </button>
-        <span className="text-sm text-blue-600 dark:text-blue-400 font-medium">
+        <span className="text-sm text-accent font-medium">
           已选中 {selectedCount} 条消息
         </span>
       </div>
@@ -163,7 +163,7 @@ function SelectionBar({ selectedCount, onDeleteSelected, onSelectAll, onCancelSe
         <button
           type="button"
           onClick={onSelectAll}
-          className="px-3 py-1 text-xs rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 text-text-primary hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+          className="btn-ghost px-3 py-1 text-xs"
         >
           全选
         </button>
@@ -171,7 +171,7 @@ function SelectionBar({ selectedCount, onDeleteSelected, onSelectAll, onCancelSe
           type="button"
           onClick={onDeleteSelected}
           disabled={selectedCount === 0}
-          className="px-3 py-1 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="btn-danger px-3 py-1 text-xs"
         >
           删除选中 ({selectedCount})
         </button>
@@ -195,13 +195,26 @@ export default function MessageList() {
   const scrollRef = useRef(null);
   const messagesEndRef = useRef(null);
   const isNearBottomRef = useRef(true);
+  // 控制"滚动到底部"按钮显示（基于 isNearBottomRef 同步状态，绑定 emil-scroll-btn 的 data-show）
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
 
   // 追踪滚动位置：仅在用户接近底部时自动滚动
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const threshold = 120; // px
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    isNearBottomRef.current = near;
+    setShowScrollBtn(!near);
+  }, []);
+
+  // 点击"滚动到底部"按钮：滚到底 + 隐藏按钮
+  const handleScrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isNearBottomRef.current = true;
+    setShowScrollBtn(false);
   }, []);
 
   // 多选模式
@@ -352,10 +365,10 @@ export default function MessageList() {
   return (
     <div className="flex flex-col flex-1 min-h-0">
       {/* macOS 标题栏占位（可拖拽区域） */}
-      <div className="shrink-0 h-8 drag-region bg-bg-elevated" />
+      <div className="shrink-0 h-8 drag-region glass-medium" />
 
       {/* 对话头部 */}
-      <div className="shrink-0 px-6 py-4 border-b border-[var(--border-color)] bg-bg-elevated flex items-center justify-between">
+      <div className="shrink-0 px-6 py-4 border-b border-border-default glass-medium flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-text-primary">{getTitle()}</h2>
           {conversation?.type === 'group' && (
@@ -370,7 +383,7 @@ export default function MessageList() {
           <button
             type="button"
             onClick={handleClear}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-text-secondary hover:text-text-primary hover:bg-[var(--border-color)]/50 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
             title="清空聊天视窗（历史记录保留）"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -393,16 +406,16 @@ export default function MessageList() {
       )}
 
       {/* 消息区域 */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-6 py-4 min-h-0">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-6 py-4 min-h-0 relative scroll-fade-top scroll-fade-bottom">
         {visibleMessages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-text-secondary animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-bg-muted flex items-center justify-center text-3xl mb-4">
+            <div className="w-16 h-16 rounded-2xl bg-bg-surface flex items-center justify-center text-3xl mb-4">
               {conversation?.type === 'group' ? '👥' : '💬'}
             </div>
             <p className="text-base font-medium text-text-primary mb-1">
               {conversation?.type === 'group' ? '群组对话' : '开始新对话'}
             </p>
-            <p className="text-sm text-text-muted">
+            <p className="text-sm text-text-tertiary">
               {conversation?.type === 'group'
                 ? '在下方输入消息，所有成员都能看到'
                 : '发送消息开始与 Agent 对话'}
@@ -445,11 +458,11 @@ export default function MessageList() {
                     <span className="text-xs text-text-secondary mb-1">
                       {typingAgent?.name ?? 'Agent'} 正在输入
                     </span>
-                    <div className="rounded-2xl rounded-tl-sm bg-bg-elevated border border-[var(--border-color)] px-4 py-3">
+                    <div className="rounded-2xl rounded-tl-sm glass-medium border border-border-default px-4 py-3">
                       <div className="flex gap-1.5 items-center">
-                        <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <span className="w-2 h-2 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+                        <span className="w-2 h-2 rounded-full bg-text-tertiary animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-2 h-2 rounded-full bg-text-tertiary animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-2 h-2 rounded-full bg-text-tertiary animate-bounce" style={{ animationDelay: '300ms' }} />
                       </div>
                     </div>
                   </div>
@@ -459,6 +472,25 @@ export default function MessageList() {
             <div ref={messagesEndRef} />
           </div>
         )}
+
+        {/* 滚动到底部按钮：emil-scroll-btn（translateY+opacity 入场，data-show 控制） */}
+        <button
+          type="button"
+          onClick={handleScrollToBottom}
+          data-show={showScrollBtn ? 'true' : 'false'}
+          className="emil-scroll-btn sticky bottom-3 ml-auto flex items-center justify-center w-9 h-9 rounded-full"
+          style={{
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border-default)',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            color: 'var(--text-secondary)',
+          }}
+          title="滚动到底部"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+        </button>
       </div>
 
       {/* 右键菜单 */}

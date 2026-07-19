@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react';
 import { UserPlusIcon, UserIcon, ChatBubbleLeftIcon } from '@heroicons/react/24/outline';
-import { STATUS_COLORS, STATUS_LABELS, PAGE_SIZE } from './constants';
+import { STATUS_TONES, STATUS_LABELS, PAGE_SIZE } from './constants';
 import { formatDate } from './utils';
-import { ChevronIcon, DetailField, EmptyState, Pagination } from './ui';
+import { ChevronIcon, DetailField, EmptyState, Pagination, Badge } from './ui';
 
 /**
- * 招聘审批列表
+ * 招聘审批列表 —— 紧凑行 + pill badge
  * props: { requests: Array, onRefresh: Function }
  */
 export default function RecruitmentList({ requests, onRefresh }) {
@@ -51,9 +51,9 @@ export default function RecruitmentList({ requests, onRefresh }) {
           <button
             onClick={handleClearProcessed}
             disabled={isClearing}
-            className="px-2 py-1 text-xs text-purple-500 hover:text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition-colors disabled:opacity-50"
+            className="px-2 py-1 text-xs text-text-quaternary hover:text-text-tertiary rounded-sm transition-colors-fast disabled:opacity-50"
           >
-            {isClearing ? '清空中...' : `清空已处理 (${processedCount})`}
+            {isClearing ? '清空中…' : `清空已处理 (${processedCount})`}
           </button>
         </div>
       )}
@@ -63,36 +63,49 @@ export default function RecruitmentList({ requests, onRefresh }) {
           return (
             <div
               key={req.id}
-              className={`rounded-lg transition-colors ${
+              className={`group relative rounded-md ${
                 isExpanded
-                  ? 'bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800'
-                  : 'hover:bg-[var(--bg-hover)] border border-transparent'
+                  ? 'border border-border-default'
+                  : 'border border-transparent hover:border-border-default'
               }`}
             >
+              {/* Emil: hover opacity 背景层（不触发 background-color 重绘） */}
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ backgroundColor: 'var(--bg-hover)' }}
+              />
+              {isExpanded && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-md"
+                  style={{ backgroundColor: 'var(--bg-hover)', opacity: 1 }}
+                />
+              )}
               <button
                 type="button"
                 className="w-full flex items-center gap-3 p-2.5 text-left"
                 onClick={() => setExpandedId(isExpanded ? null : req.id)}
               >
                 <ChevronIcon expanded={isExpanded} />
-                <div className="w-7 h-7 rounded-full bg-bg-muted flex items-center justify-center shrink-0">
-                  <UserIcon className="w-3.5 h-3.5 text-text-muted" />
+                <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}>
+                  <UserIcon className="w-3 h-3 text-text-quaternary" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-text-primary truncate">
                     {req.candidateName || '(未命名)'}
                   </p>
-                  <p className="text-xs text-text-secondary">
-                    {req.candidateTitle} · 申请人: {req.requester}
+                  <p className="text-xs text-text-tertiary truncate">
+                    {req.candidateTitle} · 申请人 {req.requester}
                   </p>
                 </div>
-                <span className={`px-2 py-0.5 text-xs rounded-full shrink-0 ${STATUS_COLORS[req.status] || STATUS_COLORS.pending}`}>
+                <Badge tone={STATUS_TONES[req.status] || 'neutral'}>
                   {STATUS_LABELS[req.status] || req.status}
-                </span>
+                </Badge>
               </button>
 
               {isExpanded && (
-                <div className="px-3 pb-3 pt-1 border-t border-[var(--border-color)]/50 ml-9">
+                <div className="px-3 pb-3 pt-2 ml-9 mr-3 border-t border-border-subtle">
                   <div className="grid grid-cols-2 gap-3 mt-2">
                     <DetailField label="部门" value={req.department} />
                     <DetailField label="申请人" value={req.requester} />
@@ -101,16 +114,16 @@ export default function RecruitmentList({ requests, onRefresh }) {
                     {req.reviewedBy && <DetailField label="审批人" value={req.reviewedBy} />}
                     {req.revisionCount > 0 && (
                       <div>
-                        <span className="text-xs text-text-muted">简历修订</span>
-                        <p className="text-sm text-text-primary mt-0.5">{req.revisionCount} 次</p>
+                        <span className="text-xs text-text-quaternary">简历修订</span>
+                        <p className="text-sm text-text-secondary mt-1">{req.revisionCount} 次</p>
                       </div>
                     )}
                   </div>
 
                   {req.discussionCount > 0 && (
-                    <div className="mt-3 p-2 bg-bg-muted rounded-lg flex items-center gap-2">
-                      <ChatBubbleLeftIcon className="w-4 h-4 text-text-muted shrink-0" />
-                      <span className="text-xs text-text-secondary">
+                    <div className="mt-3 p-2 rounded-md border border-border-subtle flex items-center gap-2">
+                      <ChatBubbleLeftIcon className="w-3.5 h-3.5 text-text-quaternary shrink-0" />
+                      <span className="text-xs text-text-tertiary">
                         {req.discussionCount} 轮面试讨论
                       </span>
                     </div>

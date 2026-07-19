@@ -1,6 +1,7 @@
 /**
  * SoloForge - 任务进度组件
  * 显示 Writer → Reviewer 流程、当前 Agent、进度百分比，支持取消
+ * Linear 风格：.card 容器 + accent 进度条 + ghost 取消按钮。
  * @module components/TaskProgress
  */
 
@@ -28,13 +29,13 @@ export default function TaskProgress({ taskId }) {
   const activeIndex = currentIndex >= 0 ? currentIndex : 0;
 
   return (
-    <div className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-elevated)] p-4 shadow-sm">
+    <div className="card">
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-sm font-medium text-text-primary">执行中</span>
+        <span className="text-sm font-ui text-text-primary">执行中</span>
         <button
           type="button"
           onClick={handleCancel}
-          className="rounded px-2 py-1 text-sm text-text-secondary transition-colors hover:bg-[var(--border-color)] hover:text-text-primary focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]"
+          className="btn-ghost px-2 py-1 text-xs"
         >
           取消
         </button>
@@ -48,25 +49,27 @@ export default function TaskProgress({ taskId }) {
           return (
             <div key={step.id} className="flex flex-1 items-center gap-2">
               <div
-                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-medium transition-colors ${
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-medium transition-colors"
+                style={
                   isCompleted
-                    ? 'bg-[var(--color-primary)] text-white'
+                    ? { backgroundColor: 'var(--accent)', color: '#fff' }
                     : isActive
-                      ? 'border-2 border-[var(--color-primary)] bg-[var(--bg-base)] text-[var(--color-primary)]'
-                      : 'border border-[var(--border-color)] bg-[var(--bg-base)] text-text-secondary'
-                }`}
+                      ? { border: '1.5px solid var(--accent)', backgroundColor: 'transparent', color: 'var(--accent)' }
+                      : { border: '1px solid var(--border-default)', backgroundColor: 'transparent', color: 'var(--text-secondary)' }
+                }
                 aria-current={isActive ? 'step' : undefined}
               >
                 {isCompleted ? '✓' : i + 1}
               </div>
               <span
-                className={`text-sm ${isActive ? 'font-medium text-text-primary' : 'text-text-secondary'}`}
+                className={`text-sm ${isActive ? 'font-ui text-text-primary' : 'text-text-secondary'}`}
               >
                 {step.label}
               </span>
               {i < PIPELINE_STEPS.length - 1 && (
                 <div
-                  className={`h-0.5 flex-1 rounded ${i < activeIndex ? 'bg-[var(--color-primary)]' : 'bg-[var(--border-color)]'}`}
+                  className="h-px flex-1 rounded"
+                  style={{ backgroundColor: i < activeIndex ? 'var(--accent)' : 'var(--border-default)' }}
                   aria-hidden
                 />
               )}
@@ -75,11 +78,14 @@ export default function TaskProgress({ taskId }) {
         })}
       </div>
 
-      {/* 进度条 */}
-      <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--border-color)]">
+      {/* 进度条：accent 色 */}
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-full"
+        style={{ backgroundColor: 'var(--border-default)' }}
+      >
         <div
-          className="h-full rounded-full bg-[var(--color-primary)] transition-all duration-300"
-          style={{ width: `${task.progress}%` }}
+          className="h-full rounded-full transition-all duration-300"
+          style={{ width: `${task.progress}%`, backgroundColor: 'var(--accent)' }}
           role="progressbar"
           aria-valuenow={task.progress}
           aria-valuemin={0}

@@ -36,8 +36,9 @@ function setupAgentConfigIpcHandlers() {
   ipcMain.handle(
     'agent-config:get-all',
     safeHandler(async () => {
-      logger.info('IPC: agent-config:get-all');
-      return agentConfigStore.getAll();
+      const all = agentConfigStore.getAll();
+      logger.info('IPC: agent-config:get-all', { count: all.length, isArray: Array.isArray(all), ids: all.map(a => a.id) });
+      return all;
     }, { channel: 'agent-config:get-all' })
   );
 

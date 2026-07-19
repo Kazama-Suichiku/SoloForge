@@ -137,7 +137,7 @@ function sendStreamChunk(webContents, messageId, content) {
  */
 function sendStreamComplete(webContents, messageId, content) {
   if (webContents && !webContents.isDestroyed()) {
-    webContents.send(CHANNELS.CHAT_COMPLETE, { messageId, content });
+    webContents.send(CHANNELS.CHAT_COMPLETE, { messageId, content, success: true });
   }
 }
 

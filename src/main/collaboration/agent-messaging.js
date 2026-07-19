@@ -24,6 +24,9 @@ const { logger } = require('../utils/logger');
 const { agentConfigStore } = require('../config/agent-config-store');
 const { scratchpadManager } = require('../context/agent-scratchpad');
 
+// Phase 1-A: MessageBus + trace-context
+const { messageBus, createTraceContext } = require('./message-bus');
+
 // 上下文配置
 const MAX_HISTORY_MESSAGES = 30;
 const HISTORY_PAGE_SIZE = 30;
@@ -45,6 +48,37 @@ function truncateForBrowse(text, limit = BROWSE_CONTENT_LIMIT) {
 class AgentMessaging {
   constructor(host) {
     this.host = host;
+    /**
+     * 已在 MessageBus 注册 handler 的 Agent 集合。
+     * Phase 1-A: 每个 Agent 首次被 sendMessage/delegateTask 作为目标时，懒注册
+     * 一个 MessageBus handler。handler 内部转调 _executeMessage 执行真正逻辑。
+     * @type {Set<string>}
+     */
+    this._subscribedAgents = new Set();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MessageBus handler 注册（Phase 1-A）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 为目标 Agent 在 MessageBus 注册 handler（幂等）。
+   *
+   * handler 接收一个消息对象（{from, to, content, type, conversationId,
+   * metadata:{callChain, nestingDepth, timeout}, ...}），执行真正的 tool-loop
+   * 逻辑，返回回复内容。MessageBus 会根据 mode（sync/async）决定是否等待。
+   *
+   * @param {string} agentId
+   */
+  _ensureSubscribed(agentId) {
+    if (this._subscribedAgents.has(agentId)) return;
+    this._subscribedAgents.add(agentId);
+
+    messageBus.subscribe(agentId, async (message) => {
+      return await this._executeMessage(message);
+    });
+
+    logger.debug(`AgentMessaging: 已为 ${agentId} 注册 MessageBus handler`);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -313,6 +347,10 @@ class AgentMessaging {
       callChain = [],
       nestingDepth = 0,
       timeout = DEFAULT_TIMEOUT_MS,
+      // Phase 1-A 新增：mode='sync' 默认值保持向后兼容
+      //   - 'sync'  → MessageBus.request，等待回复（原行为）
+      //   - 'async' → MessageBus.publish，fire-and-forget，立即返回 {success:true}
+      mode = 'sync',
     } = params;
 
     if (!host.chatManager) {
@@ -364,8 +402,8 @@ class AgentMessaging {
       return { success: false, error: `找不到目标同事: ${toAgent}` };
     }
 
-    const fromAgentInfo = host.chatManager.getAgent(fromAgent);
-    const fromAgentName = fromAgentInfo?.name || fromAgent;
+    // Phase 1-A: 在 MessageBus 为目标 Agent 懒注册 handler
+    this._ensureSubscribed(toAgent);
 
     const newCallChain = [...callChain, fromAgent];
     const newNestingDepth = nestingDepth + 1;
@@ -375,8 +413,119 @@ class AgentMessaging {
       allowTools,
       nestingDepth,
       callChainLength: newCallChain.length,
+      mode,
     });
 
+    // 构造标准消息对象（MessageBus 格式）
+    const busMessage = {
+      from: fromAgent,
+      to: toAgent,
+      type: 'message',
+      content: message,
+      mode,
+      conversationId: conversationId || '',
+      priority: 3,
+      metadata: {
+        callChain: newCallChain,
+        nestingDepth: newNestingDepth,
+        timeout,
+        // 透传 sendMessage 的可选参数给 handler
+        allowTools,
+        includeUserContext,
+        maxHistory: maxHistory || null,
+        historyStrategy: historyStrategy || null,
+      },
+    };
+
+    if (mode === 'async') {
+      // fire-and-forget：不等回复，立即返回 {success:true}
+      // handler 仍会在 mailbox 串行调度下执行（写 messages[]、tool-loop、
+      // memoryExtraction），但调用方不阻塞。
+      try {
+        const pub = await messageBus.publish(toAgent, busMessage);
+        if (!pub.success) {
+          return { success: false, error: pub.error };
+        }
+        return { success: true, messageId: pub.messageId };
+      } catch (error) {
+        logger.error(`Agent 通信(async)异常: ${fromAgent} → ${toAgent}`, error);
+        return { success: false, error: error.message };
+      }
+    }
+
+    // mode === 'sync'：MessageBus.request 等待回复
+    try {
+      const req = await messageBus.request(toAgent, busMessage, timeout);
+      if (!req.success) {
+        // 超时或异常
+        logger.error(`Agent 通信(sync)失败: ${fromAgent} → ${toAgent}`, { error: req.error });
+        return { success: false, error: req.error };
+      }
+      // handler 返回 {success, response, toolsUsed}
+      const reply = req.response;
+      if (reply && typeof reply === 'object' && 'success' in reply) {
+        return reply;
+      }
+      // 兜底：handler 返回的是裸 response 字符串
+      return { success: true, response: reply };
+    } catch (error) {
+      logger.error(`Agent 通信超时或异常: ${fromAgent} → ${toAgent}`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * MessageBus handler 的真正执行体（Phase 1-A）。
+   *
+   * 由 AgentMailbox.process 串行调用。接收一个标准消息对象，执行原 sendMessage
+   * 的 tool-loop 逻辑，返回 {success, response, toolsUsed} 作为回复。
+   *
+   * 串行保证：本方法内部仍通过 host.queue.enqueue 把实际工作入 MessageQueue，
+   * 保证同一 Agent 同时只处理一个任务（与重构前一致）。
+   *
+   * @param {Object} msg - MessageBus 消息对象
+   * @returns {Promise<{success: boolean, response?: string, toolsUsed?: string[], error?: string}>}
+   */
+  async _executeMessage(msg) {
+    const host = this.host;
+
+    // Phase 1-A: 按 type 分发。delegation 交给 TaskDelegation 处理。
+    if (msg.type === 'delegation' && host.delegation && typeof host.delegation._executeDelegationMessage === 'function') {
+      return await host.delegation._executeDelegationMessage(msg);
+    }
+
+    const {
+      from: fromAgent,
+      to: toAgent,
+      content: message,
+      conversationId = '',
+      metadata = {},
+    } = msg;
+    const {
+      callChain = [],
+      nestingDepth = 0,
+      timeout = DEFAULT_TIMEOUT_MS,
+      allowTools = true,
+      includeUserContext = true,
+      maxHistory = null,
+      historyStrategy = null,
+    } = metadata;
+
+    if (!host.chatManager) {
+      return { success: false, error: 'ChatManager 未初始化' };
+    }
+
+    const targetAgent = host.chatManager.getAgent(toAgent);
+    if (!targetAgent) {
+      return { success: false, error: `找不到目标同事: ${toAgent}` };
+    }
+    const fromAgentInfo = host.chatManager.getAgent(fromAgent);
+    const fromAgentName = fromAgentInfo?.name || fromAgent;
+    const newCallChain = callChain;
+    const newNestingDepth = nestingDepth;
+
+    // executeTask 闭包：内部所有写消息记录、tool-loop、memoryExtraction 逻辑
+    // 与重构前完全一致，只是参数来源改为消息对象。
     const executeTask = async () => {
       const msgRecord = {
         id: host._generateId(),
@@ -466,7 +615,7 @@ class AgentMessaging {
           responseLength: response.length,
           historyUsed: pairwiseHistory.length,
           allowTools,
-          nestingDepth,
+          nestingDepth: newNestingDepth,
           toolsUsed,
         });
 
@@ -489,7 +638,7 @@ class AgentMessaging {
       }
     };
 
-    // 入队 + 超时
+    // 入队 + 超时（保留 MessageQueue 串行槽位语义）
     try {
       const result = await host.timeout.withTimeout(
         host.queue.enqueue(toAgent, executeTask),

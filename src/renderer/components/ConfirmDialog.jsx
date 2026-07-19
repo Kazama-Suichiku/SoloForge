@@ -1,6 +1,7 @@
 /**
  * SoloForge - 确认对话框组件
- * 用于工具执行前的用户确认
+ * 用于工具执行前的用户确认。Linear 风格：.surface + 多层阴影 + .btn-primary/.btn-ghost。
+ * @module components/ConfirmDialog
  */
 import { useEffect, useCallback } from 'react';
 
@@ -43,78 +44,56 @@ export default function ConfirmDialog({
 
   if (!isOpen) return null;
 
-  const typeStyles = {
-    info: {
-      bg: 'bg-blue-50 dark:bg-blue-900/20',
-      icon: '💡',
-      iconBg: 'bg-blue-100 dark:bg-blue-900',
-      confirmBtn: 'bg-blue-600 hover:bg-blue-700',
-    },
-    warning: {
-      bg: 'bg-yellow-50 dark:bg-yellow-900/20',
-      icon: '⚠️',
-      iconBg: 'bg-yellow-100 dark:bg-yellow-900',
-      confirmBtn: 'bg-yellow-600 hover:bg-yellow-700',
-    },
-    danger: {
-      bg: 'bg-red-50 dark:bg-red-900/20',
-      icon: '🚨',
-      iconBg: 'bg-red-100 dark:bg-red-900',
-      confirmBtn: 'bg-red-600 hover:bg-red-700',
-    },
-  };
-
-  const styles = typeStyles[type] || typeStyles.warning;
+  // 类型 → 标签色点颜色
+  const dotColor =
+    type === 'danger' ? 'var(--color-danger)' :
+    type === 'info' ? 'var(--accent)' :
+    'var(--color-warning)';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* 背景遮罩 */}
       <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        className="absolute inset-0 bg-[rgba(0,0,0,0.5)] backdrop-blur-sm"
         onClick={onCancel}
       />
 
-      {/* 对话框 */}
-      <div className="relative bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
-        {/* 头部 */}
-        <div className={`px-6 py-4 ${styles.bg}`}>
-          <div className="flex items-center gap-3">
-            <div
-              className={`w-10 h-10 rounded-full ${styles.iconBg} flex items-center justify-center text-xl`}
-            >
-              {styles.icon}
-            </div>
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-              {title}
-            </h3>
-          </div>
+      {/* 对话框：.surface + .glass-enter（materialize：blur+scale 同步入场）+ .modal-center（center origin）
+          注意：不再叠加 animate-scale-in —— .glass-enter 已包含 scale(0.95)→1 + opacity 入场，
+          叠加会触发双重 scale 动画冲突（审计报告 P0-5）。 */}
+      <div className="relative surface glass-enter rounded-xl shadow-dialog modal-center max-w-md w-full mx-4 overflow-hidden">
+        {/* 头部：色点 + 标题 */}
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-border-default">
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ backgroundColor: dotColor }}
+            aria-hidden="true"
+          />
+          <h3 className="text-base font-ui text-text-primary">
+            {title}
+          </h3>
         </div>
 
         {/* 内容 */}
         <div className="px-6 py-4">
-          <p className="text-gray-700 dark:text-gray-300">{message}</p>
+          <p className="text-sm text-text-secondary">{message}</p>
 
           {details && (
-            <div className="mt-3 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg">
-              <pre className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap break-words font-mono">
-                {details}
-              </pre>
-            </div>
+            <pre className="code-block mt-3 text-xs whitespace-pre-wrap break-words">
+              {details}
+            </pre>
           )}
         </div>
 
         {/* 按钮 */}
-        <div className="px-6 py-4 bg-gray-50 dark:bg-gray-900 flex justify-end gap-3">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-700
-                       rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-          >
+        <div className="px-6 py-4 flex justify-end gap-3">
+          <button onClick={onCancel} className="btn-ghost">
             取消
           </button>
           <button
             onClick={onConfirm}
-            className={`px-4 py-2 text-white rounded-lg transition-colors ${styles.confirmBtn}`}
+            className="btn-primary"
+            style={type === 'danger' ? { backgroundColor: 'var(--color-danger)' } : undefined}
           >
             确认执行
           </button>

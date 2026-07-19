@@ -16,18 +16,34 @@ function getChannels() {
   return CHANNELS;
 }
 
+// GroupQueue（延迟加载避免循环依赖；Phase 3-A 统一入口）
+let _groupQueue = null;
+function getGroupQueue() {
+  if (!_groupQueue) {
+    try {
+      const m = require('./group-queue');
+      _groupQueue = m.groupQueue;
+    } catch (e) {
+      logger.warn('group-queue 加载失败，群聊消息将无法投递:', e.message);
+      _groupQueue = null;
+    }
+  }
+  return _groupQueue;
+}
+
 // webContents 引用（由 main.js 注入）
 let _webContents = null;
 
 // 部门群聊节流机制：防止对话风暴
 // key: `${groupId}:${agentId}`, value: lastMessageTimestamp
 const _agentCooldowns = new Map();
-const AGENT_COOLDOWN_MS = 30 * 1000; // 同一 Agent 30 秒内最多被触发一次回复
+// Phase 0：放宽冷却（30s→10s），让群聊响应更及时
+const AGENT_COOLDOWN_MS = 10 * 1000; // 同一 Agent 10 秒内最多被触发一次回复
 
-// 部门群聊全局节流：同一群聊 10 秒内最多 3 条消息
+// 部门群聊全局节流：同一群聊 10 秒内最多 10 条消息（Phase 0：3→10，避免误伤正常多人讨论）
 const _groupRateLimits = new Map();
 const GROUP_RATE_LIMIT_WINDOW = 10 * 1000;
-const GROUP_RATE_LIMIT_MAX = 3;
+const GROUP_RATE_LIMIT_MAX = 10;
 
 /**
  * 检查 Agent 是否在冷却中（防止被频繁触发回复）
@@ -431,18 +447,18 @@ function removeMemberFromGroup(departmentId, agentId) {
 
 /**
  * 在部门群聊中发送消息
+ *
+ * Phase 3-A：消息投递统一走 GroupQueue.submit（落库 + 推 UI + 排队触发被 @ 的人）。
+ * 本函数保留鉴权逻辑（canAgentPostInGroup / filterMentionsToMembers / 速率限制 / 冷却），
+ * 鉴权通过后把消息交给 groupQueue.submit，由 GroupQueue 负责落库、推 UI 和排队触发。
+ *
  * @param {string} departmentId - 部门 ID
  * @param {string} senderId - 发送者 Agent ID
  * @param {string} content - 消息内容
  * @param {string[]} [mentions] - 被 @ 的 Agent ID 列表
- * @returns {{ success: boolean, error?: string, filteredMentions?: string[] }}
+ * @returns {Promise<{ success: boolean, error?: string, filteredMentions?: string[], rejectedMentions?: any[] }>}
  */
-function postToDepartment(departmentId, senderId, content, mentions = []) {
-  if (!_webContents || _webContents.isDestroyed()) {
-    logger.warn('postToDepartment: webContents 不可用');
-    return { success: false, error: 'UI 未就绪' };
-  }
-
+async function postToDepartment(departmentId, senderId, content, mentions = []) {
   // ── 强制路由 1：发送者校验 ──
   // 只有属于该部门的 Agent 才能在部门群聊发言，禁止跨部门乱发
   const groupId = getDepartmentGroupId(departmentId);
@@ -469,7 +485,7 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     logger.warn(`部门群聊速率限制: ${groupId} 消息过于频繁`);
     return {
       success: false,
-      error: '消息发送过于频繁，请稍后再试（每 10 秒最多 3 条消息）',
+      error: '消息发送过于频繁，请稍后再试（每 10 秒最多 10 条消息）',
     };
   }
 
@@ -497,16 +513,29 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     }
   }
 
-  const channels = getChannels();
-  _webContents.send(channels.CHAT_DEPT_GROUP_MESSAGE, {
-    groupId,
-    departmentId,
+  // ── Phase 3-A：统一走 GroupQueue.submit ──
+  // 消息落库 + 推 UI + 排队触发被 @ 的人全部由 GroupQueue 负责。
+  // webContents 由 GroupQueue 自行持有（由 ipc-bootstrap 注入），此处不再直接 send。
+  const queue = getGroupQueue();
+  if (!queue) {
+    logger.warn('postToDepartment: GroupQueue 未就绪，消息未投递');
+    return { success: false, error: '群聊系统未就绪' };
+  }
+
+  const submitResult = await queue.submit({
+    conversationId: groupId,
     senderId,
     senderName,
     content,
-    mentions: effectiveMentions, // 只发送经过部门成员校验 + 冷却过滤后的有效 mentions
-    timestamp: Date.now(),
+    mentions: effectiveMentions,
   });
+
+  if (!submitResult.success) {
+    return {
+      success: false,
+      error: submitResult.error || '群聊消息投递失败',
+    };
+  }
 
   logger.info(`部门群聊消息: ${senderName} -> ${groupId}`, {
     contentLength: content.length,

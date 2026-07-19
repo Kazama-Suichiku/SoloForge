@@ -17,23 +17,14 @@ import { useChatStore } from '../store/chat-store';
 import { useAgentStore } from '../store/agent-store';
 
 import {
-  DEPT_COOLDOWN_MS,
   extractMentions,
   buildIdNameMaps,
-  buildParticipantsList,
-  buildGroupRules,
-  buildIdentityReminder,
   buildHistoryFromMessages,
-  findLatestAgentReply,
-  filterNewMentions,
-  sortByLevel,
   cleanContentPrefix,
   filterImageAttachments,
-  isAgentInDeptCooldown as isAgentInDeptCooldownPure,
-  recordDeptTrigger as recordDeptTriggerPure,
-  shouldStopChain,
-  isMaxRoundsReached,
-  MAX_CHAIN_ROUNDS,
+  // Phase 3-B：群聊连锁触发已移到主进程 GroupQueue，
+  // DEPT_COOLDOWN_MS / isAgentInDeptCooldown / recordDeptTrigger / filterNewMentions 等
+  // 不再在渲染进程使用；buildHistoryFromMessages 仍用于私聊历史构建。
 } from './chat-agent-logic';
 import { useAgentIpcEvents } from './useAgentIpcEvents';
 
@@ -51,32 +42,8 @@ export function useChatAgent() {
   const setAgentWorking = useAgentStore((s) => s.setAgentWorking);
   const setAgentIdle = useAgentStore((s) => s.setAgentIdle);
 
-  // 群聊中断控制
+  // 群聊中断控制（Phase 3-B：主要用于 silenceGroup，群聊触发已移主进程 GroupQueue）
   const groupAbortRef = useRef(false);
-
-  // 部门群聊冷却机制（与后端同步，防止重复触发）
-  // key: `${conversationId}:${agentId}`, value: lastTriggerTimestamp
-  const deptCooldownRef = useRef(new Map());
-
-  /**
-   * 检查 Agent 是否在部门群聊冷却中（包装为带 ref 的回调，供 IPC 订阅使用）
-   */
-  const isAgentInDeptCooldown = useCallback((conversationId, agentId) => {
-    return isAgentInDeptCooldownPure(
-      deptCooldownRef.current,
-      conversationId,
-      agentId
-    );
-  }, []);
-
-  /**
-   * 记录 Agent 在部门群聊的触发时间（包装为带 ref 的回调，供 IPC 订阅使用）
-   * 直接修改 ref 内的 Map（保持与原实现一致的命令式语义）。
-   */
-  const recordDeptTrigger = useCallback((conversationId, agentId) => {
-    const key = `${conversationId}:${agentId}`;
-    deptCooldownRef.current.set(key, Date.now());
-  }, []);
 
   /**
    * 模拟 Agent 响应（开发测试用）
@@ -213,123 +180,47 @@ export function useChatAgent() {
   );
 
   /**
-   * 处理群聊消息（支持 Agent 间 @ 连锁回复）
-   * 最多允许 MAX_CHAIN_ROUNDS 轮连锁，防止无限循环
+   * 处理群聊消息（Phase 3-B：触发移主进程 GroupQueue）
    *
-   * 业务逻辑（map 构建、规则文本、历史构建、提及相关）已委托给 chat-agent-logic 纯函数，
-   * 本函数仅保留与 store 读取 + sendToSingleAgent 编排相关的不可纯化部分。
+   * 渲染进程不再做 Agent 连锁触发（串行 await sendToSingleAgent）。
+   * 用户在群聊发言时，本函数只做：
+   *   1. 从用户消息中提取 @ 的 Agent（mentions）
+   *   2. 通过 IPC 把消息提交到主进程 GroupQueue
+   * 主进程 GroupQueue 负责：消息落库 + 推 UI（onDeptGroupMessage） + 排队串行触发被 @ 的 Agent。
+   * Agent 的回复通过 post_to_group 工具回到 GroupQueue.submit 形成闭环。
+   *
+   * 私聊仍走 sendToSingleAgent（不走 GroupQueue）。
    */
   const handleGroupChat = useCallback(
     async (conversationId, conversation, agentIds, userContent) => {
       const agentsMap = useAgentStore.getState().agents;
 
-      // 重置中断标记
-      groupAbortRef.current = false;
-
-      // ── 构建 ID ↔ 人名 映射 ────────────────────────
+      // ── 构建 ID ↔ 人名 映射（用于提取 @ 人名格式的 mention） ──────
       const { idToName, nameToId } = buildIdNameMaps(agentIds, agentsMap);
 
-      // 构建参与者列表（人名格式）
-      const participantsList = buildParticipantsList(agentIds, agentsMap, idToName);
+      // 从用户消息中提取被 @ 的 Agent（支持 @ID 和 @人名）
+      const mentions = extractMentions(userContent, agentIds, nameToId);
 
-      // 判断是否是部门群聊
-      const isDepartmentChat = conversation.type === 'department';
-      const groupTypeLabel = isDepartmentChat ? '部门工作群' : '群聊';
-
-      // 通用群聊规则（不含身份信息，身份信息在每个 Agent 的消息中单独注入）
-      const groupRules = buildGroupRules({
-        groupTypeLabel,
-        conversationName: conversation.name,
-        participantsList,
-        isDepartmentChat,
-        firstAgentMention: idToName.get(agentIds[0]) || agentIds[0],
-      });
-
-      // 第一轮：用户 @ 的 Agent（同时支持 @ID 和 @人名）
-      const initialMentions = extractMentions(userContent, agentIds, nameToId);
-      if (initialMentions.length === 0) {
-        console.log('群聊消息未 @ 任何成员，不触发回复');
-        return;
-      }
-
-      // 待回复队列 + 已回复记录
-      let pendingAgents = [...initialMentions];
-      const repliedAgents = new Set(); // 本轮已回复的 Agent（防止重复）
-      let round = 0;
-
-      while (pendingAgents.length > 0 && round < MAX_CHAIN_ROUNDS) {
-        // 检查中断标记
-        if (shouldStopChain(groupAbortRef.current)) {
-          console.log('群聊已被肃静，停止后续回复');
-          break;
-        }
-
-        round++;
-
-        // 按层级排序
-        const sorted = sortByLevel(pendingAgents, agentsMap);
-
-        // 本轮新 @ 的 Agent（下一轮待处理）
-        const nextPending = [];
-
-        for (const { id: targetAgent } of sorted) {
-          // 检查中断标记
-          if (shouldStopChain(groupAbortRef.current)) {
-            console.log('群聊已被肃静，跳过剩余 Agent');
-            break;
-          }
-          if (repliedAgents.has(targetAgent)) continue; // 已经回复过了
-          repliedAgents.add(targetAgent);
-
-          const agentName = idToName.get(targetAgent) || targetAgent;
-
-          // 个性化身份提醒（注入到每个 Agent 的消息开头）
-          const identityReminder = buildIdentityReminder(agentName);
-
-          // 获取最新 history（排除已删除的消息）
-          const updatedMessages =
-            useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-          const updatedHistory = buildHistoryFromMessages(updatedMessages, idToName);
-
-          // 让 Agent 回复（注入身份提醒 + 群规 + 用户消息）
-          await sendToSingleAgent(
+      // 把消息提交到主进程 GroupQueue（由主进程排队触发被 @ 的人）
+      if (window.soloforge?.chat?.submitGroupMessage) {
+        try {
+          const result = await window.soloforge.chat.submitGroupMessage({
             conversationId,
-            targetAgent,
-            identityReminder + groupRules + userContent,
-            updatedHistory
-          );
-
-          // 检查 Agent 的回复中是否 @ 了其他 Agent（支持人名和ID两种格式）
-          const latestMsgs =
-            useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-          const agentReply = findLatestAgentReply(latestMsgs, targetAgent);
-
-          if (agentReply?.content) {
-            const newMentions = filterNewMentions(
-              agentReply.content,
-              agentIds,
-              nameToId,
-              repliedAgents,
-              targetAgent
-            );
-            if (newMentions.length > 0) {
-              console.log(
-                `群聊: ${agentName} @ 了 [${newMentions.map((id) => idToName.get(id) || id).join(', ')}]，触发连锁回复 (第 ${round} 轮)`
-              );
-              nextPending.push(...newMentions);
-            }
+            senderId: 'user',
+            content: userContent,
+            mentions,
+          });
+          if (!result?.success) {
+            console.warn('群聊消息提交到主进程失败:', result?.error);
           }
+        } catch (err) {
+          console.error('群聊消息提交到主进程异常:', err);
         }
-
-        // 下一轮处理新 @ 的 Agent
-        pendingAgents = [...new Set(nextPending)];
-      }
-
-      if (isMaxRoundsReached(round) && pendingAgents.length > 0) {
-        console.warn('群聊连锁回复达到最大轮数限制:', MAX_CHAIN_ROUNDS);
+      } else {
+        console.warn('submitGroupMessage API 不可用，群聊消息未提交到主进程');
       }
     },
-    [sendToSingleAgent]
+    []
   );
 
   /**
@@ -364,23 +255,31 @@ export function useChatAgent() {
   );
 
   // ── 订阅主进程 IPC 事件（所有 useEffect 已迁移至 useAgentIpcEvents） ──
+  // Phase 3-B：群聊连锁触发移到主进程 GroupQueue，不再传 handleGroupChat / 冷却回调
   useAgentIpcEvents({
-    handleGroupChat,
-    isAgentInDeptCooldown,
-    recordDeptTrigger,
     setAgentIdle,
   });
 
   /**
    * 肃静！—— 停止群聊中所有 Agent 发言
+   * Phase 3-B：除了设置前端中断标记 + 中止后端任务，还通知主进程 GroupQueue 肃静。
    * @param {string} conversationId - 群聊对话 ID
    */
   const silenceGroup = useCallback(
     (conversationId) => {
-      // 1. 设置中断标记，阻止后续 Agent 被调用
+      // 1. 设置前端中断标记（保留以兼容任何残留的串行逻辑）
       groupAbortRef.current = true;
 
-      // 2. 获取群聊参与者，逐个中止后端任务
+      // 2. 通知主进程 GroupQueue 肃静（Phase 3-B：清空待执行项 + 标记中止）
+      if (window.soloforge?.chat?.abortGroupQueue) {
+        try {
+          window.soloforge.chat.abortGroupQueue(conversationId);
+        } catch (e) {
+          console.warn(`主进程 GroupQueue 肃静失败:`, e);
+        }
+      }
+
+      // 3. 获取群聊参与者，逐个中止后端任务
       const conversation = useChatStore.getState().conversations.get(conversationId);
       if (conversation) {
         const agentIds = conversation.participants.filter((p) => p !== 'user');
@@ -395,7 +294,7 @@ export function useChatAgent() {
         }
       }
 
-      // 3. 添加系统提示消息到群聊
+      // 4. 添加系统提示消息到群聊
       sendMessage({
         conversationId,
         senderId: 'user',

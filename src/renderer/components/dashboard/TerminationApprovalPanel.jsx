@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
-import { TERM_STATUS_COLORS, TERM_STATUS_LABELS, TERM_PAGE_SIZE } from './constants';
+import { TERM_STATUS_TONES, TERM_STATUS_LABELS, TERM_PAGE_SIZE } from './constants';
 import { formatDateTime } from './utils';
-import { ChevronIcon, DetailField, EmptyState } from './ui';
+import { ChevronIcon, DetailField, EmptyState, Badge } from './ui';
 
 /**
- * 开除审批面板
+ * 开除审批面板 —— 确认按钮 danger 色，pill badge
  * props: { requests: Array, onRefresh: Function }
  */
 export default function TerminationApprovalPanel({ requests, onRefresh }) {
@@ -83,21 +83,22 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
   return (
     <div className="space-y-2">
       {/* 顶部工具栏 */}
-      <div className="flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-color)]/50">
+      <div className="flex items-center justify-between gap-2 pb-2 border-b border-border-subtle">
         <div className="flex items-center gap-2">
-          {/* 筛选开关 */}
+          {/* 筛选开关 —— pill 切换 */}
           <button
             onClick={() => { setShowOnlyPending(!showOnlyPending); setCurrentPage(1); }}
-            className={`px-2 py-1 text-xs rounded-full transition-colors ${
+            className={`px-2 py-1 text-xs rounded-full transition-colors-fast ${
               showOnlyPending
-                ? 'bg-orange-100 text-orange-600 dark:bg-orange-900 dark:text-orange-300'
-                : 'bg-bg-muted text-text-secondary hover:bg-[var(--bg-hover)]'
+                ? 'text-warning'
+                : 'text-text-tertiary hover:text-text-secondary'
             }`}
+            style={{ backgroundColor: showOnlyPending ? 'rgba(251,191,36,0.08)' : 'rgba(255,255,255,0.04)' }}
           >
             {showOnlyPending ? `待审批 (${pendingCount})` : `全部 (${filtered.length})`}
           </button>
           {!showOnlyPending && pendingCount > 0 && (
-            <span className="text-xs text-text-muted">{pendingCount} 待审批</span>
+            <span className="text-xs text-text-quaternary">{pendingCount} 待审批</span>
           )}
         </div>
 
@@ -106,9 +107,9 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
           <button
             onClick={handleClearProcessed}
             disabled={isClearing}
-            className="px-2 py-1 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+            className="px-2 py-1 text-xs text-danger hover:text-danger-hover rounded-sm transition-colors-fast disabled:opacity-50"
           >
-            {isClearing ? '清空中...' : `清空已处理 (${processedCount})`}
+            {isClearing ? '清空中…' : `清空已处理 (${processedCount})`}
           </button>
         )}
       </div>
@@ -122,16 +123,29 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
         return (
           <div
             key={req.id}
-            className={`rounded-lg transition-colors ${
+            className={`group relative rounded-md border ${
               isExpanded
                 ? isPending
-                  ? 'bg-orange-50/50 dark:bg-orange-950/20 border border-orange-200 dark:border-orange-800'
-                  : 'bg-[var(--bg-hover)] border border-[var(--border-color)]'
+                  ? 'border-border-default'
+                  : 'border-border-subtle'
                 : isPending
-                  ? 'hover:bg-orange-50/30 dark:hover:bg-orange-950/10 border border-transparent'
-                  : 'hover:bg-[var(--bg-hover)] border border-transparent'
+                  ? 'border-transparent hover:border-border-default'
+                  : 'border-transparent hover:border-border-default'
             }`}
           >
+            {/* Emil: hover opacity 背景层（不触发 background-color 重绘） */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ backgroundColor: 'var(--bg-hover)' }}
+            />
+            {isExpanded && (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-md"
+                style={{ backgroundColor: 'var(--bg-hover)', opacity: 1 }}
+              />
+            )}
             <button
               type="button"
               className="w-full flex items-center gap-3 p-2.5 text-left"
@@ -141,25 +155,25 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
               }}
             >
               <ChevronIcon expanded={isExpanded} />
-              <div className="w-7 h-7 rounded-full bg-red-100 dark:bg-red-900/40 flex items-center justify-center shrink-0">
-                <ExclamationTriangleIcon className="w-3.5 h-3.5 text-red-500" />
+              <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: 'rgba(248,113,113,0.08)' }}>
+                <ExclamationTriangleIcon className="w-3 h-3 text-danger" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-text-primary truncate">
                   {req.agentName || req.agentId}
-                  {req.agentTitle && <span className="text-text-muted ml-1">({req.agentTitle})</span>}
+                  {req.agentTitle && <span className="text-text-quaternary ml-1">({req.agentTitle})</span>}
                 </p>
-                <p className="text-xs text-text-secondary truncate">
+                <p className="text-xs text-text-tertiary truncate">
                   {req.proposedByName || req.proposedBy} 提出 · {formatDateTime(req.createdAt)}
                 </p>
               </div>
-              <span className={`px-2 py-0.5 text-xs rounded-full shrink-0 ${TERM_STATUS_COLORS[req.status] || TERM_STATUS_COLORS.pending}`}>
+              <Badge tone={TERM_STATUS_TONES[req.status] || 'neutral'}>
                 {TERM_STATUS_LABELS[req.status] || req.status}
-              </span>
+              </Badge>
             </button>
 
             {isExpanded && (
-              <div className="px-3 pb-3 pt-1 border-t border-[var(--border-color)]/50 ml-9">
+              <div className="px-3 pb-3 pt-2 ml-9 mr-3 border-t border-border-subtle">
                 <div className="grid grid-cols-2 gap-3 mt-2">
                   <DetailField label="员工" value={`${req.agentName} (${req.agentTitle || '未知职位'})`} />
                   <DetailField label="部门" value={req.department || '未知'} />
@@ -169,61 +183,62 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
                 </div>
 
                 {/* 开除原因 */}
-                <div className="mt-3 p-2.5 bg-bg-muted rounded-lg">
-                  <span className="text-xs text-text-muted">开除原因</span>
-                  <p className="text-sm text-text-primary mt-1">{req.reason || '未说明'}</p>
+                <div className="mt-3 p-2.5 rounded-md border border-border-subtle">
+                  <span className="text-xs text-text-quaternary">开除原因</span>
+                  <p className="text-sm text-text-secondary mt-1 leading-snug">{req.reason || '未说明'}</p>
                 </div>
 
                 {/* 影响分析 */}
                 {req.impactAnalysis && (
-                  <div className="mt-2 p-2.5 bg-bg-muted rounded-lg">
-                    <span className="text-xs text-text-muted">影响分析</span>
-                    <p className="text-sm text-text-primary mt-1">{req.impactAnalysis}</p>
+                  <div className="mt-2 p-2.5 rounded-md border border-border-subtle">
+                    <span className="text-xs text-text-quaternary">影响分析</span>
+                    <p className="text-sm text-text-secondary mt-1 leading-snug">{req.impactAnalysis}</p>
                   </div>
                 )}
 
                 {/* 已处理的显示结果 */}
                 {req.status !== 'pending' && req.bossComment && (
-                  <div className="mt-2 p-2.5 bg-bg-muted rounded-lg">
-                    <span className="text-xs text-text-muted">老板批示</span>
-                    <p className="text-sm text-text-primary mt-1">{req.bossComment}</p>
+                  <div className="mt-2 p-2.5 rounded-md border border-border-subtle">
+                    <span className="text-xs text-text-quaternary">老板批示</span>
+                    <p className="text-sm text-text-secondary mt-1 leading-snug">{req.bossComment}</p>
                   </div>
                 )}
                 {req.confirmedAt && (
-                  <p className="text-xs text-text-muted mt-2">处理时间: {formatDateTime(req.confirmedAt)}</p>
+                  <p className="text-xs text-text-quaternary mt-2">处理时间 {formatDateTime(req.confirmedAt)}</p>
                 )}
 
                 {/* 待处理的审批操作区 */}
                 {isPending && (
-                  <div className="mt-4 pt-3 border-t border-[var(--border-color)]/50">
+                  <div className="mt-4 pt-3 border-t border-border-subtle">
                     {/* 批示输入 */}
                     <div className="mb-3">
-                      <label className="text-xs text-text-muted mb-1 block">批示意见（可选）</label>
+                      <label className="text-xs text-text-quaternary mb-1 block">批示意见（可选）</label>
                       <input
                         type="text"
                         value={comment}
                         onChange={(e) => setComment(e.target.value)}
-                        placeholder="输入批示意见..."
-                        className="w-full px-3 py-1.5 text-sm bg-bg-base border border-[var(--border-color)] rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 text-text-primary placeholder-text-muted"
+                        placeholder="输入批示意见…"
+                        className="input"
                         disabled={isDeciding}
                       />
                     </div>
 
-                    {/* 操作按钮 */}
+                    {/* 操作按钮 —— 批准开除用 danger 实色，拒绝用 ghost */}
                     <div className="flex gap-2">
                       <button
                         onClick={(e) => { e.stopPropagation(); handleDecide(req.id, true); }}
                         disabled={isDeciding}
-                        className="flex-1 px-3 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+                        className="flex-1 px-3 py-2 text-sm font-ui text-white rounded-md transition-colors-fast disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{ backgroundColor: 'var(--color-danger)' }}
                       >
-                        {isDeciding ? '处理中...' : '批准开除'}
+                        {isDeciding ? '处理中…' : '批准开除'}
                       </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); handleDecide(req.id, false); }}
                         disabled={isDeciding}
-                        className="flex-1 px-3 py-2 text-sm font-medium text-text-primary bg-bg-muted hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors border border-[var(--border-color)]"
+                        className="btn-ghost flex-1"
                       >
-                        {isDeciding ? '处理中...' : '拒绝开除'}
+                        {isDeciding ? '处理中…' : '拒绝开除'}
                       </button>
                     </div>
                   </div>
@@ -236,21 +251,21 @@ export default function TerminationApprovalPanel({ requests, onRefresh }) {
 
       {/* 分页控件 */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2 pt-3 border-t border-[var(--border-color)]/50">
+        <div className="flex items-center justify-center gap-2 pt-3 border-t border-border-subtle">
           <button
             onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
             disabled={currentPage === 1}
-            className="px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="px-2 py-1 text-xs text-text-tertiary hover:text-text-primary hover:bg-bg-hover rounded-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors-fast"
           >
             上一页
           </button>
-          <span className="text-xs text-text-muted">
+          <span className="text-xs text-text-quaternary">
             {currentPage} / {totalPages}
           </span>
           <button
             onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
             disabled={currentPage === totalPages}
-            className="px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-[var(--bg-hover)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="px-2 py-1 text-xs text-text-tertiary hover:text-text-primary hover:bg-bg-hover rounded-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors-fast"
           >
             下一页
           </button>

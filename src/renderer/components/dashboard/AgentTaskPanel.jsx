@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { ArrowPathIcon, StopCircleIcon } from '@heroicons/react/24/outline';
-import { STAGE_LABELS, STAGE_COLORS } from './constants';
+import { STAGE_LABELS, STAGE_TONES } from './constants';
 import { formatDuration } from './utils';
+import { Badge, StatusDot } from './ui';
 
 /**
- * Agent 工作状态面板
+ * Agent 工作状态面板 —— 状态圆点 + pill badge，终止按钮 ghost
  * props: 无（自管理数据）
  *
  * 内部定时器：
@@ -57,22 +58,23 @@ export default function AgentTaskPanel() {
     return () => clearInterval(interval);
   }, [tasks.length]);
 
+  // 状态指示：进行中用 warning pulse，空闲用 success
   const indicator = tasks.length > 0
-    ? <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-    : <div className="w-2 h-2 rounded-full bg-green-500" />;
+    ? <span className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse" />
+    : <StatusDot tone="success" />;
 
   const trailingText = tasks.length > 0 ? `${tasks.length} 个任务进行中` : '';
 
   return (
-    <div className="bg-bg-elevated rounded-xl border border-[var(--border-color)] mb-6">
-      <div className="flex items-center gap-2 px-5 py-3 border-b border-[var(--border-color)]/60">
+    <div className="panel mb-4">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-border-subtle">
         {indicator}
-        <h3 className="text-sm font-semibold text-text-primary">Agent 工作状态</h3>
-        {trailingText && <span className="text-xs text-text-muted ml-auto">{trailingText}</span>}
+        <h3 className="text-[15px] font-title tracking-tighter text-text-primary">Agent 工作状态</h3>
+        {trailingText && <span className="text-xs text-text-quaternary ml-auto font-ui">{trailingText}</span>}
       </div>
       <div className="px-5 py-4">
         {tasks.length === 0 ? (
-          <p className="text-sm text-text-muted text-center py-2">
+          <p className="text-sm text-text-tertiary text-center py-2">
             所有 Agent 当前空闲
           </p>
         ) : (
@@ -83,27 +85,24 @@ export default function AgentTaskPanel() {
               return (
                 <div
                   key={task.agentId}
-                  className="flex items-center gap-3 p-3 bg-bg-muted rounded-lg border border-[var(--border-color)]"
+                  className="flex items-center gap-3 p-3 rounded-md border border-border-subtle"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.02)' }}
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-text-primary text-sm">{task.agentName}</span>
-                      <span className={`px-1.5 py-0.5 text-xs rounded-full text-white ${STAGE_COLORS[task.stage] || 'bg-gray-500'}`}>
+                      <span className="text-sm font-ui text-text-primary">{task.agentName}</span>
+                      <Badge tone={STAGE_TONES[task.stage] || 'neutral'}>
                         {STAGE_LABELS[task.stage] || task.stage}
-                      </span>
-                      <span className="text-xs text-text-muted">{formatDuration(elapsed)}</span>
+                      </Badge>
+                      <span className="text-xs text-text-quaternary font-mono">{formatDuration(elapsed)}</span>
                     </div>
-                    <p className="text-xs text-text-secondary mt-1 truncate">{task.task || '处理中...'}</p>
+                    <p className="text-xs text-text-secondary mt-1 truncate">{task.task || '处理中…'}</p>
                   </div>
                   <button
                     type="button"
                     disabled={isAborting}
                     onClick={() => handleAbort(task.agentId)}
-                    className={`shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                      isAborting
-                        ? 'bg-bg-muted text-text-muted cursor-not-allowed'
-                        : 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40'
-                    }`}
+                    className="btn-ghost shrink-0 !px-2.5 !py-1 !text-xs"
                     title="终止此 Agent 的当前任务"
                   >
                     {isAborting ? (

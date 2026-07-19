@@ -41,6 +41,11 @@ const { agentConfigStore } = require('./config/agent-config-store');
 const { agentCommunication } = require('./collaboration/agent-communication');
 const { operationsStore } = require('./operations/operations-store');
 const { projectStore } = require('./pm/project-store');
+// Phase 1-5 新增的需要退出刷盘的 store
+const { commEventStore } = require('./collaboration/comm-event-store');
+const { groupHistoryStore } = require('./chat/group-history-store');
+const { agentPermissionStore } = require('./permission/permission-store');
+const { traceStore } = require('./collaboration/trace-store');
 
 /**
  * 描述性清单：列出“应当被退出刷盘覆盖”的依赖名。
@@ -58,6 +63,11 @@ const FLUSHABLE_DEPENDENCY_NAMES = [
   'agentCommunication',
   'operationsStore',
   'projectStore',
+  // Phase 1-5 新增
+  'commEventStore',
+  'groupHistoryStore',
+  'agentPermissionStore',
+  'traceStore',
 ];
 
 /**

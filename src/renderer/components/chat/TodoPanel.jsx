@@ -52,10 +52,10 @@ function TodoItem({ todo }) {
 
   return (
     <div className="flex items-start gap-2 px-3 py-1.5 group">
-      {/* 状态指示器 */}
+      {/* 状态指示器：emil-dot-enter scale+opacity 入场（仅 done 状态的 check 图标） */}
       <span className={`shrink-0 mt-0.5 text-xs font-bold ${config.className}`}>
         {todo.status === 'done' ? (
-          <CheckCircleIcon className="w-3.5 h-3.5 text-green-500" />
+          <CheckCircleIcon className="w-3.5 h-3.5 text-green-500 emil-dot-enter" />
         ) : todo.status === 'in_progress' ? (
           <ClockIcon className="w-3.5 h-3.5 text-[var(--color-primary)]" />
         ) : (
@@ -63,14 +63,16 @@ function TodoItem({ todo }) {
         )}
       </span>
 
-      {/* 内容 */}
+      {/* 内容：完成态用 opacity 过渡（配合 line-through） */}
       <div className="min-w-0 flex-1">
         <span
-          className={`text-[12px] leading-snug ${
-            todo.status === 'done'
-              ? 'text-text-secondary/60 line-through'
-              : 'text-text-primary'
-          }`}
+          className="text-[12px] leading-snug"
+          style={{
+            color: todo.status === 'done' ? 'var(--text-secondary)' : 'var(--text-primary)',
+            opacity: todo.status === 'done' ? 0.6 : 1,
+            transition: 'opacity 200ms cubic-bezier(0.23, 1, 0.32, 1)',
+            textDecoration: todo.status === 'done' ? 'line-through' : 'none',
+          }}
         >
           {todo.title}
         </span>

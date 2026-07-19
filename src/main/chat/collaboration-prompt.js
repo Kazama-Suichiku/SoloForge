@@ -35,6 +35,35 @@ function getCollaborationPrompt() {
 - communication_history: 查看历史沟通记录
   用途：回顾之前的讨论内容
 
+【组织架构工具】
+你可以查看和管理公司的组织架构：
+- get_org_chart: 查看完整组织架构树
+- get_subordinates: 查看你的直接下属
+- get_direct_report: 查看某人的直接上级
+- get_reporting_chain: 查看到 CEO 的完整汇报链
+- get_team_status: 查看团队实时工作状态
+- escalate: 越级上报给上级的上级
+- request_cross_dept_collab: 跨部门协作请求
+- broadcast_to_subordinates: 向所有下属广播
+
+使用场景：
+- 需要了解谁向谁汇报 → get_direct_report / get_reporting_chain
+- 需要越级反馈或紧急上报 → escalate
+- 需要跨部门协作 → request_cross_dept_collab
+- 需要通知所有下属 → broadcast_to_subordinates
+- 想看团队都在做什么 → get_team_status
+
+【通信模式】
+不同场景使用不同通信方式：
+- send_to_agent(mode:'async'): 发送后不等回复，适合通知/汇报
+- send_to_agent(mode:'sync'): 发送后等待回复，适合需要回答的问题
+- delegate_task(wait_for_result:false): 委派后不等，适合并行任务
+- delegate_task(wait_for_result:true): 委派后等结果，适合需要结果才能继续的任务
+- post_to_group: 在群聊中发言，所有成员可见
+- post_to_department: 在部门群聊中发言
+- get_group_history: 查看群聊历史消息
+- notify_boss: 向老板汇报，fire-and-forget
+
 【任务委派】
 - delegate_task: 委派任务给其他同事
   用途：需要其他人帮忙完成的工作、需要专业技能的任务
@@ -217,6 +246,24 @@ KPI 管理：
 - 群聊中用 @人名（如 @晚晴）提及其他成员，对方会被通知回复
 - 创建群聊时指定名称、参与者列表和初始讨论主题
 
+群聊工具：
+- post_to_group(group_id, content, mention?): 在群聊中发言，所有成员可见
+  - group_id: 群聊 ID
+  - content: 消息内容
+  - mention: 可选，要 @ 的成员 ID 列表，被 @ 的人会收到通知
+- get_group_history(group_id, limit?): 查看群聊历史消息
+  - 发言前先用此工具查看完整历史，避免重复别人说过的观点
+- create_group_chat(name, participants, topic): 创建新群聊（秘书/CXO）
+
+⚠️ 群聊规则（必须遵守）：
+1. 被 @ 时必须发言（使用 post_to_group 工具回复）
+2. 不被 @ 时可以发言也可以不发言（自主判断）
+3. 群聊发言用 post_to_group，私信用 send_to_agent
+4. 群聊发言所有成员可见，注意措辞简洁
+5. 可以用 @ 指定某人回复（mention 参数）
+6. 不要在群里刷屏，一条消息说清楚
+7. 群聊讨论时，先看完整历史再发言，避免重复
+
 ⚠️ 群聊行为规范（非常重要）：
 - 系统只会通知被 @ 的人发言，如果你收到群聊消息，说明你已被点名，请直接回复
 - 群聊中严禁使用 send_to_agent 私信群内成员，直接在群里发言即可
@@ -301,10 +348,25 @@ function getCollaborationPromptShort() {
 
 - post_to_department(content, mention?): 【首选】部门群聊发消息
   工作汇报、任务讨论、协作请求全部在这里！
+- post_to_group(group_id, content, mention?): 群聊发言，所有成员可见
+- get_group_history(group_id, limit?): 查看群聊历史
 - send_to_agent(target_agent, message): 私信（仅限非工作/跨部门）
 - delegate_task(target_agent, task_description): 委派任务
 - list_colleagues(): 查看同事列表
 - my_tasks(): 查看我的任务
+
+【组织架构工具】
+- get_org_chart / get_subordinates / get_direct_report / get_reporting_chain
+- get_team_status / escalate / request_cross_dept_collab / broadcast_to_subordinates
+
+【通信模式】
+- send_to_agent(mode:'async'): 发送后不等回复（通知/汇报）
+- send_to_agent(mode:'sync'): 等待回复（需要回答的问题）
+- delegate_task(wait_for_result:false): 委派后不等（并行任务）
+- post_to_group: 群聊发言  /  notify_boss: 向老板汇报（fire-and-forget）
+
+⚠️ 群聊规则：被 @ 必须发言；发言前先 get_group_history 看完整历史避免重复；
+群聊用 post_to_group，私信用 send_to_agent；一条消息说清楚，不刷屏。
 
 【待办事项（老板实时可见！）】
 - todo_create(title): 创建待办步骤

@@ -10,6 +10,8 @@
  * 状态判定优先级：needsReauth > syncing > error > configured > 默认。
  * 未配置（configured=false）时展示引导文案（不弹 LoginDialog，因为可能未登录）。
  *
+ * Linear 风格：.panel 容器 + 状态圆点（绿=已同步 / 橙=同步中 / 红=失败）。
+ *
  * @module components/sync/SyncPanel
  */
 
@@ -17,13 +19,6 @@ import React, { useEffect, useState, useCallback } from 'react';
 import {
   ArrowPathIcon,
   CloudIcon,
-  CloudArrowUpIcon,
-  CloudArrowDownIcon,
-  CheckCircleIcon,
-  ExclamationCircleIcon,
-  ExclamationTriangleIcon,
-  ClockIcon,
-  Cog6ToothIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { useSyncStore } from '../../store/sync-store';
@@ -56,6 +51,27 @@ function formatLastSync(lastSyncAt) {
   return date.toLocaleString();
 }
 
+// ─── 状态圆点 ──────────────────────────────────────────────
+/** 状态圆点：绿=已同步 / 橙=同步中 / 红=失败 / 灰=未配置 / 琥珀=需重登 */
+function StatusDot({ variant }) {
+  const colorMap = {
+    synced: 'var(--color-success)',
+    syncing: 'var(--color-warning)',
+    error: 'var(--color-danger)',
+    unconfigured: 'var(--text-quaternary)',
+    reauth: 'var(--color-warning)',
+  };
+  const color = colorMap[variant] || colorMap.unconfigured;
+  const extra = variant === 'syncing' ? 'animate-pulse' : '';
+  return (
+    <span
+      className={`inline-block w-2 h-2 rounded-full shrink-0 ${extra}`}
+      style={{ backgroundColor: color }}
+      aria-hidden="true"
+    />
+  );
+}
+
 // ─── 统计展示 ──────────────────────────────────────────────
 function StatsGrid({ stats }) {
   if (!stats) return null;
@@ -74,12 +90,12 @@ function StatsGrid({ stats }) {
       {items.map((it) => (
         <div
           key={it.key}
-          className="flex flex-col items-center justify-center px-2 py-2 rounded-md bg-[var(--bg-elevated)] border border-[var(--border-color)]"
+          className="card !p-2 flex flex-col items-center justify-center"
         >
-          <span className="text-lg font-semibold text-[var(--text-primary)] leading-tight">
+          <span className="text-base font-ui text-text-primary leading-tight">
             {stats[it.key]}
           </span>
-          <span className="text-xs text-[var(--text-tertiary)]">{it.label}</span>
+          <span className="text-xs text-text-tertiary">{it.label}</span>
         </div>
       ))}
     </div>
@@ -140,24 +156,44 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
   const hasError = !!error || (lastResult && lastResult.success === false && !lastResult.skipped);
   const skippedReason = lastResult?.skipped ? lastResult.reason : null;
 
+  // 状态圆点 + 文案
+  let dotVariant = 'synced';
+  let statusLabel = '已同步';
+  let statusLabelCls = 'text-text-secondary';
+  if (needsReauth) {
+    dotVariant = 'reauth';
+    statusLabel = '需要重新登录';
+    statusLabelCls = 'text-warning';
+  } else if (isSyncing) {
+    dotVariant = 'syncing';
+    statusLabel = '同步中...';
+  } else if (hasError) {
+    dotVariant = 'error';
+    statusLabel = '同步失败';
+    statusLabelCls = 'text-danger';
+  } else if (!isConfigured) {
+    dotVariant = 'unconfigured';
+    statusLabel = '未配置';
+  }
+
   // ─── 容器样式 ─────────────────────────────────────────────
   const containerCls = embedded
     ? `flex flex-col gap-3 p-0 ${className}`
-    : `flex flex-col gap-3 p-4 bg-[var(--bg-panel)] rounded-lg border border-[var(--border-color)] shadow-lg w-80 ${className}`;
+    : `panel flex flex-col gap-3 p-4 w-80 shadow-dialog ${className}`;
 
   return (
     <div className={containerCls} role="region" aria-label="云同步">
       {/* 标题栏 */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
-          <CloudIcon className="w-4 h-4 text-[var(--color-primary)]" aria-hidden="true" />
+        <h2 className="text-sm font-ui text-text-primary flex items-center gap-2">
+          <CloudIcon className="w-4 h-4 text-accent" aria-hidden="true" />
           云同步
         </h2>
         {!embedded && onClose && (
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors"
+            className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
             aria-label="关闭"
           >
             <XMarkIcon className="w-4 h-4" />
@@ -165,39 +201,14 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
         )}
       </div>
 
-      {/* 状态行：根据四种状态展示不同内容 */}
+      {/* 状态行：圆点 + 文字 */}
       <div className="flex items-center gap-2 text-sm">
-        {needsReauth ? (
-          <>
-            <ExclamationTriangleIcon className="w-4 h-4 text-amber-500" aria-hidden="true" />
-            <span className="text-amber-600 dark:text-amber-400">需要重新登录</span>
-          </>
-        ) : isSyncing ? (
-          <>
-            <ArrowPathIcon className="w-4 h-4 text-[var(--color-primary)] animate-spin" aria-hidden="true" />
-            <span className="text-[var(--text-secondary)]">同步中...</span>
-          </>
-        ) : hasError ? (
-          <>
-            <ExclamationCircleIcon className="w-4 h-4 text-red-500" aria-hidden="true" />
-            <span className="text-red-600 dark:text-red-400">同步失败</span>
-          </>
-        ) : !isConfigured ? (
-          <>
-            <ExclamationCircleIcon className="w-4 h-4 text-gray-400" aria-hidden="true" />
-            <span className="text-[var(--text-tertiary)]">未配置</span>
-          </>
-        ) : (
-          <>
-            <CheckCircleIcon className="w-4 h-4 text-green-500" aria-hidden="true" />
-            <span className="text-[var(--text-secondary)]">已同步</span>
-          </>
-        )}
+        <StatusDot variant={dotVariant} />
+        <span className={statusLabelCls}>{statusLabel}</span>
       </div>
 
       {/* 上次同步时间 */}
-      <div className="flex items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
-        <ClockIcon className="w-3.5 h-3.5" aria-hidden="true" />
+      <div className="flex items-center gap-1.5 text-xs text-text-tertiary">
         <span>上次同步：{formatLastSync(syncStatus?.lastSyncAt)}</span>
       </div>
 
@@ -206,17 +217,23 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
 
       {/* 错误信息（失败状态） */}
       {hasError && (
-        <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 rounded-md px-2 py-1.5 break-words">
+        <div
+          className="text-xs text-danger rounded-md px-2 py-1.5 break-words"
+          style={{
+            backgroundColor: 'rgba(248,113,113,0.08)',
+            border: '1px solid rgba(248,113,113,0.2)',
+          }}
+        >
           {error || lastResult?.error || '未知错误'}
           {skippedReason && (
-            <span className="block mt-1 text-[var(--text-tertiary)]">跳过原因：{skippedReason}</span>
+            <span className="block mt-1 text-text-tertiary">跳过原因：{skippedReason}</span>
           )}
         </div>
       )}
 
       {/* 未配置提示 */}
       {!isConfigured && !needsReauth && initialized && (
-        <div className="text-xs text-[var(--text-tertiary)] bg-[var(--bg-elevated)] rounded-md px-2 py-1.5">
+        <div className="card !py-1.5 text-xs text-text-tertiary">
           云同步尚未配置。登录云账号后自动启用。
         </div>
       )}
@@ -224,14 +241,16 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
       {/* 需重新登录提示 + 按钮 */}
       {needsReauth && (
         <div className="flex flex-col gap-2">
-          <div className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 rounded-md px-2 py-1.5">
+          <div
+            className="text-xs text-warning rounded-md px-2 py-1.5"
+            style={{
+              backgroundColor: 'rgba(251,191,36,0.08)',
+              border: '1px solid rgba(251,191,36,0.2)',
+            }}
+          >
             登录已过期或无效，请重新登录以恢复云同步。
           </div>
-          <button
-            type="button"
-            onClick={() => setLoginOpen(true)}
-            className="text-xs px-3 py-1.5 rounded-md bg-[var(--color-primary)] text-white hover:opacity-90 transition-opacity"
-          >
+          <button type="button" onClick={() => setLoginOpen(true)} className="btn-primary text-xs self-start">
             重新登录
           </button>
         </div>
@@ -248,9 +267,7 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
           type="button"
           onClick={handleSync}
           disabled={isSyncing || needsReauth}
-          className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm rounded-md
-                     bg-[var(--color-primary)] text-white hover:opacity-90 transition-opacity
-                     disabled:opacity-50 disabled:cursor-not-allowed"
+          className="btn-primary flex-1"
           aria-label="手动同步"
         >
           <ArrowPathIcon className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} aria-hidden="true" />
@@ -259,7 +276,7 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
 
         {/* 自动同步开关 */}
         <label
-          className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] cursor-pointer select-none"
+          className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer select-none"
           title={autoSync ? '点击关闭自动同步' : '点击开启自动同步'}
         >
           <span className="relative inline-flex items-center">
@@ -270,11 +287,11 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
               disabled={needsReauth || !isConfigured}
               className="sr-only peer"
             />
-            <span className="w-9 h-5 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-color)]
-                             peer-checked:bg-[var(--color-primary)] peer-checked:border-[var(--color-primary)]
-                             transition-colors" />
-            <span className="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow
-                             peer-checked:translate-x-4 transition-transform" />
+            <span
+              className="w-9 h-5 rounded-full border border-border-default transition-colors peer-checked:border-transparent"
+              style={{ backgroundColor: autoSync ? 'var(--accent)' : 'var(--bg-surface)' }}
+            />
+            <span className="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
           </span>
           自动
         </label>
@@ -285,7 +302,7 @@ export default function SyncPanel({ embedded = false, onClose, className = '' })
         <ConflictDiff
           conflicts={conflicts}
           onClear={clearConflicts}
-          className="border-t border-[var(--border-color)] pt-3"
+          className="border-t border-border-default pt-3"
         />
       )}
 

@@ -61,7 +61,7 @@ const DEFAULT_LEVEL_SALARIES = {
   senior: 100000,
   staff: 80000,
   intern: 50000,
-  assistant: 30000,
+  assistant: 500000,
 };
 
 /**

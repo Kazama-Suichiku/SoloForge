@@ -2,100 +2,205 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ============ 浅色主题 ============ */
+/* ============================================================
+   SoloForge Design System — Linear-style dark-first
+   Tokens are defined as CSS variables; Tailwind maps over them.
+   Emil Kowalski polish layer:
+   - Only animate transform / opacity (GPU)
+   - Custom easing curves (no default ease)
+   - :active scale(0.97) on every pressable element
+   - Popovers origin-aware, never scale(0)
+   - @starting-style for element entry
+   - prefers-reduced-motion downgrade
+   ============================================================ */
+
+/* ============ 暗色主题（默认 :root） ============ */
 :root {
-  /* 主色 */
-  --color-primary: #3b82f6;
-  --color-primary-hover: #2563eb;
-  --color-primary-muted: #93c5fd;
-  --color-primary-subtle: #eff6ff;
+  /* 背景层级：深度通过亮度阶梯而非阴影 */
+  --bg-base: #08090a;            /* 最深底色 */
+  --bg-panel: #0f1011;          /* 侧边栏/面板 */
+  --bg-surface: #191a1b;       /* 卡片/弹层 */
+  --bg-hover: rgba(255, 255, 255, 0.04);  /* hover 态 */
+  --bg-active: rgba(255, 255, 255, 0.06); /* pressed/active 态 */
 
-  /* 语义色 */
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-danger-hover: #dc2626;
+  /* 文字四档 */
+  --text-primary: #f7f8f8;
+  --text-secondary: #d0d6e0;
+  --text-tertiary: #8a8f98;
+  --text-quaternary: #62666d;
 
-  /* 背景 */
-  --bg-base: #ffffff;
-  --bg-elevated: #f8fafc;
-  --bg-muted: #f1f5f9;
-  --bg-hover: #f1f5f9;
+  /* 品牌靛紫 accent（仅 CTA/交互） */
+  --accent: #5e6ad2;
+  --accent-hover: #7170ff;
+  --accent-active: #828fff;
+  --accent-subtle: rgba(94, 106, 210, 0.12);
 
-  /* 文字 */
-  --text-primary: #0f172a;
-  --text-secondary: #64748b;
-  --text-muted: #94a3b8;
-
-  /* 边框 */
-  --border-color: #e2e8f0;
-  --border-subtle: #f1f5f9;
-
-  /* 间距 */
-  --spacing-xs: 0.25rem;
-  --spacing-sm: 0.5rem;
-  --spacing-md: 1rem;
-  --spacing-lg: 1.5rem;
-  --spacing-xl: 2rem;
-
-  /* 圆角 */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-
-  /* 阴影 */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-
-  /* 过渡 */
-  --transition-fast: 150ms ease;
-  --transition-normal: 200ms ease;
-  --transition-slow: 300ms ease;
-}
-
-/* ============ 深色主题 ============ */
-.dark,
-[data-theme='dark'] {
-  --color-primary: #60a5fa;
-  --color-primary-hover: #93c5fd;
-  --color-primary-muted: #3b82f6;
-  --color-primary-subtle: #1e3a5f;
-
+  /* 语义色（暗色适配） */
   --color-success: #4ade80;
   --color-warning: #fbbf24;
   --color-danger: #f87171;
   --color-danger-hover: #ef4444;
 
-  --bg-base: #0f172a;
-  --bg-elevated: #1e293b;
-  --bg-muted: #334155;
-  --bg-hover: #334155;
+  /* 边框：半透明白色，非实色暗（Apple：边框永远半透明，非硬实色） */
+  --border-subtle: rgba(255, 255, 255, 0.05);
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
 
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 6px;    /* 按钮/输入 */
+  --radius-lg: 8px;    /* 卡片 */
+  --radius-xl: 12px;   /* 面板 */
+  --radius-full: 9999px;
 
-  --border-color: #334155;
-  --border-subtle: #475569;
+  /* 间距（保留通用阶梯；Emil 8px 网格） */
+  --spacing-xs: 0.25rem;  /* 4px  */
+  --spacing-sm: 0.5rem;   /* 8px  */
+  --spacing-md: 1rem;     /* 16px */
+  --spacing-lg: 1.5rem;   /* 24px */
+  --spacing-xl: 2rem;     /* 32px */
 
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.3);
+  /* 阴影（极少使用，主要靠背景阶梯） */
+  --shadow-elevated: rgba(0, 0, 0, 0.4) 0px 2px 4px;
+  --shadow-dialog: 0 4px 12px rgba(0, 0, 0, 0.5),
+    0 16px 48px rgba(0, 0, 0, 0.4),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+
+  /* ===== Emil 缓动曲线（自定义，非默认 ease） ===== */
+  /* 强 ease-out：UI 入场，立刻反馈 */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  /* 强 ease-in-out：屏内移动（drawer / morph） */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  /* iOS drawer 曲线（Ionic） */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* 过渡时长（Emil 规范：按钮 100-160ms / 弹窗 200-500ms） */
+  --duration-press: 140ms;     /* 按钮 :active */
+  --duration-tooltip: 160ms;   /* 小弹层 */
+  --duration-dropdown: 200ms;  /* 下拉 */
+  --duration-modal: 280ms;     /* 弹窗 */
+  --duration-drawer: 400ms;    /* 抽屉 */
+
+  /* 兼容旧调用 */
+  --transition-fast: 140ms cubic-bezier(0.23, 1, 0.32, 1);
+  --transition-normal: 200ms cubic-bezier(0.23, 1, 0.32, 1);
+  --transition-slow: 280ms cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* 字体 */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco,
+    Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+/* ============ 浅色主题（可选切换：.light 或 [data-theme='light']） ============ */
+.light,
+[data-theme='light'] {
+  --bg-base: #f7f8f8;
+  --bg-panel: #f3f4f5;
+  --bg-surface: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 0, 0, 0.06);
+
+  --text-primary: #08090a;
+  --text-secondary: #424549;
+  --text-tertiary: #62666d;
+  --text-quaternary: #8a8f98;
+
+  --accent: #5e6ad2;
+  --accent-hover: #4f5bc7;
+  --accent-active: #424cb8;
+  --accent-subtle: rgba(94, 106, 210, 0.08);
+
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  --color-danger-hover: #b91c1c;
+
+  --border-subtle: rgba(0, 0, 0, 0.05);
+  --border-default: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+
+  --shadow-elevated: rgba(0, 0, 0, 0.08) 0px 2px 4px;
+  --shadow-dialog: 0 4px 12px rgba(0, 0, 0, 0.08),
+    0 16px 48px rgba(0, 0, 0, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.04);
 }
 
 /* ============ Base ============ */
 @layer base {
+  html {
+    font-family: var(--font-sans);
+    /* Inter 字体特性：cv01 替代字形、ss03 小写 a 优化 */
+    font-feature-settings: 'cv01', 'ss03';
+    font-variation-settings: normal;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
   body {
     @apply antialiased;
     background-color: var(--bg-base);
     color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv01', 'ss03';
     transition: background-color var(--transition-normal), color var(--transition-normal);
   }
 
+  /* 默认边框色统一为半透明白色（暗色优先） */
   * {
-    border-color: var(--border-color);
+    border-color: var(--border-default);
+  }
+
+  /* 标题负字距：大标题更紧凑 */
+  h1 {
+    font-weight: 590;
+    letter-spacing: -0.022em; /* ~48px → -1.056px */
+  }
+  h2 {
+    font-weight: 590;
+    letter-spacing: -0.022em;
+  }
+  h3 {
+    font-weight: 590;
+    letter-spacing: -0.012em; /* ~24px → -0.288px */
+  }
+
+  /* 标题字重统一为 590（标题档），中标题 510 */
+  .text-display {
+    font-weight: 590;
+    letter-spacing: -0.022em;
+  }
+  .text-title {
+    font-weight: 590;
+    letter-spacing: -0.012em;
+  }
+  .text-ui-strong {
+    font-weight: 510;
+  }
+
+  /* 选区颜色用 accent 半透明 */
+  ::selection {
+    background: var(--accent-subtle);
+    color: var(--text-primary);
+  }
+
+  /* 链接默认 */
+  a {
+    color: var(--accent-hover);
+    text-decoration: none;
+    transition: color var(--duration-press) var(--ease-out);
+  }
+  a:hover {
+    color: var(--accent-active);
+  }
+
+  /* 焦点环：accent 色，细 */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: var(--radius-sm);
   }
 }
 
@@ -108,26 +213,357 @@
 .drag-region button,
 .drag-region a,
 .drag-region input,
-.drag-region select {
+.drag-region select,
+.drag-region textarea {
   -webkit-app-region: no-drag;
+}
+
+/* ============ 通用组件类 ============ */
+@layer components {
+  /* ----------------------------------------------------------
+     按钮：所有变体共享压迫反馈
+     - transition 分开声明：transform 优先（GPU），background 次之
+     - :active scale(0.97) 是 Emil 硬性要求
+     - 悬停只在 (hover:hover) 触发，避免触屏误判
+     ---------------------------------------------------------- */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium;
+    background-color: var(--accent);
+    color: #ffffff;
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    /* transform 优先，再声明 background，避免被合并覆盖 */
+    transition: transform var(--duration-press) var(--ease-out),
+      background-color var(--duration-press) var(--ease-out);
+    will-change: transform;
+    cursor: pointer;
+  }
+  .btn-primary:active {
+    background-color: var(--accent-active);
+    transform: scale(0.97);
+  }
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  /* hover 仅在精确指针设备触发，避免触屏长按误判 */
+  @media (hover: hover) and (pointer: fine) {
+    .btn-primary:hover {
+      background-color: var(--accent-hover);
+    }
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium;
+    background-color: rgba(255, 255, 255, 0.02);
+    color: var(--text-secondary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    transition: transform var(--duration-press) var(--ease-out),
+      background-color var(--duration-press) var(--ease-out),
+      color var(--duration-press) var(--ease-out),
+      border-color var(--duration-press) var(--ease-out);
+    will-change: transform;
+    cursor: pointer;
+  }
+  .btn-ghost:active {
+    background-color: var(--bg-active);
+    transform: scale(0.97);
+  }
+  .btn-ghost:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-ghost:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--border-strong);
+    }
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium;
+    background-color: rgba(248, 113, 113, 0.12);
+    color: var(--color-danger);
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(248, 113, 113, 0.24);
+    transition: transform var(--duration-press) var(--ease-out),
+      background-color var(--duration-press) var(--ease-out),
+      border-color var(--duration-press) var(--ease-out);
+    will-change: transform;
+    cursor: pointer;
+  }
+  .btn-danger:active {
+    background-color: rgba(248, 113, 113, 0.24);
+    transform: scale(0.97);
+  }
+  .btn-danger:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .btn-danger:hover {
+      background-color: rgba(248, 113, 113, 0.18);
+      border-color: rgba(248, 113, 113, 0.4);
+    }
+  }
+
+  /* ----------------------------------------------------------
+     /* 卡片：液态玻璃 hover 微上浮 + border-color 过渡 */
+     .card {
+       background-color: rgba(255, 255, 255, 0.025);
+       backdrop-filter: blur(16px) saturate(140%);
+       -webkit-backdrop-filter: blur(16px) saturate(140%);
+       border: 1px solid var(--border-default);
+       border-radius: var(--radius-lg);
+       padding: var(--spacing-md);
+       box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.03);
+       /* transform + border-color 都是 GPU/cheap 路径 */
+       transition: transform var(--duration-dropdown) var(--ease-out),
+         border-color var(--duration-dropdown) var(--ease-out);
+       will-change: transform;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .card-hover:hover {
+      transform: translateY(-1px);
+      border-color: var(--border-strong);
+    }
+  }
+
+  /* 输入框：半透明玻璃背景 + focus 凸起 + accent 环 */
+  .input {
+    background-color: rgba(255, 255, 255, 0.025);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    transition: transform var(--duration-press) var(--ease-out),
+      border-color var(--duration-press) var(--ease-out),
+      box-shadow var(--duration-press) var(--ease-out);
+    will-change: transform;
+    width: 100%;
+  }
+  .input::placeholder {
+    color: var(--text-tertiary);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .input:hover {
+      border-color: var(--border-strong);
+    }
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--accent);
+    transform: scale(1.01);
+    box-shadow: 0 0 0 1px var(--accent);
+    background-color: rgba(255, 255, 255, 0.03);
+  }
+  .input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* 面板背景（侧栏/顶层容器）—— 液态玻璃材质 */
+  .panel {
+    background-color: rgba(15, 16, 17, 0.72);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+  }
+
+  /* 表面背景（卡片/弹层）—— 液态玻璃 + 入场动画 */
+  .surface {
+    background-color: rgba(25, 26, 27, 0.68);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    opacity: 1;
+    transform: scale(1);
+    transition: opacity var(--duration-modal) var(--ease-out),
+      transform var(--duration-modal) var(--ease-out);
+    /* 现代浏览器：元素首次出现时从 scale(0.95)+opacity:0 起步 */
+    @starting-style {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+  }
+
+  /* ----------------------------------------------------------
+     液态玻璃材质类（Apple translucent materials）
+     材料重量编码层级：重→结构区、轻→交互元素
+     ---------------------------------------------------------- */
+  /* 厚玻璃：侧栏/导航栏/工具栏 —— 内容在下方隐约可见 */
+  .glass-heavy {
+    background-color: rgba(15, 16, 17, 0.60);
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    border: 1px solid var(--border-subtle);
+  }
+  /* 中玻璃：卡片/面板/弹窗 —— 主交互层 */
+  .glass-medium {
+    background-color: rgba(25, 26, 27, 0.55);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--border-default);
+  }
+  /* 轻玻璃：悬浮提示/小弹层 —— 最轻交互 */
+  .glass-light {
+    background-color: rgba(35, 36, 38, 0.48);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    border: 1px solid var(--border-subtle);
+  }
+  /* 顶部边缘高光：模拟光线打在玻璃边缘
+     Apple §12 指引值为 0.4（实色玻璃），但 SoloForge 玻璃本身半透明，
+     0.18 是实测后能压住内容噪声又不显塑料感的最佳点。 */
+  .glass-heavy,
+  .glass-medium,
+  .glass-light {
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.18),
+      var(--shadow-elevated);
+  }
+  /* 玻璃入场：blur+scale 一起动画（"materialize" 而非 fade） */
+  .glass-enter {
+    opacity: 1;
+    backdrop-filter: blur(20px) saturate(160%);
+    transform: scale(1);
+    transition: opacity var(--duration-modal) var(--ease-out),
+      transform var(--duration-modal) var(--ease-out),
+      backdrop-filter var(--duration-modal) var(--ease-out);
+    @starting-style {
+      opacity: 0;
+      transform: scale(0.95);
+      backdrop-filter: blur(0px) saturate(100%);
+    }
+  }
+  /* 滚动边缘渐隐：内容在浮动 chrome 下方淡出，替代硬 1px 边框 */
+  .scroll-fade-top {
+    mask-image: linear-gradient(to bottom, transparent 0, black 24px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 24px);
+  }
+  .scroll-fade-bottom {
+    mask-image: linear-gradient(to top, transparent 0, black 24px);
+    -webkit-mask-image: linear-gradient(to top, transparent 0, black 24px);
+  }
+
+  /* 浅色主题玻璃（对应覆盖） */
+  .light .glass-heavy,
+  [data-theme='light'] .glass-heavy {
+    background-color: rgba(247, 248, 248, 0.72);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.5),
+      0 2px 4px rgba(0, 0, 0, 0.08);
+  }
+  .light .glass-medium,
+  [data-theme='light'] .glass-medium {
+    background-color: rgba(255, 255, 255, 0.65);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.6),
+      0 2px 4px rgba(0, 0, 0, 0.06);
+  }
+  .light .glass-light,
+  [data-theme='light'] .glass-light {
+    background-color: rgba(255, 255, 255, 0.55);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.4),
+      0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+
+  /* 透明度降级：用户偏好减少透明效果时，玻璃变实色 */
+  @media (prefers-reduced-transparency: reduce) {
+    .glass-heavy,
+    .glass-medium,
+    .glass-light,
+    .panel,
+    .surface {
+      background-color: var(--bg-panel);
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+    .surface {
+      background-color: var(--bg-surface);
+    }
+  }
+
+  /* ----------------------------------------------------------
+     Popover：transform-origin 跟随触发器（Radix / Base UI 兼容）
+     模态例外，保持 center（见 .modal-center）
+     ---------------------------------------------------------- */
+  .popover {
+    transform-origin: var(--radix-popover-content-transform-origin,
+      var(--transform-origin, center));
+    opacity: 1;
+    transform: scale(1);
+    transition: opacity var(--duration-dropdown) var(--ease-out),
+      transform var(--duration-dropdown) var(--ease-out);
+    will-change: transform, opacity;
+  }
+  /* 起始态：scale(0.95) + opacity:0（绝不用 scale(0)） */
+  .popover[data-starting-style],
+  .popover.is-entering {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  .popover[data-ending-style],
+  .popover.is-exiting {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  /* 模态：保持 center origin（Emil 例外） */
+  .modal-center {
+    transform-origin: center;
+  }
+
+  /* ----------------------------------------------------------
+     Toast：translateY 入场，transition 而非 keyframes（可中断）
+     ---------------------------------------------------------- */
+  .toast {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity var(--duration-drawer) var(--ease-out),
+      transform var(--duration-drawer) var(--ease-out);
+    will-change: transform, opacity;
+  }
+  .toast[data-starting-style],
+  .toast.is-entering {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  .toast[data-ending-style],
+  .toast.is-exiting {
+    opacity: 0;
+    /* 退出比进入快（Emil：exit < enter） */
+    transform: translateY(100%);
+    transition-duration: var(--duration-modal);
+  }
+  /* 后续 tooltip/toast 即时显示，跳过动画 */
+  .toast[data-instant],
+  .toast[data-instant-transition] {
+    transition-duration: 0ms;
+  }
 }
 
 /* ============ 工具类：动画 ============ */
 @layer utilities {
   .animate-fade-in {
-    animation: fadeIn var(--transition-normal) ease-out forwards;
+    animation: fadeIn var(--duration-modal) var(--ease-out) forwards;
   }
 
   .animate-fade-in-up {
-    animation: fadeInUp var(--transition-slow) ease-out forwards;
+    animation: fadeInUp var(--duration-modal) var(--ease-out) forwards;
   }
 
   .animate-slide-in-right {
-    animation: slideInRight var(--transition-normal) ease-out forwards;
+    animation: slideInRight var(--duration-modal) var(--ease-out) forwards;
   }
 
   .animate-scale-in {
-    animation: scaleIn var(--transition-fast) ease-out forwards;
+    animation: scaleIn var(--duration-tooltip) var(--ease-out) forwards;
   }
 
   .transition-theme {
@@ -136,6 +572,10 @@
   }
 }
 
+/* ============================================================
+   Keyframes —— 全部从 scale(0.95)+opacity:0 起步
+   （Emil：nothing in the real world appears from nothing）
+   ============================================================ */
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -181,8 +621,9 @@
 /* ============ 工具类：过渡 ============ */
 @layer utilities {
   .transition-colors-fast {
-    transition: color var(--transition-fast), background-color var(--transition-fast),
-      border-color var(--transition-fast);
+    transition: color var(--duration-press) var(--ease-out),
+      background-color var(--duration-press) var(--ease-out),
+      border-color var(--duration-press) var(--ease-out);
   }
 
   .transition-colors-normal {
@@ -191,20 +632,36 @@
   }
 }
 
-/* ============ 代码块样式（用于展示生成内容） ============ */
+/* ============ Stagger：子元素延迟动画 ============
+   装饰性，绝不阻塞交互；延迟 30-80ms 之间
+   ================================================= */
+.stagger > * {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: fadeInUp var(--duration-modal) var(--ease-out) forwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; }
+.stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; }
+.stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(6) { animation-delay: 200ms; }
+.stagger > *:nth-child(n+7) { animation-delay: 240ms; }
+
+/* ============ 代码块样式（暗色优先） ============ */
 .prose-code,
 .code-block {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas,
-    'Liberation Mono', 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875em;
   line-height: 1.6;
+  font-feature-settings: 'cv01', 'ss03';
 }
 
 .code-block {
   display: block;
-  background: var(--bg-muted);
+  background: var(--bg-surface);
   color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--spacing-md);
   overflow-x: auto;
@@ -212,45 +669,158 @@
   word-break: break-word;
 }
 
-/* 浅色主题代码块 */
-:root .code-block {
-  background: #f1f5f9;
-  border-color: #e2e8f0;
-}
-
-/* 深色主题代码块 */
-.dark .code-block,
-[data-theme='dark'] .code-block {
-  background: #1e293b;
-  border-color: #334155;
-}
-
 /* 行内代码 */
 .prose-code-inline {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   padding: 0.125rem 0.375rem;
   border-radius: var(--radius-sm);
-  background: var(--bg-muted);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-primary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-subtle);
 }
 
-/* 代码块滚动条 */
+/* 浅色主题代码块 */
+.light .code-block,
+[data-theme='light'] .code-block {
+  background: #f3f4f5;
+  border-color: var(--border-default);
+}
+
+.light .prose-code-inline,
+[data-theme='light'] .prose-code-inline {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: var(--border-subtle);
+}
+
+/* ============ 滚动条（半透明 + hover 加宽过渡） ============
+   width 变化会触发 layout，故只用 transform: scaleX 视觉加宽
+   （thumb 是背景绘制，scaleX 对 thumb 无效 → 改用 opacity 过渡 +
+   border-clip 厚度过渡，仍属合成层 cheap 路径）
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  /* 平滑过渡到 hover 态 */
+  transition: background-color var(--duration-press) var(--ease-out);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* 浅色主题滚动条 */
+.light ::-webkit-scrollbar-thumb,
+[data-theme='light'] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  transition: background-color var(--duration-press) var(--ease-out);
+}
+
+.light ::-webkit-scrollbar-thumb:hover,
+[data-theme='light'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* 代码块内部滚动条（更细） */
 .code-block::-webkit-scrollbar {
   height: 6px;
+  width: 6px;
 }
 
 .code-block::-webkit-scrollbar-track {
-  background: var(--bg-base);
-  border-radius: var(--radius-sm);
+  background: transparent;
 }
 
 .code-block::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-full);
+  transition: background-color var(--duration-press) var(--ease-out);
 }
 
 .code-block::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: var(--text-tertiary);
+}
+
+/* ============================================================
+   prefers-reduced-motion —— 降级：保留 opacity/color，移除位移
+   （Emil：reduced motion ≠ zero；仍保留帮助理解的过渡）
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  /* 关闭所有 keyframe 动画 */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 按钮压迫反馈：保留 opacity 微调，移除 scale 位移 */
+  .btn-primary:active,
+  .btn-ghost:active,
+  .btn-danger:active {
+    transform: none;
+    opacity: 0.85;
+  }
+
+  /* 卡片：移除上浮 */
+  .card-hover:hover {
+    transform: none;
+  }
+
+  /* 输入框：移除凸起 */
+  .input:focus {
+    transform: none;
+  }
+
+  /* 弹层：移除 scale 位移，保留 opacity */
+  .surface,
+  .popover,
+  .toast {
+    transform: none !important;
+    transition: opacity var(--duration-press) var(--ease-out);
+  }
+  .popover[data-starting-style],
+  .popover.is-entering,
+  .popover[data-ending-style],
+  .popover.is-exiting,
+  .toast[data-starting-style],
+  .toast.is-entering,
+  .toast[data-ending-style],
+  .toast.is-exiting {
+    transform: none;
+  }
+
+  /* @starting-style 仍保留 opacity 过渡 */
+  .surface {
+    @starting-style {
+      opacity: 0;
+      transform: none;
+    }
+  }
+
+  /* stagger 立即显示 */
+  .stagger > * {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
 }

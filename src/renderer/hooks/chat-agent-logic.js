@@ -175,26 +175,9 @@ export function findLatestAgentReply(messages, targetAgent) {
     .find((m) => m.senderId === targetAgent && m.senderType === 'agent');
 }
 
-/**
- * 从 Agent 回复中提取新的 @ 提及，过滤掉已回复过和自己的
- * @param {string} replyContent - Agent 回复内容
- * @param {string[]} agentIds - 群内所有 Agent ID
- * @param {Map<string,string>} nameToId - 人名 → agentId
- * @param {Set<string>} repliedAgents - 已回复的 Agent 集合
- * @param {string} targetAgent - 当前 Agent ID（排除自己）
- * @returns {string[]} 新的被 @ 的 Agent ID 列表
- */
-export function filterNewMentions(
-  replyContent,
-  agentIds,
-  nameToId,
-  repliedAgents,
-  targetAgent
-) {
-  return extractMentions(replyContent, agentIds, nameToId).filter(
-    (id) => !repliedAgents.has(id) && id !== targetAgent
-  );
-}
+// Phase 3-B：filterNewMentions（repliedAgents 一次性消费逻辑）已删除。
+// 群聊连锁触发移到主进程 GroupQueue，防循环改用 perAgentCount（每链每 Agent 最多发言 2 次），
+// 不再需要渲染进程维护 repliedAgents 集合。
 
 /**
  * 按 Agent 层级排序（level 小的先发言）
@@ -330,7 +313,6 @@ export default {
   buildIdentityReminder,
   buildHistoryFromMessages,
   findLatestAgentReply,
-  filterNewMentions,
   sortByLevel,
   cleanContentPrefix,
   filterImageAttachments,

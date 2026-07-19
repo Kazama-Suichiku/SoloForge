@@ -7,9 +7,28 @@
 const { toolRegistry } = require('./tool-registry');
 const { agentCommunication } = require('../collaboration/agent-communication');
 const { agentConfigStore } = require('../config/agent-config-store');
+const { orgChartService } = require('../collaboration/org-chart-service');
 const { devPlanQueue } = require('../collaboration/dev-plan-queue');
 const { logger } = require('../utils/logger');
 const { formatLocalTime } = require('../utils/time-format');
+
+// Phase 1-B：通信事件存储（结构化记录每次通信，不依赖 LLM 提取）
+//   - 延迟 require 避免在模块加载期触发循环依赖（comm-event-store 依赖 dataPath/logger，
+//     与本模块在同一 require 图中，延迟到首次 append 时解析更安全）。
+//   - 失败时返回 null，调用方各自 try-catch，不阻断主流程。
+let _commEventStore = null;
+function getCommEventStore() {
+  if (!_commEventStore) {
+    try {
+      const m = require('../collaboration/comm-event-store');
+      _commEventStore = m.commEventStore;
+    } catch (e) {
+      logger.warn('comm-event-store 加载失败，通信事件将不会被记录:', e.message);
+      _commEventStore = null;
+    }
+  }
+  return _commEventStore;
+}
 
 // ═══════════════════════════════════════════════════════════
 // 同步消息工具
@@ -100,6 +119,25 @@ const sendToAgentTool = {
       callChain,
       nestingDepth,
     });
+
+    // Phase 1-B：写一条结构化通信事件（成功/失败都记录，便于 Agent 回溯）
+    //   - response 记录对方回复内容；失败时 response 为空。
+    try {
+      const store = getCommEventStore();
+      if (store) {
+        store.append({
+          type: 'message',
+          from: agentId,
+          to: resolvedId,
+          content: message,
+          response: result.success ? (result.response || '') : '',
+          conversationId: context.conversationId || '',
+          groupId: null,
+        });
+      }
+    } catch (commEvtError) {
+      logger.debug('send_to_agent 写通信事件失败（不影响主流程）:', commEvtError.message);
+    }
 
     if (result.success) {
       return {
@@ -264,6 +302,25 @@ const delegateTaskTool = {
       // 开发计划审批
       requirePlanApproval: require_plan_approval,
     });
+
+    // Phase 1-B：写一条委派事件（成功/失败都记录，便于 Agent 回溯委派历史）
+    //   - response 记录任务完成结果（wait_for_result 时）；异步委派时为空。
+    try {
+      const store = getCommEventStore();
+      if (store) {
+        store.append({
+          type: 'delegation',
+          from: agentId,
+          to: targetId,
+          content: task_description,
+          response: result.success && wait_for_result && result.result ? (result.result || '') : '',
+          conversationId: context.conversationId || '',
+          groupId: null,
+        });
+      }
+    } catch (commEvtError) {
+      logger.debug('delegate_task 写通信事件失败（不影响主流程）:', commEvtError.message);
+    }
 
     if (result.success) {
       if (wait_for_result && result.result) {
@@ -581,16 +638,21 @@ const listColleaguesTool = {
 
     let colleagues = configs
       .filter((c) => c.id !== agentId) // 不包括自己
-      .map((c) => ({
-        id: c.id,
-        name: c.name,
-        title: c.title,
-        level: c.level,
-        department: c.department,
-        status: (c.status === 'suspended') ? '停职' : (c.status === 'terminated') ? '离职' : '在职',
-        reportsTo: c.reportsTo || null,
-        description: c.description,
-      }));
+      .map((c) => {
+        // 从 OrgChartService 推导直接上级（配置里的 reportsTo 字段为权威来源）
+        const superior = orgChartService.getSuperior(c.id);
+        return {
+          id: c.id,
+          name: c.name,
+          title: c.title,
+          level: c.level,
+          department: c.department,
+          status: (c.status === 'suspended') ? '停职' : (c.status === 'terminated') ? '离职' : '在职',
+          reportsTo: superior ? superior.id : null,
+          reportsToName: superior ? superior.name : null,
+          description: c.description,
+        };
+      });
 
     // 按部门过滤
     if (department) {
@@ -685,6 +747,49 @@ const notifyBossTool = {
       // 延迟加载 chatManager 避免循环依赖
       const { chatManager } = require('../chat');
       chatManager.pushProactiveMessage(agentId, message);
+
+      // Phase 0：notify_boss 也写一条通信记录到 agentCommunication.messages
+      //   - 这样 CEO（或查询通信历史的 Agent）能看到「谁向老板汇报了什么」，
+      //     实现「去问 CEO，CEO 知道秘书发了什么」的验证目标。
+      //   - toAgent 用 'ceo' 作为老板代理（与任务要求一致），status='sent' 表示单向推送无回复。
+      try {
+        const { agentCommunication } = require('../collaboration/agent-communication');
+        const commRecord = {
+          id: agentCommunication._generateId(),
+          fromAgent: agentId,
+          toAgent: 'ceo',
+          content: message,
+          response: '',
+          status: 'sent',
+          createdAt: Date.now(),
+        };
+        agentCommunication.messages.push(commRecord);
+        agentCommunication._saveToDisk();
+      } catch (commError) {
+        // 通信记录写入失败不应阻断 notify_boss 主流程（消息已推送给老板）
+        logger.warn('notify_boss 写通信记录失败（不影响推送）:', commError.message);
+      }
+
+      // Phase 1-B：同时写一条结构化 report 事件到 commEventStore
+      //   - 与 Phase 0 的 agentCommunication.messages 记录互补，commEventStore 是
+      //     专用通信事件存储，支持按 Agent / 双向 / 群聊查询，上下文注入直接消费它。
+      //   - to='ceo'（作为老板代理），groupId=null（私信汇报）。
+      try {
+        const store = getCommEventStore();
+        if (store) {
+          store.append({
+            type: 'report',
+            from: agentId,
+            to: 'ceo',
+            content: message,
+            response: '',
+            conversationId: context.conversationId || '',
+            groupId: null,
+          });
+        }
+      } catch (commEvtError) {
+        logger.debug('notify_boss 写通信事件失败（不影响推送）:', commEvtError.message);
+      }
 
       logger.info(`Agent ${agentId} 向老板发送了主动汇报`, { messageLength: message.length });
 
@@ -1443,7 +1548,7 @@ const postToDepartmentTool = {
       const filteredNames = result.filteredMentions
         .map((id) => agentConfigStore.get(id)?.name || id)
         .join('、');
-      message += `。注意：${filteredNames} 正在冷却中（30秒内已被触发过），本次 @ 未生效。`;
+      message += `。注意：${filteredNames} 正在冷却中（10秒内已被触发过），本次 @ 未生效。`;
     }
 
     return {
@@ -1519,6 +1624,182 @@ const renameDepartmentGroupTool = {
   },
 };
 
+// ═══════════════════════════════════════════════════════════
+// 群聊发言工具（Phase 3-A）
+// ═══════════════════════════════════════════════════════════
+
+// 延迟加载 GroupQueue / GroupHistoryStore（避免循环依赖）
+let _groupQueue = null;
+function getGroupQueue() {
+  if (!_groupQueue) {
+    try {
+      const m = require('../chat/group-queue');
+      _groupQueue = m.groupQueue;
+    } catch (e) {
+      logger.warn('group-queue 加载失败，群聊发言将不可用:', e.message);
+      _groupQueue = null;
+    }
+  }
+  return _groupQueue;
+}
+
+let _groupHistoryStore = null;
+function getGroupHistoryStore() {
+  if (!_groupHistoryStore) {
+    try {
+      const m = require('../chat/group-history-store');
+      _groupHistoryStore = m.groupHistoryStore;
+    } catch (e) {
+      logger.warn('group-history-store 加载失败，群聊历史查询将不可用:', e.message);
+      _groupHistoryStore = null;
+    }
+  }
+  return _groupHistoryStore;
+}
+
+/**
+ * 在群聊中发言。发言后所有群成员都能看到，被 @ 的人会被排队触发发言。
+ */
+const postToGroupTool = {
+  name: 'post_to_group',
+  description: `在群聊中发言。发言后所有群成员都能看到。
+
+使用场景：
+- 在群里汇报工作进展
+- 在群里发布结论或方案
+- 回应群里的讨论
+- 被 @ 后的正式回复
+
+注意：
+- 群里所有成员都会看到你的发言
+- 如果需要特定人回复，使用 mention 参数 @ 对方
+- 被 @ 的人会被排队触发发言（按发起顺序串行）
+- 不被 @ 的人看到消息但可以选择不回复
+- 非群聊相关内容请使用 send_to_agent 私信`,
+  category: 'group_chat',
+  parameters: {
+    content: {
+      type: 'string',
+      description: '发言内容',
+      required: true,
+    },
+    mention: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '要 @ 的同事 ID 列表（被 @ 的人会被排队触发发言）',
+      required: false,
+    },
+  },
+  requiredPermissions: [],
+  async execute(args, context) {
+    const { content, mention = [] } = args;
+    const { agentId, conversationId } = context;
+
+    if (!content || content.trim().length === 0) {
+      return { error: '发言内容不能为空' };
+    }
+    if (!conversationId) {
+      return { error: '当前不在群聊上下文中，无法发言' };
+    }
+
+    // 获取 Agent 名
+    const agentConfig = agentConfigStore.get(agentId);
+    const senderName = agentConfig?.name || agentId;
+
+    // 调 GroupQueue.submit（统一入口：消息落库 + 推 UI + 排队触发被 @ 的人）
+    const queue = getGroupQueue();
+    if (!queue) {
+      return { error: '群聊系统未就绪，无法发言' };
+    }
+
+    const result = await queue.submit({
+      conversationId,
+      senderId: agentId,
+      senderName,
+      content,
+      mentions: Array.isArray(mention) ? mention : [],
+    });
+
+    if (!result.success) {
+      return { error: result.error || '群聊发言失败' };
+    }
+
+    // 同时写一条结构化通信事件（与 post_to_department 的 comm-event-store 记录风格一致）
+    try {
+      const store = getCommEventStore();
+      if (store) {
+        store.append({
+          type: 'group_post',
+          from: agentId,
+          to: conversationId,
+          content,
+          response: '',
+          conversationId,
+          groupId: conversationId,
+        });
+      }
+    } catch (commEvtError) {
+      logger.debug('post_to_group 写通信事件失败（不影响主流程）:', commEvtError.message);
+    }
+
+    logger.info(`Agent ${agentId} 在群聊 ${conversationId} 发言`, {
+      contentLength: content.length,
+      mentions: Array.isArray(mention) ? mention.length : 0,
+    });
+
+    return { success: true, message: '已在群聊中发言' };
+  },
+};
+
+/**
+ * 查看群聊的历史消息。
+ */
+const getGroupHistoryTool = {
+  name: 'get_group_history',
+  description: '查看群聊的历史消息。用于了解之前的讨论内容和结论。',
+  category: 'group_chat',
+  parameters: {
+    limit: {
+      type: 'number',
+      description: '返回消息条数（默认50）',
+      required: false,
+    },
+  },
+  requiredPermissions: [],
+  async execute(args, context) {
+    const { limit = 50 } = args;
+    const { conversationId } = context;
+
+    if (!conversationId) {
+      return { error: '当前不在群聊上下文中，无法获取历史' };
+    }
+
+    const store = getGroupHistoryStore();
+    if (!store) {
+      return { error: '群聊历史系统未就绪，无法获取' };
+    }
+
+    const messages = store.getRecent(conversationId, limit);
+
+    if (messages.length === 0) {
+      return { success: true, messages: [], note: '群聊暂无历史消息' };
+    }
+
+    // 格式化输出，便于 LLM 理解
+    const formatted = messages.map((m) => ({
+      senderId: m.senderId,
+      senderName: m.senderName,
+      content: m.content,
+      mentions: m.mentions || [],
+      time: new Date(m.timestamp).toLocaleString('zh-CN', {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      }),
+    }));
+
+    return { success: true, messages: formatted, count: formatted.length };
+  },
+};
+
 /**
  * 注册所有协作工具
  */
@@ -1541,6 +1822,9 @@ function registerCollaborationTools() {
   toolRegistry.register(cancelDelegatedTaskTool);
   toolRegistry.register(postToDepartmentTool);
   toolRegistry.register(renameDepartmentGroupTool);
+  // Phase 3-A：群聊发言/历史工具
+  toolRegistry.register(postToGroupTool);
+  toolRegistry.register(getGroupHistoryTool);
 
   logger.info('Agent 协作工具已注册');
 }
@@ -1565,4 +1849,7 @@ module.exports = {
   cancelDelegatedTaskTool,
   postToDepartmentTool,
   renameDepartmentGroupTool,
+  // Phase 3-A：群聊发言/历史工具
+  postToGroupTool,
+  getGroupHistoryTool,
 };

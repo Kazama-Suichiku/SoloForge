@@ -110,6 +110,9 @@ const CHANNELS = {
   CHAT_DEPT_GROUP_MESSAGE: 'chat:dept-group-message',
   CHAT_DEPT_GROUP_RENAME: 'chat:dept-group-rename',
   CHAT_DEPT_GROUP_GET_ALL: 'chat:dept-group-get-all',
+  // 群聊排队触发（Phase 3-B）
+  CHAT_GROUP_QUEUE_SUBMIT: 'chat:group-queue-submit',
+  CHAT_GROUP_QUEUE_ABORT: 'chat:group-queue-abort',
   // 设备管理
   DEVICE_GET_CURRENT: 'device:get-current',
   DEVICE_LIST: 'device:list',
@@ -283,6 +286,23 @@ contextBridge.exposeInMainWorld('soloforge', {
      * @returns {Promise<Array<{ groupId: string; departmentId: string; ownerId: string; name: string; participants: string[] }>>}
      */
     getAllDepartmentGroups: () => ipcRenderer.invoke(CHANNELS.CHAT_DEPT_GROUP_GET_ALL),
+
+    /**
+     * 把群聊消息提交到主进程 GroupQueue（Phase 3-B）
+     * 主进程 GroupQueue 负责：消息落库 + 推 UI + 排队触发被 @ 的 Agent（串行）。
+     * 渲染进程不再做连锁触发，只负责把消息发到主进程。
+     * @param {{ conversationId: string; senderId: string; content: string; mentions?: string[]; senderName?: string }} request
+     * @returns {Promise<{ success: boolean; error?: string }>}
+     */
+    submitGroupMessage: (request) => ipcRenderer.invoke(CHANNELS.CHAT_GROUP_QUEUE_SUBMIT, request),
+
+    /**
+     * 中止（肃静）某群聊的 GroupQueue 排队触发（Phase 3-B）
+     * 清空该群聊的待执行项并标记为已中止，后续 submit 不再排队触发。
+     * @param {string} conversationId - 群聊 ID
+     * @returns {Promise<{ success: boolean; cleared?: number; error?: string }>}
+     */
+    abortGroupQueue: (conversationId) => ipcRenderer.invoke(CHANNELS.CHAT_GROUP_QUEUE_ABORT, conversationId),
   },
 
   // 附件相关（图片上传）

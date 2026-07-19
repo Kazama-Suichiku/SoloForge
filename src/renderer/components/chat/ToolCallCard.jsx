@@ -19,7 +19,6 @@ import {
   CalculatorIcon,
   WrenchScrewdriverIcon,
   ChevronRightIcon,
-  ChevronDownIcon,
   CheckCircleIcon,
   XCircleIcon,
 } from '@heroicons/react/24/outline';
@@ -247,12 +246,12 @@ function ToolCallCard({ toolCall }) {
   return (
     <div
       className={`
-        relative rounded-lg border text-xs overflow-hidden transition-all duration-300
+        relative rounded-lg border text-xs overflow-hidden transition-[border-color,background-color] duration-200 ease-out
         ${isRunning
-          ? 'border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5'
+          ? 'border-accent/30 bg-accent/5'
           : isError
-            ? 'border-red-400/30 bg-red-500/5'
-            : 'border-[var(--border-color)] bg-black/[0.03] dark:bg-white/[0.03]'
+            ? 'border-[var(--color-danger)]/30 bg-[var(--color-danger)]/5'
+            : 'border-border-default bg-bg-hover'
         }
       `}
     >
@@ -262,16 +261,16 @@ function ToolCallCard({ toolCall }) {
         <div className={`shrink-0 ${isRunning ? 'animate-pulse' : ''}`}>
           <Icon className={`w-4 h-4 ${
             isRunning
-              ? 'text-[var(--color-primary)]'
+              ? 'text-accent'
               : isError
-                ? 'text-red-500'
+                ? 'text-[var(--color-danger)]'
                 : 'text-text-secondary'
           }`} />
         </div>
 
         {/* 工具名 */}
         <span className={`font-medium ${
-          isRunning ? 'text-[var(--color-primary)]' : 'text-text-primary'
+          isRunning ? 'text-accent' : 'text-text-primary'
         }`}>
           {label}
         </span>
@@ -281,7 +280,7 @@ function ToolCallCard({ toolCall }) {
 
         {/* 状态指示 */}
         {isRunning && (
-          <span className="flex items-center gap-1 text-[var(--color-primary)]">
+          <span className="flex items-center gap-1 text-accent">
             <span className="inline-flex gap-0.5">
               <span className="w-1 h-1 rounded-full bg-current animate-bounce" style={{ animationDelay: '0ms' }} />
               <span className="w-1 h-1 rounded-full bg-current animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -291,7 +290,7 @@ function ToolCallCard({ toolCall }) {
           </span>
         )}
         {isSuccess && (
-          <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+          <span className="flex items-center gap-1 text-[var(--color-success)]">
             <CheckCircleIcon className="w-3.5 h-3.5" />
             {toolCall.duration != null && (
               <span className="text-text-secondary">{formatDuration(toolCall.duration)}</span>
@@ -299,7 +298,7 @@ function ToolCallCard({ toolCall }) {
           </span>
         )}
         {isError && (
-          <span className="flex items-center gap-1 text-red-500">
+          <span className="flex items-center gap-1 text-[var(--color-danger)]">
             <XCircleIcon className="w-3.5 h-3.5" />
             {toolCall.duration != null && (
               <span className="text-text-secondary">{formatDuration(toolCall.duration)}</span>
@@ -323,7 +322,7 @@ function ToolCallCard({ toolCall }) {
         return (
           <>
             {/* 结果摘要（始终显示） */}
-            <div className="border-t border-[var(--border-color)]">
+            <div className="border-t border-border-default">
               <div className="px-3 py-2 text-[11px] leading-relaxed text-text-secondary whitespace-pre-wrap break-words select-text">
                 {summary}
               </div>
@@ -334,25 +333,23 @@ function ToolCallCard({ toolCall }) {
               <>
                 <button
                   onClick={() => setExpanded(!expanded)}
-                  className="w-full flex items-center gap-1.5 px-3 py-1 text-text-secondary/70 hover:text-text-primary hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors border-t border-[var(--border-color)]"
+                  className="w-full flex items-center gap-1.5 px-3 py-1 text-text-secondary/70 hover:text-text-primary hover:bg-bg-hover transition-colors border-t border-border-default"
                 >
-                  {expanded ? (
-                    <ChevronDownIcon className="w-3 h-3" />
-                  ) : (
-                    <ChevronRightIcon className="w-3 h-3" />
-                  )}
+                  {/* emil-arrow：rotate 90deg 入场，data-open 控制方向 */}
+                  <ChevronRightIcon className="w-3 h-3 emil-arrow" data-open={expanded ? 'true' : 'false'} />
                   <span className="text-[10px]">{expanded ? '收起详情' : '展开详情'}</span>
                 </button>
 
-                {expanded && (
-                  <div className="border-t border-[var(--border-color)]">
+                {/* emil-collapse：max-height + opacity 过渡（data-open 控制展开） */}
+                <div className="emil-collapse" data-open={expanded ? 'true' : 'false'}>
+                  <div className="border-t border-border-default">
                     <div className="max-h-[200px] overflow-auto">
                       <pre className="px-3 py-2 text-[11px] leading-relaxed text-text-secondary font-mono whitespace-pre-wrap break-all select-text">
                         {detail}
                       </pre>
                     </div>
                   </div>
-                )}
+                </div>
               </>
             )}
           </>
@@ -368,8 +365,8 @@ function ToolCallCard({ toolCall }) {
           .trim();
         return (
           <>
-            <div className="border-t border-red-400/20" />
-            <div className="px-3 py-1.5 text-red-600 dark:text-red-400 text-[11px] break-all line-clamp-3">
+            <div className="border-t border-[var(--color-danger)]/20" />
+            <div className="px-3 py-1.5 text-[var(--color-danger)] text-[11px] break-all line-clamp-3">
               {cleanError || '执行失败'}
             </div>
           </>
@@ -379,7 +376,7 @@ function ToolCallCard({ toolCall }) {
       {/* 运行中的流光动画效果 */}
       {isRunning && (
         <div className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-transparent via-[var(--color-primary)] to-transparent animate-shimmer" />
+          <div className="h-full bg-gradient-to-r from-transparent via-accent to-transparent animate-shimmer" />
         </div>
       )}
     </div>

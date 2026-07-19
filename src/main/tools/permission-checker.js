@@ -1,29 +1,142 @@
 /**
  * SoloForge - 权限检查器
  * 检查工具执行是否符合用户配置的安全边界
+ *
+ * Phase 2-C：数据源改为优先从 AgentPermissionStore（每 Agent 粒度的权限集）读取
+ * fileAccess/shellAccess/networkAccess/gitAccess。若该 Agent 在 PermissionStore 中
+ * 没有记录，则回退到构造时传入的 this.permissions（用户全局权限配置）。
+ * 所有 check 逻辑保持不变，只换数据来源。
+ *
+ * 注意：本检查器是「用户/Agent 级」资源权限（文件路径/Shell/Git/网络开关），
+ * 不负责「工具可见性」过滤（那由 PermissionManager.getAccessibleTools 在
+ * tool-context.js 中处理）。
+ *
  * @module tools/permission-checker
  */
 
 const path = require('path');
 const os = require('os');
 
+// ─────────────────────────────────────────────────────────────
+// 懒加载 AgentPermissionStore（2-A 产物，可能缺失）
+// ─────────────────────────────────────────────────────────────
+let _agentPermStore = null;
+let _agentPermStoreChecked = false;
+function getAgentPermStore() {
+  if (!_agentPermStoreChecked) {
+    _agentPermStoreChecked = true;
+    try {
+      const mod = require('../permission/permission-store');
+      _agentPermStore = mod.agentPermissionStore || mod.AgentPermissionStore?.instance || mod.default || null;
+    } catch (e) {
+      _agentPermStore = null;
+    }
+  }
+  return _agentPermStore;
+}
+
+/**
+ * 将 PermissionStore 的 PermissionSet 归一化为本检查器使用的
+ * this.permissions 风格（files / shell / network / git 四段）。
+ *
+ * PermissionSet 的字段命名与 this.permissions 略有不同：
+ *   - PermissionSet.fileAccess.{allowedPaths, writeEnabled, writeConfirm}
+ *     ↔ this.permissions.files.{allowedPaths, writeEnabled, writeConfirm}
+ *   - PermissionSet.shellAccess.{enabled, blacklist, confirmEach}
+ *     ↔ this.permissions.shell.{enabled, blacklist, confirmEach}
+ *   - PermissionSet.networkAccess.{searchEnabled}
+ *     ↔ this.permissions.network.{searchEnabled}
+ *   - PermissionSet.gitAccess.{enabled, autoCommit}
+ *     ↔ this.permissions.git.{enabled, autoCommit}
+ *
+ * @param {Object} permSet - PermissionStore 中的 PermissionSet
+ * @returns {Object} this.permissions 风格对象
+ */
+function _permSetToUserStyle(permSet) {
+  if (!permSet || typeof permSet !== 'object') return null;
+  const fa = permSet.fileAccess || {};
+  const sa = permSet.shellAccess || {};
+  const na = permSet.networkAccess || {};
+  const ga = permSet.gitAccess || {};
+  return {
+    files: {
+      allowedPaths: Array.isArray(fa.allowedPaths) ? fa.allowedPaths : [],
+      writeEnabled: !!fa.writeEnabled,
+      writeConfirm: fa.writeConfirm != null ? !!fa.writeConfirm : true,
+    },
+    shell: {
+      enabled: !!sa.enabled,
+      blacklist: Array.isArray(sa.blacklist) ? sa.blacklist : [],
+      confirmEach: sa.confirmEach != null ? !!sa.confirmEach : true,
+    },
+    network: {
+      searchEnabled: na.searchEnabled != null ? !!na.searchEnabled : true,
+    },
+    git: {
+      enabled: !!ga.enabled,
+      autoCommit: !!ga.autoCommit,
+    },
+  };
+}
+
 /**
  * 权限检查器
  */
 class PermissionChecker {
   /**
-   * @param {Object} userPermissions - 用户权限配置
+   * @param {Object} userPermissions - 用户权限配置（回退数据源）
    */
   constructor(userPermissions = {}) {
     this.permissions = userPermissions;
+    /** @type {string|null} 当前绑定的 Agent ID（由 setAgentContext 设置） */
+    this._agentId = null;
   }
 
   /**
-   * 更新权限配置
+   * 更新权限配置（回退数据源）
    * @param {Object} permissions
    */
   setPermissions(permissions) {
-    this.permissions = permissions;
+    this.permissions = permissions || {};
+  }
+
+  /**
+   * 绑定当前调用的 Agent 上下文。
+   * 设置后，check* 方法会优先从 PermissionStore 读取该 Agent 的权限集；
+   * 若该 Agent 在 PermissionStore 中没有记录，回退到 this.permissions。
+   *
+   * @param {string|null} agentId
+   */
+  setAgentContext(agentId) {
+    this._agentId = agentId || null;
+  }
+
+  /**
+   * 获取当前生效的权限对象（this.permissions 风格）。
+   *
+   * 优先级：
+   *   1. 若已 setAgentContext(agentId) 且 PermissionStore 中有该 Agent 的记录
+   *      → 返回归一化后的 PermissionSet
+   *   2. 否则 → 返回 this.permissions（用户全局配置）
+   *
+   * @returns {Object} { files, shell, network, git }
+   */
+  _effectivePermissions() {
+    if (this._agentId) {
+      const store = getAgentPermStore();
+      if (store && typeof store.getPermissionSet === 'function') {
+        try {
+          const permSet = store.getPermissionSet(this._agentId);
+          if (permSet) {
+            const userStyle = _permSetToUserStyle(permSet);
+            if (userStyle) return userStyle;
+          }
+        } catch (e) {
+          // 读取失败 → 回退
+        }
+      }
+    }
+    return this.permissions || {};
   }
 
   /**
@@ -50,8 +163,9 @@ class PermissionChecker {
       return { allowed: false, reason: '未提供有效的路径参数' };
     }
 
-    const allowedPaths = this.permissions.files?.allowedPaths ?? [];
-    
+    const perms = this._effectivePermissions();
+    const allowedPaths = perms.files?.allowedPaths ?? [];
+
     if (allowedPaths.length === 0) {
       return { allowed: false, reason: '用户未配置任何可访问目录' };
     }
@@ -81,12 +195,13 @@ class PermissionChecker {
    * @returns {{ allowed: boolean, reason?: string, needConfirm?: boolean }}
    */
   checkWrite() {
-    if (!this.permissions.files?.writeEnabled) {
+    const perms = this._effectivePermissions();
+    if (!perms.files?.writeEnabled) {
       return { allowed: false, reason: '用户未启用文件写入权限' };
     }
     return {
       allowed: true,
-      needConfirm: this.permissions.files?.writeConfirm ?? true,
+      needConfirm: perms.files?.writeConfirm ?? true,
     };
   }
 
@@ -97,7 +212,8 @@ class PermissionChecker {
    * @returns {{ allowed: boolean, reason?: string, needConfirm?: boolean }}
    */
   checkShell(command, cwd) {
-    if (!this.permissions.shell?.enabled) {
+    const perms = this._effectivePermissions();
+    if (!perms.shell?.enabled) {
       return { allowed: false, reason: '用户未启用 Shell 命令权限' };
     }
 
@@ -107,7 +223,7 @@ class PermissionChecker {
     }
 
     // 检查黑名单
-    const blacklist = this.permissions.shell?.blacklist ?? [];
+    const blacklist = perms.shell?.blacklist ?? [];
     for (const pattern of blacklist) {
       if (command.includes(pattern)) {
         return {
@@ -125,7 +241,7 @@ class PermissionChecker {
 
     return {
       allowed: true,
-      needConfirm: this.permissions.shell?.confirmEach ?? true,
+      needConfirm: perms.shell?.confirmEach ?? true,
     };
   }
 
@@ -136,7 +252,8 @@ class PermissionChecker {
    * @returns {{ allowed: boolean, reason?: string }}
    */
   _checkShellFileOperations(command, cwd) {
-    const allowedPaths = this.permissions.files?.allowedPaths ?? [];
+    const perms = this._effectivePermissions();
+    const allowedPaths = perms.files?.allowedPaths ?? [];
     
     // 如果没有配置允许路径，则不检查（向后兼容）
     if (allowedPaths.length === 0) {
@@ -287,7 +404,8 @@ class PermissionChecker {
    * @returns {{ allowed: boolean, reason?: string }}
    */
   checkNetwork() {
-    if (!this.permissions.network?.searchEnabled) {
+    const perms = this._effectivePermissions();
+    if (!perms.network?.searchEnabled) {
       return { allowed: false, reason: '用户未启用网络搜索权限' };
     }
     return { allowed: true };
@@ -298,7 +416,8 @@ class PermissionChecker {
    * @returns {{ allowed: boolean, reason?: string }}
    */
   checkGit() {
-    if (!this.permissions.git?.enabled) {
+    const perms = this._effectivePermissions();
+    if (!perms.git?.enabled) {
       return { allowed: false, reason: '用户未启用 Git 协作功能' };
     }
     return { allowed: true };
@@ -313,9 +432,10 @@ class PermissionChecker {
     if (!gitCheck.allowed) {
       return gitCheck;
     }
+    const perms = this._effectivePermissions();
     return {
       allowed: true,
-      needConfirm: !this.permissions.git?.autoCommit,
+      needConfirm: !perms.git?.autoCommit,
     };
   }
 
@@ -356,11 +476,12 @@ class PermissionChecker {
         if (!shellCheck.allowed) {
           return shellCheck;
         }
+        const perms = this._effectivePermissions();
         return {
           allowed: true,
           needConfirm: toolName === 'shell_kill_process'
             ? true
-            : (this.permissions.shell?.confirmEach ?? true),
+            : (perms.shell?.confirmEach ?? true),
         };
       }
 

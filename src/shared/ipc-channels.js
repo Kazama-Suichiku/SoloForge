@@ -78,6 +78,12 @@ const CHAT_DEPT_GROUP_RENAME = 'chat:dept-group-rename';
 /** @constant {string} 获取所有部门群聊 (invoke) */
 const CHAT_DEPT_GROUP_GET_ALL = 'chat:dept-group-get-all';
 
+/** @constant {string} 群聊消息提交到主进程 GroupQueue (invoke) — Phase 3-B */
+const CHAT_GROUP_QUEUE_SUBMIT = 'chat:group-queue-submit';
+
+/** @constant {string} 群聊中止（肃静） (invoke) — Phase 3-B */
+const CHAT_GROUP_QUEUE_ABORT = 'chat:group-queue-abort';
+
 // ─────────────────────────────────────────────────────────────
 // AGENT TASK 相关（任务追踪与终止）
 // ─────────────────────────────────────────────────────────────
@@ -173,6 +179,8 @@ module.exports = {
   CHAT_DEPT_GROUP_MESSAGE,
   CHAT_DEPT_GROUP_RENAME,
   CHAT_DEPT_GROUP_GET_ALL,
+  CHAT_GROUP_QUEUE_SUBMIT,
+  CHAT_GROUP_QUEUE_ABORT,
   AGENT_TASK_GET_ALL,
   AGENT_TASK_ABORT,
   AGENT_CONFIG_CHANGED,

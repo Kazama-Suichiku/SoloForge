@@ -13,16 +13,14 @@ import { useChatStore } from '../store/chat-store';
  * 订阅主进程推送的 Agent 相关 IPC 事件。
  * 不返回任何值——所有副作用直接写回 chat-store / agent-store。
  *
+ * Phase 3-B：群聊连锁触发已移到主进程 GroupQueue，本 hook 不再需要
+ * handleGroupChat / isAgentInDeptCooldown / recordDeptTrigger 参数。
+ * onDeptGroupMessage 只负责显示消息，不再触发连锁回复。
+ *
  * @param {object} handlers - 由 useChatAgent 传入的事件处理回调
- * @param {(conversationId: string, conversation: object, agentIds: string[], triggerContent: string) => Promise<void>} [handlers.handleGroupChat] - 群聊连锁处理函数
- * @param {(conversationId: string, agentId: string) => boolean} [handlers.isAgentInDeptCooldown] - 冷却判断
- * @param {(conversationId: string, agentId: string) => void} [handlers.recordDeptTrigger] - 记录冷却触发
  * @param {(agentId: string) => void} [handlers.setAgentIdle] - 设置 Agent 空闲（来自 agent-store）
  */
 export function useAgentIpcEvents({
-  handleGroupChat,
-  isAgentInDeptCooldown,
-  recordDeptTrigger,
   setAgentIdle,
 } = {}) {
   // ── 从 chat-store 读取本 hook 需要的 action ──────────────────────
@@ -280,17 +278,25 @@ export function useAgentIpcEvents({
     };
   }, [updateDepartmentMembers]);
 
-  // ── 8. 监听部门群聊消息（支持 @ 触发回复） ──────────────────────
+  // ── 8. 监听部门群聊消息（Phase 3-B：只显示，不做连锁触发） ────
+  // 群聊触发已移到主进程 GroupQueue，渲染进程只负责显示消息。
+  // 主进程 GroupQueue.submit 推送 CHAT_DEPT_GROUP_MESSAGE 事件到这里，
+  // 本 handler 把消息添加到 chat-store（UI 显示）即可，不再调 handleGroupChat。
   useEffect(() => {
     if (!window.soloforge?.chat?.onDeptGroupMessage) return;
 
-    const unsubscribe = window.soloforge.chat.onDeptGroupMessage(async (data) => {
+    const unsubscribe = window.soloforge.chat.onDeptGroupMessage((data) => {
       const { groupId, departmentId, senderId, senderName, content, mentions, timestamp } = data;
       if (!groupId || !content) return;
 
       console.log(`部门群聊消息: ${senderName} -> ${groupId}`, { mentions });
 
-      // 1. 添加消息到部门群聊
+      // 跳过用户自己发的消息（用户消息已在 ChatView.handleSend 中加入 store，避免重复）
+      if (senderId === 'user') {
+        return;
+      }
+
+      // 添加消息到部门群聊（Agent 发言）
       sendMessage({
         conversationId: groupId,
         senderId,
@@ -302,52 +308,13 @@ export function useAgentIpcEvents({
         },
       });
 
-      // 2. 如果有 @ 某人，触发他们回复
-      if (mentions && mentions.length > 0) {
-        // 获取对话信息
-        const conversation = useChatStore.getState().conversations.get(groupId);
-        if (!conversation) return;
-
-        // 过滤出有效的被 @ 的 Agent（必须是群成员、不是发送者、不在冷却中）
-        const validMentions = mentions.filter((id) => {
-          if (id === senderId) return false;
-          if (!conversation.participants.includes(id)) return false;
-          // 检查前端冷却（双重保险，后端也有冷却）
-          if (isAgentInDeptCooldown(groupId, id)) {
-            console.log(`部门群聊冷却: ${id} 正在冷却中，跳过`);
-            return false;
-          }
-          return true;
-        });
-
-        if (validMentions.length > 0) {
-          console.log(`部门群聊触发回复: ${validMentions.join(', ')}`);
-
-          // 记录冷却时间
-          validMentions.forEach((id) => recordDeptTrigger(groupId, id));
-
-          // 构造触发内容，确保包含 @ID 格式以便 extractMentions 能识别
-          // 例如：[发送者]: 原始内容 @agent1 @agent2
-          const mentionTags = validMentions.map((id) => `@${id}`).join(' ');
-          const triggerContent = `[${senderName}]: ${content}\n\n（被点名的同事：${mentionTags}）`;
-
-          // 使用现有的群聊处理逻辑
-          const agentIds = conversation.participants.filter((p) => p !== 'user');
-
-          // 直接调用 handleGroupChat，它会处理连锁回复
-          try {
-            await handleGroupChat(groupId, conversation, agentIds, triggerContent);
-          } catch (err) {
-            console.error('部门群聊回复处理失败:', err);
-          }
-        }
-      }
+      // Phase 3-B：连锁触发由主进程 GroupQueue 负责，渲染进程不再做。
     });
 
     return () => {
       unsubscribe?.();
     };
-  }, [sendMessage, handleGroupChat, isAgentInDeptCooldown, recordDeptTrigger]);
+  }, [sendMessage]);
 
   // ── 9. 监听部门群聊重命名 ────────────────────────────────────────
   useEffect(() => {

@@ -1,17 +1,14 @@
 /**
  * SoloForge - Agent 人员管理设置页面
  * 配置 Agent 的名字、职级、部门
+ * Linear 风格：.panel/.card/.input/.btn-primary/.btn-ghost、accent 仅用于 CTA、无蓝色无 emoji 装饰
+ * 状态 pill badge：active=绿 / suspended=橙 / terminated=红
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import OrgChart from '../components/OrgChart';
 import AgentAvatar, { isImageAvatar } from '../components/AgentAvatar';
 
-/**
- * Agent 编辑卡片组件
- */
-/**
- * 获取 Agent 所属的所有部门（兼容新旧格式）
- */
+/** 获取 Agent 所属的所有部门（兼容新旧格式） */
 function getAgentDepartments(config) {
   if (Array.isArray(config.departments) && config.departments.length > 0) {
     return config.departments;
@@ -22,6 +19,47 @@ function getAgentDepartments(config) {
   return [];
 }
 
+/**
+ * P2-5: 将 hex 颜色转为标准 rgba 字符串，避免 `${color}20` 字符串拼接 alpha
+ * 兼容 #rgb / #rrggbb；alpha 为 0-1 浮点。非合法 hex 回退 null。
+ */
+function hexToRgba(hex, alpha = 1) {
+  if (!hex || typeof hex !== 'string') return null;
+  let h = hex.trim().replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return null;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/** 部门 tint：hex 走 rgba，否则回退到中性半透明 */
+function deptTint(color, alpha) {
+  return hexToRgba(color, alpha) || 'rgba(255,255,255,0.04)';
+}
+
+/** 状态 pill badge：active=绿 / suspended=橙 / terminated=红 */
+function StatusBadge({ status }) {
+  const s = status || 'active';
+  const map = {
+    active: 'text-success border-success/30 bg-success/10',
+    suspended: 'text-warning border-warning/30 bg-warning/10',
+    terminated: 'text-danger border-danger/30 bg-danger/10',
+  };
+  const label = { active: '在职', suspended: '停职', terminated: '已开除' }[s] || s;
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded-full border ${map[s] || map.active}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Agent 编辑卡片组件（列表视图内嵌编辑）
+ */
 function AgentCard({ config, levels, departments, models, onSave, onReset, saving, salaryInfo }) {
   const [editing, setEditing] = useState(false);
   const [formData, setFormData] = useState({
@@ -78,15 +116,15 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
 
   if (editing) {
     return (
-      <div className="bg-bg-elevated rounded-xl shadow-sm border border-blue-300 dark:border-blue-700 p-6">
+      <div className="card border-accent/40">
         <div className="flex items-start gap-4">
           {/* Avatar */}
           <div className="flex-shrink-0 flex flex-col items-center gap-2">
             <AgentAvatar
               avatar={formData.avatar}
-              fallback="😊"
+              fallback="A"
               size="2xl"
-              bgClass="bg-bg-muted border-2 border-dashed border-[var(--border-color)]"
+              bgClass="border border-dashed border-border-default"
             />
             <div className="flex gap-1">
               <button
@@ -97,7 +135,7 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
                     setFormData({ ...formData, avatar: result.avatarPath });
                   }
                 }}
-                className="text-xs px-2 py-1 rounded-md bg-[var(--color-primary)]/10 text-[var(--color-primary)] hover:bg-[var(--color-primary)]/20 transition-colors"
+                className="btn-ghost px-2 py-0.5 text-xs"
                 title="上传图片头像"
               >
                 上传图片
@@ -105,9 +143,14 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
               {isImageAvatar(formData.avatar) && (
                 <button
                   type="button"
-                  onClick={() => setFormData({ ...formData, avatar: config.avatar?.includes('/') ? '' : (config.avatar || '') })}
-                  className="text-xs px-2 py-1 rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors"
-                  title="移除图片，恢复为 Emoji"
+                  onClick={() =>
+                    setFormData({
+                      ...formData,
+                      avatar: config.avatar?.includes('/') ? '' : config.avatar || '',
+                    })
+                  }
+                  className="btn-ghost px-2 py-0.5 text-xs text-text-tertiary hover:text-danger"
+                  title="移除图片"
                 >
                   移除
                 </button>
@@ -118,9 +161,9 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
                 type="text"
                 value={formData.avatar}
                 onChange={(e) => setFormData({ ...formData, avatar: e.target.value })}
-                placeholder="😊"
-                className="w-16 text-center text-xl rounded-lg border border-[var(--border-color)] bg-bg-muted py-1"
-                title="输入 Emoji 作为头像"
+                placeholder="A"
+                className="input w-16 text-center text-base"
+                title="输入 Emoji 或符号作为头像"
               />
             )}
           </div>
@@ -129,104 +172,82 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
           <div className="flex-1 space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-text-primary mb-1">
-                  名字
-                </label>
+                <label className="block text-sm text-text-secondary mb-1">名字</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                           bg-bg-elevated text-text-primary"
+                  className="input"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-text-primary mb-1">
-                  职位头衔
-                </label>
+                <label className="block text-sm text-text-secondary mb-1">职位头衔</label>
                 <input
                   type="text"
                   value={formData.title}
                   onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                           bg-bg-elevated text-text-primary"
+                  className="input"
                 />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-text-primary mb-1">
-                  部门
-                </label>
+                <label className="block text-sm text-text-secondary mb-1">部门</label>
                 <select
                   value={formData.department}
                   onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                           bg-bg-elevated text-text-primary"
+                  className="input"
                 >
-                  {departments.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
+                  {Array.isArray(departments) &&
+                    departments.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-text-primary mb-1">
-                  职级
-                </label>
+                <label className="block text-sm text-text-secondary mb-1">职级</label>
                 <select
                   value={formData.level}
                   onChange={(e) => setFormData({ ...formData, level: e.target.value })}
-                  className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                           bg-bg-elevated text-text-primary"
+                  className="input"
                 >
-                  {levels.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.name}
-                    </option>
-                  ))}
+                  {Array.isArray(levels) &&
+                    levels.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
                 </select>
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-text-primary mb-1">
-                职责描述
-              </label>
+              <label className="block text-sm text-text-secondary mb-1">职责描述</label>
               <textarea
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                 rows={2}
-                className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                         bg-bg-elevated text-text-primary resize-none"
+                className="input resize-none"
               />
             </div>
 
             {/* Actions */}
-            <div className="flex justify-between pt-2">
+            <div className="flex justify-between pt-1">
               <button
                 onClick={handleReset}
                 disabled={saving}
-                className="text-sm text-text-secondary hover:text-text-primary"
+                className="text-sm text-text-tertiary hover:text-text-primary transition-colors-fast"
               >
                 恢复默认
               </button>
               <div className="flex gap-2">
-                <button
-                  onClick={handleCancel}
-                  disabled={saving}
-                  className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary"
-                >
+                <button onClick={handleCancel} disabled={saving} className="btn-ghost">
                   取消
                 </button>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="px-4 py-2 text-sm bg-[var(--color-primary)] text-white rounded-lg hover:bg-[var(--color-primary-hover)]
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-                >
+                <button onClick={handleSave} disabled={saving} className="btn-primary">
                   {saving ? '保存中...' : '保存'}
                 </button>
               </div>
@@ -239,90 +260,96 @@ function AgentCard({ config, levels, departments, models, onSave, onReset, savin
 
   return (
     <div
-      className="bg-bg-elevated rounded-xl shadow-sm border border-[var(--border-color)] p-6
-                 hover:border-[var(--border-color)] transition-colors cursor-pointer"
+      className="card card-hover cursor-pointer"
       onClick={() => setEditing(true)}
     >
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         {/* Avatar */}
         <AgentAvatar
           avatar={config.avatar}
-          fallback="👤"
-          size="xl"
-          bgStyle={{ backgroundColor: dept.color ? `${dept.color}20` : '#f3f4f6' }}
+          fallback="A"
+          size="lg"
+          bgStyle={{ backgroundColor: deptTint(dept.color, 0.125) }}
           bgClass=""
         />
 
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-lg font-semibold text-text-primary">
+            <h3 className="text-sm font-medium text-text-primary truncate">
               {config.name}
             </h3>
+            <StatusBadge status={config.status} />
             <span
-              className="px-2 py-0.5 text-xs rounded-full"
+              className="inline-flex items-center px-1.5 py-0.5 text-xs rounded-full border"
               style={{
-                backgroundColor: dept.color ? `${dept.color}20` : '#e5e7eb',
-                color: dept.color || '#6b7280',
+                backgroundColor: deptTint(dept.color, 0.125),
+                borderColor: deptTint(dept.color, 0.25) || 'var(--border-default)',
+                color: dept.color || 'var(--text-tertiary)',
               }}
             >
               {dept.name || config.department}
             </span>
             {/* 多部门标记 */}
             {isMultiDepartment && (
-              <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">
+              <span className="inline-flex items-center px-1.5 py-0.5 text-xs rounded-full border border-border-default text-text-tertiary">
                 +{agentDepts.length - 1} 部门
               </span>
             )}
           </div>
-          <div className="text-sm text-text-secondary">
+          <div className="text-sm text-text-tertiary mt-0.5 truncate">
             {config.title} · {level.name || config.level}
           </div>
           {/* 显示所有部门 */}
           {isMultiDepartment && (
-            <div className="text-xs text-purple-500 dark:text-purple-400 mt-1">
-              跨部门：{agentDepts.map(d => departments.find(dept => dept.id === d)?.name || d).join('、')}
+            <div className="text-xs text-text-quaternary mt-1 truncate">
+              跨部门：{agentDepts.map((d) => departments.find((dep) => dep.id === d)?.name || d).join('、')}
             </div>
           )}
           {modelInfo && (
-            <div className="text-xs text-blue-500 dark:text-blue-400 mt-1 flex items-center gap-1">
+            <div className="text-xs text-text-tertiary mt-1 flex items-center gap-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                />
               </svg>
               {modelInfo.name}
             </div>
           )}
-          {/* 薪资信息 */}
+          {/* 薪资信息（紧凑） */}
           {salaryInfo && (
-            <div className={`text-xs mt-1 flex items-center gap-2 ${salaryInfo.isOverdrawn ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
-              <span>
-                余额: {(salaryInfo.balance || 0).toLocaleString()}
-              </span>
-              <span className="text-text-muted">|</span>
-              <span className="text-text-secondary">
+            <div
+              className={`text-xs mt-1 flex items-center gap-2 ${
+                salaryInfo.isOverdrawn ? 'text-danger' : 'text-success'
+              }`}
+            >
+              <span>余额: {(salaryInfo.balance || 0).toLocaleString()}</span>
+              <span className="text-text-quaternary">|</span>
+              <span className="text-text-tertiary">
                 日薪: {(salaryInfo.dailySalary || 0).toLocaleString()}
               </span>
               {salaryInfo.isOverdrawn && (
-                <span className="px-1.5 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs">
+                <span className="inline-flex items-center px-1 py-0 text-xs rounded border border-danger/30 bg-danger/10 text-danger">
                   透支
                 </span>
               )}
             </div>
           )}
           {config.description && (
-            <div className="text-sm text-text-muted mt-1 truncate">
-              {config.description}
-            </div>
+            <div className="text-sm text-text-quaternary mt-1 truncate">{config.description}</div>
           )}
         </div>
 
         {/* Edit hint */}
-        <div className="text-text-muted">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="text-text-quaternary flex-shrink-0">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
-              strokeWidth={2}
+              strokeWidth={1.5}
               d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
             />
           </svg>
@@ -363,7 +390,7 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
 
   if (!config) return null;
 
-  const dept = departments.find((d) => d.id === config.department) || {};
+  const dept = (Array.isArray(departments) ? departments.find((d) => d.id === config.department) : null) || {};
 
   const handleSave = async () => {
     await onSave(config.id, formData);
@@ -385,32 +412,42 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 w-96 bg-bg-elevated shadow-2xl border-l border-[var(--border-color)] z-50 overflow-auto">
+    <div
+      className="fixed inset-y-0 right-0 w-96 bg-bg-panel border-l border-border-default shadow-dialog z-50 overflow-auto"
+      style={{
+        // Emil: 侧边面板从 translateX(20px)+opacity:0 入场，280ms ease-out
+        animation: 'editPanelEnter 280ms cubic-bezier(0.23,1,0.32,1) both',
+        willChange: 'transform, opacity',
+      }}
+    >
+      <style>{`
+        @keyframes editPanelEnter {
+          from { opacity: 0; transform: translateX(20px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+      `}</style>
       {/* 头部 */}
-      <div
-        className="sticky top-0 p-4 border-b border-[var(--border-color)]"
-        style={{ backgroundColor: `${dept.color}10` }}
-      >
+      <div className="sticky top-0 p-4 border-b border-border-default bg-bg-panel/95 backdrop-blur">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <AgentAvatar
               avatar={config.avatar}
-              fallback="👤"
+              fallback="A"
               size="lg"
-              bgStyle={{ backgroundColor: `${dept.color}20` }}
+              bgStyle={{ backgroundColor: deptTint(dept.color, 0.125) }}
               bgClass=""
             />
-            <div>
-              <div className="font-semibold text-text-primary">{config.name}</div>
-              <div className="text-sm text-text-secondary">{config.title}</div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <div className="text-sm font-medium text-text-primary truncate">{config.name}</div>
+                <StatusBadge status={config.status} />
+              </div>
+              <div className="text-sm text-text-tertiary truncate">{config.title}</div>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-text-secondary hover:text-text-primary rounded-lg hover:bg-[var(--bg-hover)]"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          <button onClick={onClose} className="btn-ghost p-1.5">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
@@ -420,15 +457,13 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
       <div className="p-4 space-y-4">
         {/* 头像 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            头像
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">头像</label>
           <div className="flex items-center gap-3">
             <AgentAvatar
               avatar={formData.avatar}
-              fallback="👤"
+              fallback="A"
               size="xl"
-              bgStyle={{ backgroundColor: `${dept.color}20` }}
+              bgStyle={{ backgroundColor: deptTint(dept.color, 0.125) }}
               bgClass=""
             />
             <div className="flex-1 space-y-2">
@@ -440,15 +475,15 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
                     setFormData({ ...formData, avatar: result.avatarPath });
                   }
                 }}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-[var(--border-color)] text-text-secondary hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] hover:bg-[var(--color-primary)]/5 transition-colors"
+                className="btn-ghost w-full justify-center border-dashed"
               >
-                📷 上传图片头像
+                上传图片头像
               </button>
               {isImageAvatar(formData.avatar) ? (
                 <button
                   type="button"
                   onClick={() => setFormData({ ...formData, avatar: '' })}
-                  className="w-full px-3 py-1.5 text-xs rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
+                  className="btn-ghost w-full text-xs text-text-tertiary hover:text-danger"
                 >
                   移除图片，恢复为 Emoji
                 </button>
@@ -457,9 +492,8 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
                   type="text"
                   value={formData.avatar}
                   onChange={(e) => setFormData({ ...formData, avatar: e.target.value })}
-                  placeholder="👤 输入 Emoji"
-                  className="w-full px-3 py-1.5 rounded-lg border border-[var(--border-color)]
-                           bg-bg-elevated text-text-primary text-center text-lg"
+                  placeholder="输入 Emoji 或符号"
+                  className="input text-center text-base"
                 />
               )}
             </div>
@@ -468,111 +502,92 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
 
         {/* 名字 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            名字
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">名字</label>
           <input
             type="text"
             value={formData.name}
             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary"
+            className="input"
           />
         </div>
 
         {/* 职位头衔 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            职位头衔
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">职位头衔</label>
           <input
             type="text"
             value={formData.title}
             onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary"
+            className="input"
           />
         </div>
 
         {/* 部门 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            所属部门
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">所属部门</label>
           <select
             value={formData.department}
             onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary"
+            className="input"
           >
-            {departments.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
+            {Array.isArray(departments) &&
+              departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
           </select>
         </div>
 
         {/* 职级 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            职级
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">职级</label>
           <select
             value={formData.level}
             onChange={(e) => setFormData({ ...formData, level: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary"
+            className="input"
           >
-            {levels.map((l) => (
-              <option key={l.id} value={l.id}>
-                {l.name} (Rank: {l.rank})
-              </option>
-            ))}
+            {Array.isArray(levels) &&
+              levels.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name} (Rank: {l.rank})
+                </option>
+              ))}
           </select>
         </div>
 
         {/* 职责描述 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            职责描述
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">职责描述</label>
           <textarea
             value={formData.description}
             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
             rows={3}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary resize-none"
+            className="input resize-none"
           />
         </div>
 
         {/* AI 模型 */}
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1">
-            AI 模型
-          </label>
+          <label className="block text-sm text-text-secondary mb-1">AI 模型</label>
           <select
             value={formData.model}
             onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg border border-[var(--border-color)]
-                     bg-bg-elevated text-text-primary"
+            className="input"
           >
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name} ({m.provider})
-              </option>
-            ))}
+            {Array.isArray(models) &&
+              models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name} ({m.provider})
+                </option>
+              ))}
           </select>
-          <p className="mt-1 text-xs text-text-secondary">
-            选择此 Agent 使用的 AI 模型
-          </p>
+          <p className="mt-1 text-xs text-text-tertiary">选择此 Agent 使用的 AI 模型</p>
         </div>
 
         {/* 汇报关系说明 */}
-        <div className="p-3 bg-bg-muted rounded-lg">
-          <div className="text-xs text-text-secondary uppercase tracking-wider mb-1">
-            汇报关系
-          </div>
+        <div className="card">
+          <div className="text-xs text-text-tertiary uppercase tracking-wider mb-1">汇报关系</div>
           <div className="text-sm text-text-primary">
             {formData.level === 'c_level' ? (
               <span>直接向 <strong>老板</strong> 汇报</span>
@@ -584,24 +599,75 @@ function EditPanel({ config, levels, departments, models, onSave, onReset, onClo
       </div>
 
       {/* 操作按钮 */}
-      <div className="sticky bottom-0 p-4 bg-bg-elevated border-t border-[var(--border-color)]">
+      <div className="sticky bottom-0 p-4 bg-bg-panel border-t border-border-default">
         <div className="flex items-center justify-between">
           <button
             onClick={handleReset}
             disabled={saving}
-            className="text-sm text-text-secondary hover:text-text-primary"
+            className="text-sm text-text-tertiary hover:text-text-primary transition-colors-fast"
           >
             恢复默认
           </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-6 py-2 bg-[var(--color-primary)] text-white rounded-lg hover:bg-[var(--color-primary-hover)]
-                     disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <button onClick={handleSave} disabled={saving} className="btn-primary px-6 py-2">
             {saving ? '保存中...' : '保存修改'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 薪资配置紧凑表格
+ */
+function SalaryTable({ salaryData, configs }) {
+  if (!salaryData) return null;
+  const entries = Array.isArray(configs)
+    ? configs.map((c) => ({ config: c, salary: salaryData[c.id] })).filter((e) => e.salary)
+    : [];
+  if (entries.length === 0) return null;
+  return (
+    <div className="panel">
+      <div className="p-4 border-b border-border-default">
+        <h2 className="text-sm font-title tracking-tight text-text-primary">薪资配置</h2>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-text-tertiary text-xs uppercase tracking-wider">
+              <th className="text-left font-normal px-4 py-2">姓名</th>
+              <th className="text-right font-normal px-4 py-2">日薪</th>
+              <th className="text-right font-normal px-4 py-2">余额</th>
+              <th className="text-left font-normal px-4 py-2">状态</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border-default">
+            {entries.map(({ config, salary }) => (
+              <tr key={config.id} className="hover:bg-bg-hover transition-colors-fast">
+                <td className="px-4 py-2 text-text-primary">{config.name}</td>
+                <td className="px-4 py-2 text-right text-text-secondary font-mono">
+                  {(salary.dailySalary || 0).toLocaleString()}
+                </td>
+                <td
+                  className={`px-4 py-2 text-right font-mono ${
+                    salary.isOverdrawn ? 'text-danger' : 'text-text-secondary'
+                  }`}
+                >
+                  {(salary.balance || 0).toLocaleString()}
+                </td>
+                <td className="px-4 py-2">
+                  {salary.isOverdrawn ? (
+                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs rounded border border-danger/30 bg-danger/10 text-danger">
+                      透支
+                    </span>
+                  ) : (
+                    <span className="text-text-tertiary text-xs">正常</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -623,6 +689,7 @@ export default function AgentSettings({ onBack }) {
 
   // 加载数据
   useEffect(() => {
+    let retryTimer = null;
     const loadData = async () => {
       try {
         const [configsData, levelsData, deptsData, modelsData, salaryConfig] = await Promise.all([
@@ -632,11 +699,13 @@ export default function AgentSettings({ onBack }) {
           window.electronAPI.getAvailableModels(),
           window.electronAPI.getSalaryConfig?.(),
         ]);
-        setConfigs(configsData);
-        setLevels(levelsData);
-        setDepartments(deptsData);
-        setModels(modelsData || []);
-        
+        // 防御：确保 configsData 是数组（公司切换瞬间 IPC 可能返回空/旧数据）
+        const safeConfigs = Array.isArray(configsData) ? configsData : [];
+        setConfigs(safeConfigs);
+        setLevels(Array.isArray(levelsData) ? levelsData : []);
+        setDepartments(Array.isArray(deptsData) ? deptsData : []);
+        setModels(Array.isArray(modelsData) ? modelsData : []);
+
         // 将薪资数据转换为 map 格式
         if (salaryConfig?.employeeSalaries) {
           const salaryMap = {};
@@ -645,13 +714,22 @@ export default function AgentSettings({ onBack }) {
           });
           setSalaryData(salaryMap);
         }
+        return { empty: safeConfigs.length === 0 };
       } catch (error) {
         console.error('加载 Agent 配置失败:', error);
+        return { empty: true };
       } finally {
         setLoading(false);
       }
     };
-    loadData();
+    let loaded = false;
+    loadData().then((result) => {
+      loaded = true;
+      // 公司切换时序兜底：如果首次加载返回空 configs，延迟重试一次
+      if (result && result.empty) {
+        retryTimer = setTimeout(() => loadData(), 500);
+      }
+    });
 
     // 订阅后端配置变更（开除/停职/复职/新增等），实时更新架构图
     const unsubscribe = window.electronAPI?.onAgentConfigChanged?.((newConfigs) => {
@@ -659,12 +737,15 @@ export default function AgentSettings({ onBack }) {
         setConfigs(newConfigs);
       }
     });
-    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   // 过滤已开除的 Agent（架构图和列表只显示在职 + 停职人员）
   const activeConfigs = useMemo(
-    () => configs.filter((c) => (c.status || 'active') !== 'terminated'),
+    () => (Array.isArray(configs) ? configs.filter((c) => (c.status || 'active') !== 'terminated') : []),
     [configs]
   );
 
@@ -675,7 +756,7 @@ export default function AgentSettings({ onBack }) {
       const result = await window.electronAPI.updateAgentConfig(agentId, updates);
       if (result.success && result.config) {
         setConfigs((prev) =>
-          prev.map((c) => (c.id === agentId ? result.config : c))
+          (Array.isArray(prev) ? prev : []).map((c) => (c.id === agentId ? result.config : c))
         );
       }
     } catch (error) {
@@ -692,7 +773,7 @@ export default function AgentSettings({ onBack }) {
       const result = await window.electronAPI.resetAgentConfig(agentId);
       if (result.success && result.config) {
         setConfigs((prev) =>
-          prev.map((c) => (c.id === agentId ? result.config : c))
+          (Array.isArray(prev) ? prev : []).map((c) => (c.id === agentId ? result.config : c))
         );
         return result.config;
       }
@@ -704,12 +785,23 @@ export default function AgentSettings({ onBack }) {
     return null;
   }, []);
 
-  const selectedConfig = configs.find((c) => c.id === selectedId);
+  const selectedConfig = Array.isArray(configs) ? configs.find((c) => c.id === selectedId) : null;
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-text-secondary">加载中...</div>
+      <div className="flex items-center justify-center h-full bg-bg-base">
+        <div
+          className="text-text-secondary text-sm"
+          style={{ animation: 'agentSettingsLoaderEnter 280ms cubic-bezier(0.23,1,0.32,1) both' }}
+        >
+          加载中...
+        </div>
+        <style>{`
+          @keyframes agentSettingsLoaderEnter {
+            from { opacity: 0; transform: scale(0.95); }
+            to   { opacity: 1; transform: scale(1); }
+          }
+        `}</style>
       </div>
     );
   }
@@ -726,7 +818,7 @@ export default function AgentSettings({ onBack }) {
       acc[deptId].push({
         ...config,
         isPrimaryDepartment: deptId === deptIds[0],
-        crossDepartments: deptIds.filter(d => d !== deptId),
+        crossDepartments: deptIds.filter((d) => d !== deptId),
         isMultiDepartment: deptIds.length > 1,
       });
     }
@@ -748,30 +840,30 @@ export default function AgentSettings({ onBack }) {
         {/* 头部 */}
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-2xl font-bold text-text-primary">组织架构</h1>
-            <p className="text-text-secondary mt-1">
+            <h1 className="text-2xl font-title tracking-tighter text-text-primary">组织架构</h1>
+            <p className="text-text-secondary text-sm mt-1">
               可视化管理团队成员，点击人员卡片编辑信息
             </p>
           </div>
           <div className="flex items-center gap-4">
             {/* 视图切换 */}
-            <div className="flex items-center bg-bg-muted rounded-lg p-1">
+            <div className="flex items-center rounded-md border border-border-default p-0.5 bg-bg-hover/50">
               <button
                 onClick={() => setViewMode('chart')}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                className={`px-3 py-1 text-sm rounded-sm transition-colors-fast ${
                   viewMode === 'chart'
-                    ? 'bg-bg-elevated text-text-primary shadow-sm'
-                    : 'text-text-secondary'
+                    ? 'bg-bg-surface text-text-primary'
+                    : 'text-text-tertiary hover:text-text-primary'
                 }`}
               >
                 架构图
               </button>
               <button
                 onClick={() => setViewMode('list')}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                className={`px-3 py-1 text-sm rounded-sm transition-colors-fast ${
                   viewMode === 'list'
-                    ? 'bg-bg-elevated text-text-primary shadow-sm'
-                    : 'text-text-secondary'
+                    ? 'bg-bg-surface text-text-primary'
+                    : 'text-text-tertiary hover:text-text-primary'
                 }`}
               >
                 列表
@@ -779,60 +871,113 @@ export default function AgentSettings({ onBack }) {
             </div>
 
             {onBack && (
-              <button
-                onClick={onBack}
-                className="px-4 py-2 text-text-secondary hover:text-text-primary"
-              >
-                ← 返回
+              <button onClick={onBack} className="btn-ghost">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 19l-7-7 7-7" />
+                </svg>
+                返回
               </button>
             )}
           </div>
         </div>
 
-        {/* 组织架构图视图 */}
-        {viewMode === 'chart' && (
-          <OrgChart
-            configs={activeConfigs}
-            levels={levels}
-            departments={departments}
-            onSelectMember={(member) => setSelectedId(member.id)}
-            selectedId={selectedId}
-          />
+        {/* 组织架构图视图 — OrgChart 容器用 .panel，节点用 .card */}
+        {viewMode === 'chart' && activeConfigs.length > 0 && (
+          <div className="panel p-6 mb-6">
+            <OrgChart
+              configs={activeConfigs}
+              levels={levels}
+              departments={departments}
+              onSelectMember={(member) => setSelectedId(member.id)}
+              selectedId={selectedId}
+            />
+          </div>
+        )}
+        {viewMode === 'chart' && activeConfigs.length === 0 && (
+          <div className="panel p-8 mb-6 text-center">
+            <p className="text-sm text-text-tertiary">暂无成员，在运营仪表板中招募新员工</p>
+          </div>
         )}
 
-        {/* 列表视图 */}
+        {/* 列表视图 — 紧凑列表，选中态用 accent 半透明背景 */}
         {viewMode === 'list' && (
-          <div className="space-y-8">
+          <div className="space-y-6">
             {Object.entries(groupedConfigs).map(([deptId, deptConfigs]) => {
-              const dept = departments.find((d) => d.id === deptId) || { name: '其他', color: '#6b7280' };
+              const dept =
+                (Array.isArray(departments) ? departments.find((d) => d.id === deptId) : null) ||
+                { name: '其他', color: 'var(--text-tertiary)' };
               return (
                 <div key={deptId}>
-                  <div className="flex items-center gap-2 mb-4">
-                    <div
-                      className="w-3 h-3 rounded-full"
-                      style={{ backgroundColor: dept.color }}
-                    />
-                    <h2 className="text-lg font-semibold text-text-primary">
-                      {dept.name}
-                    </h2>
-                    <span className="text-sm text-text-secondary">
-                      ({deptConfigs.length} 人)
-                    </span>
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: dept.color }} />
+                    <h2 className="text-sm font-title tracking-tight text-text-primary">{dept.name}</h2>
+                    <span className="text-sm text-text-tertiary">({deptConfigs.length} 人)</span>
                   </div>
-                  <div className="space-y-3">
-                    {deptConfigs.sort(sortByLevel).map((config) => (
-                      <AgentCard
-                        key={config.id}
-                        config={config}
-                        levels={levels}
-                        departments={departments}
-                        models={models}
-                        onSave={handleSave}
-                        onReset={handleReset}
-                        saving={saving}
-                        salaryInfo={salaryData[config.id]}
-                      />
-                    ))}
+                  <div className="space-y-2">
+                    {[...deptConfigs].sort(sortByLevel).map((config) => {
+                      const isSelected = config.id === selectedId;
+                      return (
+                        <div
+                          key={config.id}
+                          onClick={() => setSelectedId(config.id)}
+                          className={`card card-hover cursor-pointer relative overflow-hidden transition-colors-fast ${
+                            isSelected ? 'border-accent/40 bg-accent-subtle' : ''
+                          }`}
+                        >
+                          {/* Emil: 选中态竖线 scaleX 入场（accent，transform-origin top） */}
+                          {isSelected && (
+                            <span
+                              aria-hidden
+                              className="absolute left-0 top-0 bottom-0 w-[2px]"
+                              style={{
+                                backgroundColor: 'var(--accent)',
+                                transformOrigin: 'top center',
+                                animation: 'agentSelectedBarEnter 220ms cubic-bezier(0.23,1,0.32,1) both',
+                                willChange: 'transform',
+                              }}
+                            />
+                          )}
+                          <div className="flex items-center gap-3">
+                            <AgentAvatar
+                              avatar={config.avatar}
+                              fallback="A"
+                              size="md"
+                              bgStyle={{
+                                backgroundColor: deptTint(dept.color, 0.125),
+                              }}
+                              bgClass=""
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="text-sm font-medium text-text-primary truncate">
+                                  {config.name}
+                                </h3>
+                                <StatusBadge status={config.status} />
+                                <span className="text-sm text-text-tertiary truncate">
+                                  {config.title}
+                                </span>
+                              </div>
+                              <div className="text-xs text-text-quaternary mt-0.5">
+                                {levels.find((l) => l.id === config.level)?.name || config.level}
+                              </div>
+                            </div>
+                            <svg
+                              className="w-4 h-4 text-text-quaternary flex-shrink-0"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={1.5}
+                                d="M9 5l7 7-7 7"
+                              />
+                            </svg>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -840,20 +985,30 @@ export default function AgentSettings({ onBack }) {
           </div>
         )}
 
-        {/* 提示 */}
-        <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+        {/* 薪资配置紧凑表格 */}
+        <div className="mt-6">
+          <SalaryTable salaryData={salaryData} configs={activeConfigs} />
+        </div>
+
+        {/* 提示 — 去掉蓝色，用 .card 中性风格 */}
+        <div className="mt-6 card">
           <div className="flex items-start gap-3">
-            <svg className="w-5 h-5 text-blue-500 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg
+              className="w-4 h-4 text-text-tertiary mt-0.5 flex-shrink-0"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                strokeWidth={2}
+                strokeWidth={1.5}
                 d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
               />
             </svg>
-            <div className="text-sm text-blue-700 dark:text-blue-300">
-              <p className="font-medium">关于汇报关系</p>
-              <p className="mt-1 text-blue-600 dark:text-blue-400">
+            <div className="text-sm text-text-secondary">
+              <p className="font-medium text-text-primary">关于汇报关系</p>
+              <p className="mt-1 text-text-tertiary">
                 C-Level 高管直接向老板汇报，其他成员向所在部门的负责人（最高职级者）汇报。
                 在对话中提到某人时，Agent 会自动识别其身份和所属部门。
               </p>
@@ -867,7 +1022,7 @@ export default function AgentSettings({ onBack }) {
         <>
           {/* 遮罩 */}
           <div
-            className="fixed inset-0 bg-black/30 z-40"
+            className="fixed inset-0 bg-black/40 z-40"
             onClick={() => setSelectedId(null)}
           />
           <EditPanel
@@ -882,6 +1037,14 @@ export default function AgentSettings({ onBack }) {
           />
         </>
       )}
+
+      {/* Emil: 选中态竖线 scaleX 入场 keyframes（仅本页局部） */}
+      <style>{`
+        @keyframes agentSelectedBarEnter {
+          from { opacity: 0; transform: scaleY(0); }
+          to   { opacity: 1; transform: scaleY(1); }
+        }
+      `}</style>
     </div>
   );
 }

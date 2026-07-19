@@ -18,6 +18,10 @@ function setupChatIpcHandlers(webContents) {
   // 设置 webContents 用于流式推送
   chatManager.setWebContents(webContents);
 
+  // Phase 3-A：为 GroupQueue 注入 webContents（群聊消息落库后推 UI 用）
+  const { groupQueue } = require('./chat/group-queue');
+  groupQueue.setWebContents(webContents);
+
   // 处理聊天消息（非流式，保留兼容）
   ipcMain.handle(CHANNELS.CHAT_SEND_MESSAGE, async (_event, request) => {
     logger.info('Chat IPC: 收到消息', {
@@ -161,7 +165,8 @@ function setupChatIpcHandlers(webContents) {
     }
 
     // 2) 走主流程发送（内部会再做一次成员/冷却过滤，双重保险）
-    const result = departmentGroup.postToDepartment(
+    // Phase 3-A：postToDepartment 内部走 groupQueue.submit（落库 + 推 UI + 排队触发）
+    const result = await departmentGroup.postToDepartment(
       departmentId,
       senderId,
       content,
@@ -180,6 +185,43 @@ function setupChatIpcHandlers(webContents) {
       rejectedMentions: result.rejectedMentions,
     };
   });
+
+  // ── Phase 3-B：渲染进程把群聊消息提交到主进程 GroupQueue ────────
+  // 渲染进程不再做连锁触发，用户在群聊发言通过此 invoke 提交给主进程 GroupQueue，
+  // 由 GroupQueue 负责：消息落库 + 推 UI + 排队触发被 @ 的 Agent（串行）。
+  // senderId 为 'user' 时直接走 groupQueue.submit（不做 Agent 鉴权，用户可在任意群聊发言）。
+  ipcMain.handle(CHANNELS.CHAT_GROUP_QUEUE_SUBMIT, async (_event, request) => {
+    const { conversationId, senderId, content, mentions, senderName } = request || {};
+
+    if (!conversationId || !senderId || !content) {
+      return { success: false, error: '参数不完整：需要 conversationId、senderId、content' };
+    }
+
+    // 用户发言直接走 groupQueue.submit；Agent 发言已通过 post_to_group 工具闭环
+    const result = await groupQueue.submit({
+      conversationId,
+      senderId,
+      content,
+      mentions: Array.isArray(mentions) ? mentions : [],
+      senderName,
+    });
+
+    if (!result.success) {
+      return { success: false, error: result.error || '群聊消息提交失败' };
+    }
+
+    return { success: true };
+  });
+
+  // ── Phase 3-B：群聊中止（肃静） ─────────────────────────────────
+  // 渲染进程通过此 invoke 通知主进程 GroupQueue 肃静某群聊，
+  // 清空该群聊的待执行项并标记为已中止，后续 submit 不再排队触发。
+  ipcMain.handle(CHANNELS.CHAT_GROUP_QUEUE_ABORT, async (_event, conversationId) => {
+    if (!conversationId) {
+      return { success: false, error: '缺少 conversationId' };
+    }
+    return groupQueue.abort(conversationId);
+  });
 }
 
 /**
@@ -195,6 +237,8 @@ function removeChatIpcHandlers() {
   ipcMain.removeHandler(CHANNELS.TERMINATION_CLEAR_PROCESSED);
   ipcMain.removeHandler(CHANNELS.CHAT_DEPT_GROUP_GET_ALL);
   ipcMain.removeHandler('chat:dept-group-post');
+  ipcMain.removeHandler(CHANNELS.CHAT_GROUP_QUEUE_SUBMIT);
+  ipcMain.removeHandler(CHANNELS.CHAT_GROUP_QUEUE_ABORT);
 }
 
 module.exports = {

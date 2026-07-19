@@ -1,6 +1,6 @@
 /**
  * SoloForge - 登录/注册页面
- * 全屏居中卡片布局
+ * 全屏居中卡片布局，Linear 风格（暗色优先、accent 靛紫、细边框）
  */
 import { useState, useCallback } from 'react';
 import { useAuthStore } from '../store/auth-store';
@@ -51,31 +51,48 @@ export default function LoginPage() {
 
   return (
     <div className="flex items-center justify-center min-h-screen bg-bg-base">
-      {/* Background decoration */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-blue-500/5 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-purple-500/5 rounded-full blur-3xl" />
-      </div>
-
-      <div className="relative w-full max-w-md mx-4">
-        {/* Logo area */}
+      <div
+        className="relative w-full max-w-md mx-4"
+        style={{
+          // Emil: 弹窗从 scale(0.95)+opacity:0 入场，300ms cubic-bezier(0.23,1,0.32,1)
+          animation: 'loginCardEnter 300ms cubic-bezier(0.23,1,0.32,1) both',
+        }}
+      >
+        {/* 标题区：Inter 32px / weight 590 / 负字距 */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-500/10 rounded-2xl mb-4">
-            <span className="text-3xl">🏢</span>
-          </div>
-          <h1 className="text-2xl font-bold text-text-primary">SoloForge</h1>
-          <p className="text-sm text-text-secondary mt-1">AI 多 Agent 企业协作平台</p>
+          <h1
+            className="text-[32px] font-title tracking-tightest text-text-primary"
+            style={{ letterSpacing: '-0.704px' }}
+          >
+            SoloForge
+          </h1>
+          <p className="text-sm text-text-secondary mt-2">AI 多 Agent 企业协作平台</p>
         </div>
 
-        {/* Card */}
-        <div className="bg-bg-elevated rounded-2xl shadow-xl border border-border-primary p-8">
-          <h2 className="text-xl font-semibold text-text-primary mb-6">
+        {/* 登录卡片：半透明背景 + 细边框 + 12px 圆角 */}
+        <div className="surface glass-enter rounded-xl p-8">
+          <h2 className="text-base font-ui text-text-primary mb-6">
             {mode === 'login' ? '登录' : '注册账号'}
           </h2>
+          {/* 入场动画 keyframes（仅本页局部，不污染全局） */}
+          <style>{`
+            @keyframes loginCardEnter {
+              from { opacity: 0; transform: scale(0.95); }
+              to   { opacity: 1; transform: scale(1); }
+            }
+            .login-input {
+              transition: border-color 160ms cubic-bezier(0.23,1,0.32,1),
+                          box-shadow 160ms cubic-bezier(0.23,1,0.32,1),
+                          transform 160ms cubic-bezier(0.23,1,0.32,1);
+            }
+            .login-input:focus {
+              transform: translateY(-1px);
+            }
+          `}</style>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-text-secondary mb-1.5">
+              <label className="block text-xs font-ui text-text-tertiary mb-1.5">
                 用户名
               </label>
               <input
@@ -85,16 +102,13 @@ export default function LoginPage() {
                 required
                 minLength={2}
                 autoFocus
-                className="w-full px-4 py-2.5 bg-bg-base border border-border-primary rounded-xl
-                         text-text-primary placeholder-text-muted
-                         focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 outline-none
-                         transition-all duration-200"
+                className="input login-input"
                 placeholder="请输入用户名"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-text-secondary mb-1.5">
+              <label className="block text-xs font-ui text-text-tertiary mb-1.5">
                 密码
               </label>
               <input
@@ -103,17 +117,14 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 minLength={4}
-                className="w-full px-4 py-2.5 bg-bg-base border border-border-primary rounded-xl
-                         text-text-primary placeholder-text-muted
-                         focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 outline-none
-                         transition-all duration-200"
+                className="input login-input"
                 placeholder="请输入密码"
               />
             </div>
 
             {mode === 'register' && (
               <div>
-                <label className="block text-sm font-medium text-text-secondary mb-1.5">
+                <label className="block text-xs font-ui text-text-tertiary mb-1.5">
                   确认密码
                 </label>
                 <input
@@ -122,32 +133,41 @@ export default function LoginPage() {
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
                   minLength={4}
-                  className="w-full px-4 py-2.5 bg-bg-base border border-border-primary rounded-xl
-                           text-text-primary placeholder-text-muted
-                           focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 outline-none
-                           transition-all duration-200"
+                  className="input login-input"
                   placeholder="再次输入密码"
                 />
               </div>
             )}
 
             {error && (
-              <div className="px-4 py-2.5 bg-red-500/10 border border-red-500/20 rounded-xl">
-                <p className="text-sm text-red-500">{error}</p>
-              </div>
+              <p className="text-sm text-danger">{error}</p>
             )}
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800
-                       text-white font-medium rounded-xl shadow-lg shadow-blue-500/25
-                       disabled:opacity-50 disabled:cursor-not-allowed
-                       transition-all duration-200 mt-2"
+              className="btn-primary w-full py-2.5 mt-2"
             >
               {loading ? (
                 <span className="inline-flex items-center gap-2">
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <svg
+                    className="w-4 h-4 animate-spin"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12" cy="12" r="10"
+                      stroke="currentColor" strokeWidth="4"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                    />
+                  </svg>
                   处理中...
                 </span>
               ) : (
@@ -159,7 +179,7 @@ export default function LoginPage() {
           <div className="mt-6 text-center">
             <button
               onClick={switchMode}
-              className="text-sm text-blue-500 hover:text-blue-400 transition-colors"
+              className="text-sm text-accent hover:text-accent-hover transition-colors"
             >
               {mode === 'login' ? '没有账号？点击注册' : '已有账号？点击登录'}
             </button>

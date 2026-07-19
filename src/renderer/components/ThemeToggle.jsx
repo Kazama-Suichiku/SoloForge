@@ -1,6 +1,7 @@
 /**
  * 深色/浅色模式切换按钮
  * 切换时更新 document.documentElement 的 class
+ * Linear 风格：使用 .btn-ghost 通用类。
  * @module components/ThemeToggle
  */
 
@@ -19,12 +20,12 @@ export default function ThemeToggle({ className = '' }) {
   useEffect(() => {
     const root = document.documentElement;
     if (isDark) {
-      root.classList.add('dark');
+      root.classList.remove('light');
       root.setAttribute('data-theme', 'dark');
       localStorage.setItem(STORAGE_KEY, 'dark');
     } else {
-      root.classList.remove('dark');
-      root.removeAttribute('data-theme');
+      root.classList.add('light');
+      root.setAttribute('data-theme', 'light');
       localStorage.setItem(STORAGE_KEY, 'light');
     }
   }, [isDark]);
@@ -33,25 +34,12 @@ export default function ThemeToggle({ className = '' }) {
     <button
       type="button"
       onClick={() => setIsDark((v) => !v)}
-      className={`
-        inline-flex items-center justify-center rounded-lg p-2
-        text-[var(--text-secondary)] hover:text-[var(--text-primary)]
-        hover:bg-[var(--bg-elevated)] focus:outline-none
-        focus:ring-2 focus:ring-[var(--color-primary)] focus:ring-offset-2
-        focus:ring-offset-[var(--bg-base)]
-        transition-theme
-        ${className}
-      `.trim().replace(/\s+/g, ' ')}
+      className={`btn-ghost p-1.5 ${className}`}
       title={isDark ? '切换到浅色模式' : '切换到深色模式'}
       aria-label={isDark ? '切换到浅色模式' : '切换到深色模式'}
     >
       {isDark ? (
-        <svg
-          className="h-5 w-5"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
           <path
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -60,12 +48,7 @@ export default function ThemeToggle({ className = '' }) {
           />
         </svg>
       ) : (
-        <svg
-          className="h-5 w-5"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
           <path
             strokeLinecap="round"
             strokeLinejoin="round"

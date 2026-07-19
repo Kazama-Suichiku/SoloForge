@@ -19,9 +19,27 @@
 - [x] P3-E DI 容器（app-context 97→220行 register/get/override/restore + DEPENDENCIES 映射 + lifecycle/ipc-bootstrap 适配 + 向后兼容）
 - 集成：device-manager.js fetchDevices/removeDevice 对接 Worker /devices 端点（从占位变真实远程调用）
 
-### 批次 3（单独）
-- [ ] P3-F i18n（renderer/i18n + 组件字符串提取）
-- [ ] P3-G 移动端入库（git 操作）
+### 批次 3 — 暂缓
+- [~] P3-F i18n：47 个 renderer 文件含中文，范围太广不宜并行，建议单独任务后续做
+- [~] P3-G 移动端入库：移动端 repo 有 53K+ tracked 文件（含 build 产物和 APK），需先整理 .gitignore 清理，不宜自动入库
+
+## 前端重构（Linear 风格 + emil 精修）
+
+### 批次 1（Linear token 换色）— COMPLETE
+- [x] A: globals.css + tailwind + 字体
+- [x] B: ChatView + ConversationList + NewChatDialog
+- [x] C: MessageBubble + ChatInput
+
+### 批次 2（Linear 风格组件重构）— COMPLETE
+- [x] D: Dashboard + dashboard 子组件
+- [x] E: Settings + AgentSettings
+- [x] F: 登录页 + 公司选择页 + 通用组件 + 同步面板 + 设备管理
+
+### emil 精修批次（unseen details compound）— RUNNING (deleg_d6b52d69)
+- [ ] A: globals.css + ui 组件—— 压迫反馈/缓动曲线/starting-style
+- [ ] B: 聊天界面系列 —— 入场动画/微交互质感
+- [ ] C: 页面类组件 —— 入场动画/微交互质感
 
 ## 完成记录
-（任务完成后追加：Task N: complete (commits, review clean)）
+Phase 3 批次 1+2 完成（commit + push），Worker 重新部署（/devices + 限流）。
+i18n 和移动端入库暂缓，作为后续独立任务。

@@ -1,30 +1,24 @@
 /**
  * SoloForge - 同步状态轻量指示器
  *
- * 设计：小图标 + 文字，适合放在标题栏 / 侧边栏。
+ * 设计：小圆点 + 文字，适合放在标题栏 / 侧边栏。
  * 点击展开 SyncPanel（浮窗模式，fixed 定位）。
  *
  * 状态显示规则（派生自 sync-store）：
- *   syncing       → 旋转图标 + "同步中"
- *   needsReauth   → 警告图标（琥珀色）+ "需登录"
- *   error/failed  → 警告图标（红色）+ "同步失败"
- *   configured    → 勾选图标（绿色）+ 上次同步相对时间
- *   未配置         → 云图标（灰色）+ "未配置"（点击展开面板引导登录）
+ *   syncing       → 橙色脉冲圆点 + "同步中"
+ *   needsReauth   → 琥珀色圆点 + "需登录"
+ *   error/failed  → 红色圆点 + "同步失败"
+ *   configured    → 绿色圆点 + 上次同步相对时间
+ *   未配置         → 灰色圆点 + "未配置"（点击展开面板引导登录）
  *
  * 旧组件通过轮询 window.electronAPI.sync.getStatus 自管状态；本重写改用 sync-store
  * 单一数据源，避免与 SyncPanel 重复请求。挂载时启动 store 轮询。
  *
+ * Linear 风格：紧凑圆点指示器。
  * @module components/sync/SyncStatus
  */
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import {
-  ArrowPathIcon,
-  CloudIcon,
-  CheckCircleIcon,
-  ExclamationCircleIcon,
-  ExclamationTriangleIcon,
-} from '@heroicons/react/24/outline';
 import { useSyncStore } from '../../store/sync-store';
 import SyncPanel from './SyncPanel';
 
@@ -48,9 +42,29 @@ function relativeTime(lastSyncAt) {
   return new Date(ts).toLocaleDateString();
 }
 
+/** 状态圆点 */
+function Dot({ variant }) {
+  const colorMap = {
+    synced: 'var(--color-success)',
+    syncing: 'var(--color-warning)',
+    error: 'var(--color-danger)',
+    reauth: 'var(--color-warning)',
+    unconfigured: 'var(--text-quaternary)',
+  };
+  const color = colorMap[variant] || colorMap.unconfigured;
+  const pulse = variant === 'syncing' ? 'animate-pulse' : '';
+  return (
+    <span
+      className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${pulse}`}
+      style={{ backgroundColor: color }}
+      aria-hidden="true"
+    />
+  );
+}
+
 /**
  * @param {Object} props
- * @param {boolean} [props.compact=false] - 紧凑模式：仅图标，无文字
+ * @param {boolean} [props.compact=false] - 紧凑模式：仅圆点，无文字
  * @param {string} [props.className]
  * @param {'right'|'left'|'center'} [props.panelAlign='right'] - 浮窗水平对齐
  */
@@ -92,31 +106,26 @@ export default function SyncStatus({ compact = false, className = '', panelAlign
   const isConfigured = !!syncStatus?.configured;
   const hasError = !!error || (lastResult && lastResult.success === false && !lastResult.skipped);
 
-  let Icon = CloudIcon;
-  let iconCls = 'text-[var(--text-tertiary)]';
+  let variant = 'unconfigured';
   let label = '未配置';
-  let labelCls = 'text-[var(--text-tertiary)]';
+  let labelCls = 'text-text-tertiary';
 
   if (needsReauth) {
-    Icon = ExclamationTriangleIcon;
-    iconCls = 'text-amber-500';
+    variant = 'reauth';
     label = '需登录';
-    labelCls = 'text-amber-600 dark:text-amber-400';
+    labelCls = 'text-warning';
   } else if (syncing) {
-    Icon = ArrowPathIcon;
-    iconCls = 'text-[var(--color-primary)] animate-spin';
+    variant = 'syncing';
     label = '同步中';
-    labelCls = 'text-[var(--text-secondary)]';
+    labelCls = 'text-text-secondary';
   } else if (hasError) {
-    Icon = ExclamationCircleIcon;
-    iconCls = 'text-red-500';
+    variant = 'error';
     label = '同步失败';
-    labelCls = 'text-red-600 dark:text-red-400';
+    labelCls = 'text-danger';
   } else if (isConfigured) {
-    Icon = CheckCircleIcon;
-    iconCls = 'text-green-500';
+    variant = 'synced';
     label = relativeTime(syncStatus?.lastSyncAt);
-    labelCls = 'text-[var(--text-secondary)]';
+    labelCls = 'text-text-secondary';
   }
 
   // ─── 浮窗定位 ─────────────────────────────────────────────
@@ -131,12 +140,12 @@ export default function SyncStatus({ compact = false, className = '', panelAlign
         type="button"
         onClick={togglePanel}
         className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs
-                   hover:bg-[var(--bg-elevated)] transition-colors
-                   focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                   hover:bg-bg-hover transition-colors
+                   focus:outline-none focus:ring-2 focus:ring-accent"
         aria-label={`云同步：${label}（点击${panelOpen ? '关闭' : '展开'}面板）`}
         aria-expanded={panelOpen}
       >
-        <Icon className={`w-4 h-4 ${iconCls}`} aria-hidden="true" />
+        <Dot variant={variant} />
         {!compact && (
           <span className={labelCls}>{label}</span>
         )}

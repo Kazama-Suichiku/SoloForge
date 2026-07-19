@@ -43,6 +43,10 @@ function safeHandler(fn, options = {}) {
     return withTraceId(traceId, async () => {
       try {
         const result = await fn(event, ...args);
+        // 数组直接返回，不包装（数组是常见 IPC 返回值，包装会破坏调用方期望）
+        if (Array.isArray(result)) {
+          return result;
+        }
         // 如果原 handler 已返回 {success,...} 格式则直接返回
         if (result && typeof result === 'object' && 'success' in result) {
           // 注入 traceId，便于渲染进程串联

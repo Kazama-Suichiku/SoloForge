@@ -1,12 +1,12 @@
 /**
  * SoloForge - 任务输入组件
  * 多行文本输入 + 发送按钮，调用 soloforge.agent.executeTask
+ * Linear 风格：.card 容器 + .input + .btn-primary。
  * @module components/TaskInput
  */
 
 import { useState, useCallback } from 'react';
 import { useTaskStore } from '../store/task-store';
-import Button from './ui/Button';
 
 const DEFAULT_AGENTS = ['writer', 'reviewer'];
 
@@ -61,7 +61,7 @@ export default function TaskInput() {
   );
 
   return (
-    <div className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-elevated)] p-4 shadow-sm">
+    <div className="card">
       <label htmlFor="task-prompt" className="sr-only">
         任务描述
       </label>
@@ -73,19 +73,29 @@ export default function TaskInput() {
         placeholder="描述你的任务，例如：写一封感谢客户合作的邮件..."
         rows={3}
         disabled={isSubmitting}
-        className="w-full resize-none rounded-lg border border-[var(--border-color)] bg-[var(--bg-base)] px-4 py-3 text-text-primary placeholder:text-text-secondary focus:border-[var(--color-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)] disabled:opacity-60"
+        className="input resize-none"
+        style={{ lineHeight: '1.5' }}
         aria-label="任务描述"
       />
       <div className="mt-3 flex justify-end">
-        <Button
-          variant="primary"
-          size="md"
-          loading={isSubmitting}
-          disabled={!prompt.trim()}
+        <button
+          type="button"
           onClick={handleSubmit}
+          disabled={isSubmitting || !prompt.trim()}
+          className="btn-primary"
         >
-          {isSubmitting ? '执行中...' : '发送'}
-        </Button>
+          {isSubmitting ? (
+            <>
+              <svg className="w-4 h-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              执行中...
+            </>
+          ) : (
+            '发送'
+          )}
+        </button>
       </div>
     </div>
   );

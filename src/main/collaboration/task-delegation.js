@@ -25,6 +25,9 @@ const { logger } = require('../utils/logger');
 const { agentConfigStore } = require('../config/agent-config-store');
 const { scratchpadManager } = require('../context/agent-scratchpad');
 
+// Phase 1-A: MessageBus
+const { messageBus } = require('./message-bus');
+
 const DELEGATE_TIMEOUT_MS = 300000; // 5 分钟
 
 class TaskDelegation {
@@ -142,22 +145,98 @@ class TaskDelegation {
       taskId: task.id,
       description: taskDescription.slice(0, 100),
       hasUserContext: !!userContextSummary,
+      waitForResult,
     });
 
-    if (waitForResult) {
-      return await this.executeTask(task.id);
+    // Phase 1-A: 通过 MessageBus 路由委派任务。
+    // handler 由 AgentMessaging._executeMessage 按 type='delegation' 分发到
+    // 本类的 _executeDelegationMessage，后者调用 this.executeTask(task.id)。
+    //   - waitForResult=false → MessageBus.publish（fire-and-forget）
+    //   - waitForResult=true  → MessageBus.request（等待结果）
+    //
+    // 注意：host.messaging 是 AgentMessaging 实例，其 _ensureSubscribed 会为
+    // toAgent 在 MessageBus 注册 handler（幂等）。delegate_task 与 send_to_agent
+    // 共享同一邮箱 + 同一 handler，按 type 分发。
+    if (host.messaging && typeof host.messaging._ensureSubscribed === 'function') {
+      host.messaging._ensureSubscribed(toAgent);
     }
 
-    setImmediate(async () => {
-      try {
-        logger.info(`异步执行委派任务: ${task.id}`, { executor: toAgent });
-        await this.executeTask(task.id);
-      } catch (error) {
-        logger.error(`异步任务执行失败: ${task.id}`, error);
-      }
-    });
+    const busMessage = {
+      from: fromAgent,
+      to: toAgent,
+      type: 'delegation',
+      content: task.id, // handler 通过 taskId 找到委派记录并执行
+      mode: waitForResult ? 'sync' : 'async',
+      conversationId: conversationId || '',
+      priority,
+      metadata: {
+        taskId: task.id,
+        timeout: DELEGATE_TIMEOUT_MS,
+      },
+    };
 
-    return { success: true, taskId: task.id, message: '任务已委派，正在后台执行' };
+    if (!waitForResult) {
+      // fire-and-forget：不等结果，立即返回 {success, taskId}
+      try {
+        const pub = await messageBus.publish(toAgent, busMessage);
+        if (!pub.success) {
+          // 投递失败，把任务标记为 failed 并返回
+          task.status = 'failed';
+          task.result = pub.error;
+          host._saveToDisk();
+          return { success: false, taskId: task.id, error: pub.error };
+        }
+        return { success: true, taskId: task.id, message: '任务已委派，正在后台执行' };
+      } catch (error) {
+        logger.error(`异步委派任务失败: ${fromAgent} → ${toAgent}`, error);
+        task.status = 'failed';
+        task.result = error.message;
+        host._saveToDisk();
+        return { success: false, taskId: task.id, error: error.message };
+      }
+    }
+
+    // waitForResult=true：MessageBus.request 等待执行结果
+    try {
+      const req = await messageBus.request(toAgent, busMessage, DELEGATE_TIMEOUT_MS);
+      if (!req.success) {
+        logger.error(`同步委派任务失败: ${fromAgent} → ${toAgent}`, { error: req.error });
+        return { success: false, taskId: task.id, error: req.error };
+      }
+      // handler 返回 executeTask 的结果（{success, taskId, result} 或 {success, error}）
+      const reply = req.response;
+      if (reply && typeof reply === 'object' && 'success' in reply) {
+        return reply;
+      }
+      // 兜底
+      return { success: true, taskId: task.id, result: reply };
+    } catch (error) {
+      logger.error(`同步委派任务超时或异常: ${fromAgent} → ${toAgent}`, error);
+      return { success: false, taskId: task.id, error: error.message };
+    }
+  }
+
+  /**
+   * MessageBus handler 的委派执行体（Phase 1-A）。
+   *
+   * 由 AgentMailbox.process 串行调用，经 AgentMessaging._executeMessage 按
+   * type='delegation' 分发到本方法。从消息对象中取出 taskId，转调
+   * this.executeTask(taskId)。
+   *
+   * @param {Object} msg - MessageBus 消息对象（content = taskId）
+   * @returns {Promise<{success: boolean, taskId?: string, result?: string, error?: string}>}
+   */
+  async _executeDelegationMessage(msg) {
+    const taskId = msg.content || msg.metadata?.taskId;
+    if (!taskId) {
+      return { success: false, error: 'delegation 消息缺少 taskId' };
+    }
+    try {
+      return await this.executeTask(taskId);
+    } catch (error) {
+      logger.error(`_executeDelegationMessage 失败: ${taskId}`, error);
+      return { success: false, error: error.message };
+    }
   }
 
   /**
