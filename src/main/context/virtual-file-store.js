@@ -86,6 +86,16 @@ class VirtualFileStore {
   }
 
   /**
+   * 清理运行时状态（公司切换 cleanup 阶段调用）
+   * 只清内存索引和初始化标志，不读磁盘，也不触发 cleanup 扫描。
+   * 真正的 reinitialize() 在 dataPath 切换后由 initializeForCompany 调用。
+   */
+  resetRuntime() {
+    this._index.clear();
+    this._initialized = false;
+  }
+
+  /**
    * 加载索引文件
    */
   _loadIndex() {

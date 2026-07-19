@@ -1,38 +1,40 @@
 /**
- * SoloForge - Agent 基类
- * 所有具体 Agent 需继承此类并实现 execute 方法
+ * SoloForge - Agent 基类（任务流水线体系）
+ *
+ * 本类是 agents/ 体系（WriterAgent / ReviewerAgent）的基类，
+ * 由 AgentOrchestrator 按 pipeline 编排，用于"任务流水线"场景。
+ *
+ * 双轨 Agent 统一：本类现已继承 AgentBase（agents/agent-base.js），
+ * 与 chat/ 体系的 ChatAgent 共享统一的 getStatus() 接口。
+ * 原有的 _setStatus / getStatus / getLastError 接口完全保留，
+ * AgentOrchestrator 和 ipc-handlers 无需任何修改。
+ *
  * @module agents/base-agent
  */
 
-const VALID_STATUSES = Object.freeze(['idle', 'running', 'completed', 'error']);
+const { AgentBase, RUNTIME_STATUSES } = require('./agent-base');
 
 /**
  * @typedef {import('../../shared/ipc-types').AgentStatus} AgentStatus
  */
 
+// 兼容旧导出：VALID_STATUSES 即 RUNTIME_STATUSES
+const VALID_STATUSES = RUNTIME_STATUSES;
+
 /**
- * Agent 基类
+ * Agent 基类（任务流水线体系）
+ * 继承 AgentBase 以获得统一的 runtime/lifecycle 双维度状态。
  */
-class BaseAgent {
+class BaseAgent extends AgentBase {
   /**
    * @param {string} id - Agent 唯一标识
    * @param {string} name - Agent 显示名称
    * @param {string} description - Agent 功能描述
    */
   constructor(id, name, description) {
-    if (!id || typeof id !== 'string') {
-      throw new Error('BaseAgent: id 必须为非空字符串');
-    }
-    if (!name || typeof name !== 'string') {
-      throw new Error('BaseAgent: name 必须为非空字符串');
-    }
-
-    this.id = id;
-    this.name = name;
-    this.description = description || '';
+    super(id, name, { description });
+    // 兼容旧字段：_status 代理到 _runtimeStatus
     this._status = 'idle';
-    this._currentTask = null;
-    this._lastError = null;
   }
 
   /**
@@ -49,7 +51,7 @@ class BaseAgent {
   }
 
   /**
-   * 获取 Agent 状态
+   * 获取 Agent 状态（兼容原接口，AgentOrchestrator / ipc-handlers 不需修改）
    * @returns {AgentStatus}
    */
   getStatus() {
@@ -68,6 +70,7 @@ class BaseAgent {
 
   /**
    * 设置内部状态（供子类或编排器调用）
+   * 兼容旧接口：同时更新 _status（遗留字段）和 _runtimeStatus（AgentBase 字段）。
    * @param {'idle' | 'running' | 'completed' | 'error'} status
    * @param {string|null} [currentTask]
    * @param {Error|string|null} [error]
@@ -75,20 +78,10 @@ class BaseAgent {
   _setStatus(status, currentTask = null, error = null) {
     if (VALID_STATUSES.includes(status)) {
       this._status = status;
+      this._runtimeStatus = status;
     }
     this._currentTask = currentTask;
     this._lastError = error;
-  }
-
-  /**
-   * 获取上次错误信息
-   * @returns {string|null}
-   */
-  getLastError() {
-    if (this._lastError instanceof Error) {
-      return this._lastError.message;
-    }
-    return this._lastError;
   }
 }
 

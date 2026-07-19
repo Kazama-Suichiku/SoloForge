@@ -1,6 +1,12 @@
 /**
  * SoloForge - 聊天 Agent 基类
  * 定义聊天式 Agent 的基础接口
+ *
+ * 双轨 Agent 统一：本类现已继承 AgentBase（agents/agent-base.js），
+ * 与 agents/ 体系的 BaseAgent（Writer/Reviewer）共享统一的 getStatus() 接口。
+ * lifecycle 状态从 agentConfigStore 实时查询，runtime 状态保持 idle（chat 体系
+ * 的执行态由 ChatManager.activeTasks 管理，不在此处维护）。
+ *
  * @module chat/chat-agent
  */
 
@@ -10,6 +16,7 @@ const { agentConfigStore } = require('../config/agent-config-store');
 const { getCollaborationPrompt } = require('./collaboration-prompt');
 const { dataPath } = require('../account/data-path');
 const { logger } = require('../utils/logger');
+const { AgentBase } = require('../agents/agent-base');
 
 // 延迟加载 alertSystem 避免循环依赖
 let _alertSystem = null;
@@ -22,8 +29,9 @@ function getAlertSystem() {
 
 /**
  * 聊天 Agent 基类
+ * 继承 AgentBase 以获得统一的 runtime/lifecycle 双维度状态。
  */
-class ChatAgent {
+class ChatAgent extends AgentBase {
   /**
    * @param {string} id - Agent ID
    * @param {string} name - Agent 显示名称（默认值，会被配置覆盖）
@@ -33,12 +41,21 @@ class ChatAgent {
    * @param {string} [options.model] - 使用的模型（默认值，会被配置覆盖）
    */
   constructor(id, name, role, systemPrompt, options = {}) {
-    this.id = id;
+    super(id, name, { role, description: '' });
     this._defaultName = name;
-    this.role = role;
     this._baseSystemPrompt = systemPrompt;
     this._defaultModel = options.model || null;
     this.llmManager = null;
+  }
+
+  /**
+   * 重写 AgentBase._getLifecycleStatus()：从 agentConfigStore 实时查询
+   * 返回 'active' | 'suspended' | 'terminated'
+   * @returns {'active'|'suspended'|'terminated'}
+   */
+  _getLifecycleStatus() {
+    const config = agentConfigStore.get(this.id);
+    return config?.status || 'active';
   }
 
   /**

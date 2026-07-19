@@ -126,6 +126,7 @@ class DynamicAgentFactory {
       description: responsibilities.join('; ') || '',
       avatar: profile.avatar || '👤',
       reportsTo: profile.reportsTo,
+      model: profile.model || request.model, // 保存模型配置
       isDynamic: true,
       status: AGENT_STATUS.ACTIVE,
       hireDate: now.toISOString(),
@@ -266,6 +267,15 @@ class DynamicAgentFactory {
   }
 
   /**
+   * 清理运行时状态（公司切换 cleanup 阶段调用）
+   * 只清内存 Map，不动持久化的 approvalQueue / agentConfigStore。
+   * 真正的恢复在 initializeForCompany 中由 restoreApprovedAgents() 重新创建实例。
+   */
+  clearRuntime() {
+    this.dynamicAgents.clear();
+  }
+
+  /**
    * 删除动态 Agent
    * @param {string} agentId
    * @returns {boolean}
@@ -387,6 +397,7 @@ class DynamicAgentFactory {
             description: responsibilities.join('; ') || '',
             avatar: profile.avatar || '👤',
             reportsTo: profile.reportsTo,
+            model: profile.model || request.model, // 保存模型配置
             isDynamic: true,
           });
         }

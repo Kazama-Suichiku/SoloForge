@@ -1,6 +1,13 @@
 /**
  * SoloForge - 聊天输入框组件
  * 支持多行输入、Enter 发送、Shift+Enter 换行、@mention、图片粘贴/拖拽/选择、语音输入
+ *
+ * 职责拆分（Phase 1 批次 4b）：
+ *   - 语音录制 → use-audio-recorder.js（AudioContext + WAV 编码 + STT）
+ *   - 拖拽/粘贴/选择图片附件 → use-drop-zone.js
+ *   - @mention 字符串操作 → mention-helper.js（纯函数）
+ *   - 本文件只保留：核心输入框状态、@mention 状态编排、群聊"肃静"、JSX UI 组合
+ *
  * @module components/chat/ChatInput
  */
 
@@ -8,6 +15,9 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useChatStore } from '../../store/chat-store';
 import { useAgentStore } from '../../store/agent-store';
 import AgentAvatar from '../AgentAvatar';
+import { useAudioRecorder, formatRecordingTime } from './use-audio-recorder';
+import { useDropZone } from './use-drop-zone';
+import { detectMention, buildMentionInsert, filterAgents } from './mention-helper';
 
 /**
  * 聊天输入框
@@ -26,15 +36,7 @@ export default function ChatInput({
   const [showMentionMenu, setShowMentionMenu] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
-  const [attachments, setAttachments] = useState([]);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const textareaRef = useRef(null);
-  const audioChunksRef = useRef([]); // PCM Float32 样本块
-  const recordingTimerRef = useRef(null);
-  const recordingTimeRef = useRef(0); // 保存录音时长
   const currentConversationId = useChatStore((s) => s.currentConversationId);
   const conversations = useChatStore((s) => s.conversations);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -56,14 +58,40 @@ export default function ChatInput({
     return availableAgents.some((agent) => isAgentMultimodal(agent.id));
   }, [availableAgents, isAgentMultimodal]);
 
-  // 过滤后的 Agent 列表
-  const filteredAgents = useMemo(() => {
-    if (!mentionFilter) return availableAgents;
-    const lower = mentionFilter.toLowerCase();
-    return availableAgents.filter(
-      (a) => a.id.toLowerCase().includes(lower) || a.name.toLowerCase().includes(lower)
-    );
-  }, [availableAgents, mentionFilter]);
+  // 过滤后的 Agent 列表（使用 mention-helper 纯函数）
+  const filteredAgents = useMemo(
+    () => filterAgents(availableAgents, mentionFilter),
+    [availableAgents, mentionFilter]
+  );
+
+  // 语音录制 hook：录音停止后会调用 onTranscribed(transcribedText, audioAttachment)，
+  // 在这里桥接到 ChatInput 的 onSend(content, attachments) 接口（与原实现行为一致）。
+  const onTranscribed = useCallback(
+    (transcribedText, audioAttachment) => {
+      onSend?.(transcribedText, [audioAttachment]);
+    },
+    [onSend]
+  );
+  const {
+    isRecording,
+    recordingTime,
+    isTranscribing,
+    toggleRecording,
+    stopRecording,
+  } = useAudioRecorder(onTranscribed);
+
+  // 图片附件管理 hook（粘贴/拖拽/选择/移除）
+  const {
+    attachments,
+    setAttachments,
+    removeAttachment,
+    handlePaste: dropZoneHandlePaste,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    handleSelectImages,
+    isDragOver,
+  } = useDropZone(supportsImageInput);
 
   // 自动调整高度
   useEffect(() => {
@@ -79,7 +107,7 @@ export default function ChatInput({
     setContent('');
     setShowMentionMenu(false);
     setAttachments([]);
-  }, [currentConversationId]);
+  }, [currentConversationId, setAttachments]);
 
   // 附件变化后自动聚焦输入框（确保粘贴/拖拽/选择图片后仍可输入文字）
   // 使用 useEffect 保证在 React DOM 更新完毕后执行，比 setTimeout 更可靠
@@ -94,342 +122,37 @@ export default function ChatInput({
     prevAttachmentCountRef.current = attachments.length;
   }, [attachments.length]);
 
-  // ─────────────────────────────────────────────────────────
-  // 图片附件处理
-  // ─────────────────────────────────────────────────────────
-
-  /**
-   * 处理添加图片文件（通用逻辑：从 File 对象保存为附件）
-   */
-  const addImageFiles = useCallback(async (files) => {
-    for (const file of files) {
-      if (!file.type.startsWith('image/')) continue;
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        // 用 Uint8Array 包装，比原始 ArrayBuffer 在 IPC 序列化中更可靠
-        const uint8Array = new Uint8Array(arrayBuffer);
-        const result = await window.soloforge.attachment.save({
-          buffer: uint8Array,
-          mimeType: file.type,
-          filename: file.name,
-        });
-        if (result?.success && result.attachment) {
-          setAttachments((prev) => [...prev, result.attachment]);
-        } else if (result?.error) {
-          console.error('添加图片失败:', result.error);
-        }
-      } catch (err) {
-        console.error('添加图片失败:', err);
-      }
-    }
-  }, []);
-
-  /**
-   * 粘贴处理：检测剪贴板中的图片
-   */
+  // 粘贴处理：在 dropZoneHandlePaste 基础上补充聚焦逻辑
+  // （use-drop-zone.js 不持有 textareaRef，故由调用方在此处理焦点恢复）
   const handlePaste = useCallback(
     (e) => {
-      // 仅当 Agent 支持多模态时才处理图片粘贴
-      if (!supportsImageInput) return;
-
-      const items = e.clipboardData?.items;
-      if (!items) return;
-
-      const imageFiles = [];
-      for (const item of items) {
-        if (item.type.startsWith('image/')) {
-          const file = item.getAsFile();
-          if (file) imageFiles.push(file);
-        }
-      }
-
-      if (imageFiles.length > 0) {
-        e.preventDefault();
-        addImageFiles(imageFiles);
-        // 粘贴图片后立即确保 textarea 保持焦点和可编辑状态
-        // （Electron 中 IPC 调用可能导致焦点瞬移）
+      const hadImageBefore = attachments.length;
+      dropZoneHandlePaste(e);
+      // 若粘贴了图片（附件数增加），立即确保 textarea 保持焦点和可编辑状态
+      // （Electron 中 IPC 调用可能导致焦点瞬移）
+      if (attachments.length > hadImageBefore) {
         requestAnimationFrame(() => {
           textareaRef.current?.focus();
         });
       }
     },
-    [addImageFiles, supportsImageInput]
+    [dropZoneHandlePaste, attachments.length]
   );
-
-  /**
-   * 拖拽处理
-   */
-  const handleDragOver = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-  }, []);
-
-  const handleDrop = useCallback(
-    (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragOver(false);
-
-      const files = Array.from(e.dataTransfer.files).filter((f) =>
-        f.type.startsWith('image/')
-      );
-      if (files.length > 0) {
-        addImageFiles(files);
-      }
-    },
-    [addImageFiles]
-  );
-
-  /**
-   * 文件选择对话框
-   */
-  const handleSelectImages = useCallback(async () => {
-    try {
-      const result = await window.soloforge.attachment.selectImages();
-      if (result?.attachments?.length > 0) {
-        setAttachments((prev) => [...prev, ...result.attachments]);
-      }
-    } catch (err) {
-      console.error('选择图片失败:', err);
-    }
-  }, []);
-
-  /**
-   * 移除待发送的图片
-   */
-  const removeAttachment = useCallback((attachmentId) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== attachmentId));
-  }, []);
-
-  // ─────────────────────────────────────────────────────────
-  // 语音消息处理（微信/QQ 风格）
-  // 使用 AudioContext 直接录制 WAV（PCM 格式）
-  // 避免 webm/opus 格式不被 macOS SFSpeechRecognizer 支持的问题
-  // ─────────────────────────────────────────────────────────
-
-  const audioContextRef = useRef(null);
-  const audioSourceRef = useRef(null);
-  const audioProcessorRef = useRef(null);
-  const audioStreamRef = useRef(null);
-
-  /**
-   * 将 PCM Float32 样本数组编码为 WAV 文件的 Uint8Array
-   * @param {Float32Array[]} chunks - PCM 样本块
-   * @param {number} sampleRate - 采样率
-   * @returns {Uint8Array} WAV 文件数据
-   */
-  const encodeWAV = useCallback((chunks, sampleRate) => {
-    // 合并所有 chunk
-    let totalLength = 0;
-    for (const chunk of chunks) totalLength += chunk.length;
-    const pcmData = new Float32Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      pcmData.set(chunk, offset);
-      offset += chunk.length;
-    }
-
-    // 转换为 16-bit PCM
-    const numChannels = 1;
-    const bitsPerSample = 16;
-    const bytesPerSample = bitsPerSample / 8;
-    const blockAlign = numChannels * bytesPerSample;
-    const dataLength = pcmData.length * bytesPerSample;
-    const headerLength = 44;
-    const buffer = new ArrayBuffer(headerLength + dataLength);
-    const view = new DataView(buffer);
-
-    // WAV 文件头
-    const writeString = (offset, str) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + dataLength, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // fmt chunk size
-    view.setUint16(20, 1, true);  // PCM format
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * blockAlign, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitsPerSample, true);
-    writeString(36, 'data');
-    view.setUint32(40, dataLength, true);
-
-    // 写入 PCM 数据（Float32 → Int16）
-    let writeOffset = 44;
-    for (let i = 0; i < pcmData.length; i++) {
-      const sample = Math.max(-1, Math.min(1, pcmData[i]));
-      view.setInt16(writeOffset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-      writeOffset += 2;
-    }
-
-    return new Uint8Array(buffer);
-  }, []);
-
-  const startRecording = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true },
-      });
-
-      // 使用 AudioContext 捕获原始 PCM（输出 WAV，macOS 原生兼容）
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-      audioChunksRef.current = [];
-
-      processor.onaudioprocess = (e) => {
-        const channelData = e.inputBuffer.getChannelData(0);
-        // 复制一份（因为原始 buffer 会被复用）
-        audioChunksRef.current.push(new Float32Array(channelData));
-      };
-
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-
-      audioContextRef.current = audioContext;
-      audioSourceRef.current = source;
-      audioProcessorRef.current = processor;
-      audioStreamRef.current = stream;
-
-      setIsRecording(true);
-      setRecordingTime(0);
-      recordingTimeRef.current = 0;
-
-      // 开始计时
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingTime((prev) => {
-          recordingTimeRef.current = prev + 1;
-          return prev + 1;
-        });
-      }, 1000);
-    } catch (err) {
-      console.error('启动录音失败:', err);
-    }
-  }, []);
-
-  const stopRecording = useCallback(() => {
-    // 停止音频处理
-    if (audioProcessorRef.current) {
-      audioProcessorRef.current.disconnect();
-      audioProcessorRef.current = null;
-    }
-    if (audioSourceRef.current) {
-      audioSourceRef.current.disconnect();
-      audioSourceRef.current = null;
-    }
-    if (audioStreamRef.current) {
-      audioStreamRef.current.getTracks().forEach((t) => t.stop());
-      audioStreamRef.current = null;
-    }
-
-    const sampleRate = audioContextRef.current?.sampleRate || 16000;
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    setIsRecording(false);
-    setRecordingTime(0);
-
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
-
-    // 编码 WAV 并发送
-    const chunks = audioChunksRef.current;
-    if (!chunks || chunks.length === 0) return;
-
-    const duration = recordingTimeRef.current;
-    const wavData = encodeWAV(chunks, sampleRate);
-
-    if (wavData.length <= 44) return; // 只有文件头，没有实际音频
-
-    // 异步处理：保存 + 转写 + 发送
-    setIsTranscribing(true);
-    (async () => {
-      try {
-        const [saveResult, sttResult] = await Promise.all([
-          window.soloforge.attachment.save({
-            buffer: wavData,
-            mimeType: 'audio/wav',
-            filename: `语音消息_${new Date().toLocaleTimeString('zh-CN')}.wav`,
-          }),
-          window.soloforge.stt.transcribe(wavData),
-        ]);
-
-        if (!saveResult?.success || !saveResult.attachment) {
-          console.error('保存语音文件失败:', saveResult?.error);
-          return;
-        }
-
-        const audioAttachment = {
-          ...saveResult.attachment,
-          duration,
-          transcription: sttResult?.success ? sttResult.text : '',
-        };
-
-        const transcribedText = sttResult?.success && sttResult.text
-          ? sttResult.text
-          : '[语音消息 - 识别失败]';
-
-        onSend(transcribedText, [audioAttachment]);
-      } catch (err) {
-        console.error('处理语音消息失败:', err);
-      } finally {
-        setIsTranscribing(false);
-      }
-    })();
-  }, [encodeWAV, onSend]);
-
-  const toggleRecording = useCallback(() => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  }, [isRecording, startRecording, stopRecording]);
-
-  // 组件卸载时清理录音
-  useEffect(() => {
-    return () => {
-      if (audioProcessorRef.current) audioProcessorRef.current.disconnect();
-      if (audioSourceRef.current) audioSourceRef.current.disconnect();
-      if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach((t) => t.stop());
-      if (audioContextRef.current) audioContextRef.current.close();
-      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-    };
-  }, []);
 
   // ─────────────────────────────────────────────────────────
   // @mention 和发送处理
   // ─────────────────────────────────────────────────────────
 
-  // 检测 @ 输入
+  // 检测 @ 输入（使用 mention-helper 纯函数）
   const handleContentChange = useCallback((e) => {
     const value = e.target.value;
+    const cursorPos = e.target.selectionStart;
     setContent(value);
 
-    // 检测是否正在输入 @mention（支持中文名匹配）
-    const cursorPos = e.target.selectionStart;
-    const textBeforeCursor = value.slice(0, cursorPos);
-    const atMatch = textBeforeCursor.match(/@([\w\u4e00-\u9fff]*)$/);
-
-    if (atMatch) {
+    const { active, filter } = detectMention(value, cursorPos);
+    if (active) {
       setShowMentionMenu(true);
-      setMentionFilter(atMatch[1]);
+      setMentionFilter(filter);
       setMentionIndex(0);
     } else {
       setShowMentionMenu(false);
@@ -437,22 +160,16 @@ export default function ChatInput({
     }
   }, []);
 
-  // 插入 @mention
+  // 插入 @mention（使用 mention-helper 纯函数构建新文本 + 光标位置）
   const insertMention = useCallback((agent) => {
     const textarea = textareaRef.current;
     if (!textarea) return;
 
     const cursorPos = textarea.selectionStart;
-    const textBeforeCursor = content.slice(0, cursorPos);
-    const textAfterCursor = content.slice(cursorPos);
+    const result = buildMentionInsert(content, cursorPos, agent);
+    if (!result) return;
 
-    // 找到 @ 的位置
-    const atIndex = textBeforeCursor.lastIndexOf('@');
-    if (atIndex === -1) return;
-
-    // 替换 @xxx 为 @人名（对用户更友好）
-    const displayName = agent.name || agent.id;
-    const newText = textBeforeCursor.slice(0, atIndex) + `@${displayName} ` + textAfterCursor;
+    const { text: newText, newCursorPos } = result;
     setContent(newText);
     setShowMentionMenu(false);
     setMentionFilter('');
@@ -460,8 +177,7 @@ export default function ChatInput({
     // 聚焦并设置光标位置
     setTimeout(() => {
       textarea.focus();
-      const newPos = atIndex + displayName.length + 2;
-      textarea.setSelectionRange(newPos, newPos);
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
     }, 0);
   }, [content]);
 
@@ -478,7 +194,7 @@ export default function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [content, attachments, disabled, onSend]);
+  }, [content, attachments, disabled, onSend, setAttachments]);
 
   const handleKeyDown = useCallback(
     (e) => {
@@ -532,13 +248,6 @@ export default function ChatInput({
     if (!currentConversationId || !onSilenceGroup) return;
     onSilenceGroup(currentConversationId);
   }, [currentConversationId, onSilenceGroup]);
-
-  // 格式化录音时间
-  const formatRecordingTime = (seconds) => {
-    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-    const s = (seconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  };
 
   return (
     <div
@@ -606,8 +315,7 @@ export default function ChatInput({
             type="button"
             onClick={stopRecording}
             className="ml-auto text-xs px-2.5 py-1 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
-          >
-            停止
+          >停止
           </button>
         </div>
       )}

@@ -5,7 +5,7 @@
   "main": "src/main/main.js",
   "scripts": {
     "start": "npm run build:renderer && cross-env NODE_ENV=production ELECTRON_IS_DEV=0 electron .",
-    "dev": "concurrently -k \"npm run dev:renderer\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "dev": "concurrently -k \"npm run dev:renderer\" \"wait-on http://localhost:8888 && cross-env NODE_ENV=development electron .\"",
     "dev:renderer": "vite",
     "build:renderer": "vite build",
     "build": "npm run build:renderer && electron-builder",
@@ -18,11 +18,8 @@
   "private": true,
   "dependencies": {
     "@heroicons/react": "^2.2.0",
-    "@supabase/supabase-js": "^2.95.3",
     "dotenv": "^16.0.0",
     "electron-is-dev": "^2.0.0",
-    "electron-store": "^11.0.2",
-    "idb": "^8.0.3",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-markdown": "^10.1.0",

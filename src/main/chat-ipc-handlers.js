@@ -42,7 +42,8 @@ function setupChatIpcHandlers(webContents) {
   });
 
   // 处理聊天消息（流式）
-  ipcMain.handle(CHANNELS.CHAT_SEND_MESSAGE_STREAM, async (_event, request) => {
+  // 采用"发起即返回"模式：立即返回 ack，内容通过 CHAT_STREAM 推送，完成通过 CHAT_COMPLETE 通知
+  ipcMain.handle(CHANNELS.CHAT_SEND_MESSAGE_STREAM, (_event, request) => {
     logger.info('Chat IPC: 收到流式消息请求', {
       conversationId: request?.conversationId,
       agentId: request?.agentId,
@@ -51,19 +52,36 @@ function setupChatIpcHandlers(webContents) {
     });
 
     if (!request || !request.agentId || !request.message || !request.messageId) {
-      return { content: '请求参数不完整' };
+      return { success: false, error: '请求参数不完整' };
     }
 
-    try {
-      // 使用流式处理方法
-      const result = await chatManager.handleStreamMessage(request);
-      return result;
-    } catch (error) {
-      logger.error('Chat IPC: 流式处理消息失败', error);
-      return {
-        content: `处理消息时发生错误：${error.message || '未知错误'}`,
-      };
-    }
+    // 使用 Promise 但不 await，让处理在后台进行
+    // 这样 IPC handler 会立即返回
+    (async () => {
+      try {
+        const result = await chatManager.handleStreamMessage(request);
+        // 通过 CHAT_COMPLETE 事件通知前端完成
+        if (webContents && !webContents.isDestroyed()) {
+          webContents.send(CHANNELS.CHAT_COMPLETE, {
+            messageId: request.messageId,
+            success: true,
+            content: result?.content,
+          });
+        }
+      } catch (error) {
+        logger.error('Chat IPC: 流式处理消息失败', error);
+        if (webContents && !webContents.isDestroyed()) {
+          webContents.send(CHANNELS.CHAT_COMPLETE, {
+            messageId: request.messageId,
+            success: false,
+            error: error.message || '未知错误',
+          });
+        }
+      }
+    })();
+
+    // 立即返回确认（同步返回，不等待上面的异步处理）
+    return { success: true, started: true };
   });
 
   // 获取所有活跃任务

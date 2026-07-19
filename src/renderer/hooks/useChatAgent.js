@@ -1,12 +1,41 @@
 /**
- * SoloForge - 聊天 Agent Hook
- * 处理用户消息发送给 Agent，接收 Agent 响应
+ * SoloForge - 聊天 Agent Hook（组合层）
+ *
+ * Phase 1 批次 4c 重构：业务逻辑与 IPC 订阅已拆分到独立模块，本文件仅作组合层。
+ *
+ *  - 业务纯函数（群聊连锁、身份注入、冷却计算、历史构建等）→ hooks/chat-agent-logic.js
+ *  - IPC 事件订阅（onStream / onComplete / onProactiveMessage 等 9 个订阅）→ hooks/useAgentIpcEvents.js
+ *  - 本文件：保留 sendToSingleAgent / handleGroupChat / sendToAgent / silenceGroup 编排逻辑，
+ *    调用 useAgentIpcEvents 完成事件订阅，对外导出接口与重构前完全一致：
+ *      { sendToAgent, silenceGroup }
+ *
  * @module hooks/useChatAgent
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import { useChatStore } from '../store/chat-store';
 import { useAgentStore } from '../store/agent-store';
+
+import {
+  DEPT_COOLDOWN_MS,
+  extractMentions,
+  buildIdNameMaps,
+  buildParticipantsList,
+  buildGroupRules,
+  buildIdentityReminder,
+  buildHistoryFromMessages,
+  findLatestAgentReply,
+  filterNewMentions,
+  sortByLevel,
+  cleanContentPrefix,
+  filterImageAttachments,
+  isAgentInDeptCooldown as isAgentInDeptCooldownPure,
+  recordDeptTrigger as recordDeptTriggerPure,
+  shouldStopChain,
+  isMaxRoundsReached,
+  MAX_CHAIN_ROUNDS,
+} from './chat-agent-logic';
+import { useAgentIpcEvents } from './useAgentIpcEvents';
 
 /**
  * 聊天 Agent Hook
@@ -28,20 +57,21 @@ export function useChatAgent() {
   // 部门群聊冷却机制（与后端同步，防止重复触发）
   // key: `${conversationId}:${agentId}`, value: lastTriggerTimestamp
   const deptCooldownRef = useRef(new Map());
-  const DEPT_COOLDOWN_MS = 30 * 1000; // 30秒冷却
 
   /**
-   * 检查 Agent 是否在部门群聊冷却中
+   * 检查 Agent 是否在部门群聊冷却中（包装为带 ref 的回调，供 IPC 订阅使用）
    */
   const isAgentInDeptCooldown = useCallback((conversationId, agentId) => {
-    const key = `${conversationId}:${agentId}`;
-    const lastTime = deptCooldownRef.current.get(key);
-    if (!lastTime) return false;
-    return Date.now() - lastTime < DEPT_COOLDOWN_MS;
+    return isAgentInDeptCooldownPure(
+      deptCooldownRef.current,
+      conversationId,
+      agentId
+    );
   }, []);
 
   /**
-   * 记录 Agent 在部门群聊的触发时间
+   * 记录 Agent 在部门群聊的触发时间（包装为带 ref 的回调，供 IPC 订阅使用）
+   * 直接修改 ref 内的 Map（保持与原实现一致的命令式语义）。
    */
   const recordDeptTrigger = useCallback((conversationId, agentId) => {
     const key = `${conversationId}:${agentId}`;
@@ -119,11 +149,11 @@ export function useChatAgent() {
       try {
         // 调用主进程的流式聊天接口
         if (window.soloforge?.chat?.sendMessageStream) {
-          // 流式调用 - 内容会通过 onStream 回调实时推送
-          // 只传图片附件给 LLM（音频附件仅用于 UI 展示，LLM 收到的是转写文字）
-          const imageAttachments = attachments?.filter((a) => a.type === 'image');
+          // 流式调用 - 采用"发起即返回"模式
+          // 内容通过 onStream 实时推送，完成通过 onComplete 通知
+          const imageAttachments = filterImageAttachments(attachments);
 
-          const result = await window.soloforge.chat.sendMessageStream({
+          const startResult = await window.soloforge.chat.sendMessageStream({
             conversationId,
             agentId,
             message: content,
@@ -132,42 +162,16 @@ export function useChatAgent() {
             history,
           });
 
-          // 流式完成后，内容已经通过 onStream 追加完毕
-          if (result?.content) {
-            // 检查消息内容是否为空（可能流式未推送，如 Agent 不存在直接返回错误）
-            const currentMsgs = useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-            const agentMsg = currentMsgs.find((m) => m.id === agentMsgId);
-            if (agentMsg && !agentMsg.content) {
-              // 内容为空说明流式没有推送，直接使用返回的 content
-              let cleanContent = result.content;
-              const prefixMatch = cleanContent.match(/^\[[\w-]+\]:\s*/);
-              if (prefixMatch) {
-                cleanContent = cleanContent.slice(prefixMatch[0].length);
-              }
-              updateMessage(agentMsgId, {
-                content: cleanContent,
-                status: 'sent',
-              });
-            } else if (agentMsg?.content) {
-              // 流式已填充内容，清理开头的 [role]: 前缀
-              let cleanContent = agentMsg.content;
-              const prefixMatch = cleanContent.match(/^\[[\w-]+\]:\s*/);
-              if (prefixMatch) {
-                cleanContent = cleanContent.slice(prefixMatch[0].length);
-              }
-              updateMessage(agentMsgId, {
-                content: cleanContent,
-                status: 'sent',
-              });
-            } else {
-              updateMessage(agentMsgId, { status: 'sent' });
-            }
-          } else {
+          // 检查是否启动成功
+          if (!startResult?.success) {
             updateMessage(agentMsgId, {
-              content: '抱歉，我暂时无法回应。',
+              content: startResult?.error || '发送失败',
               status: 'error',
             });
+            setAgentIdle(agentId);
           }
+          // 注意：不再在这里等待完成，setAgentIdle 由 onComplete 回调处理
+          return; // 提前返回，让 onComplete 处理后续
         } else if (window.soloforge?.chat?.sendMessage) {
           // 降级到非流式调用
           console.warn('Stream API not available, using non-stream fallback');
@@ -179,12 +183,7 @@ export function useChatAgent() {
           });
 
           if (result?.content) {
-            let cleanContent = result.content;
-            const prefixMatch = cleanContent.match(/^\[(\w+)\]:\s*/);
-            if (prefixMatch) {
-              cleanContent = cleanContent.slice(prefixMatch[0].length);
-            }
-            
+            const cleanContent = cleanContentPrefix(result.content);
             updateMessage(agentMsgId, {
               content: cleanContent,
               status: 'sent',
@@ -214,95 +213,37 @@ export function useChatAgent() {
   );
 
   /**
-   * 从文本中提取 @mention 的 Agent ID
-   * 支持 @agentId 和 @人名 两种格式
-   * @param {string} text
-   * @param {string[]} validAgentIds - 有效的 Agent ID 列表
-   * @param {Map<string,string>} [nameToIdMap] - 人名→ID 映射（用于识别 @人名）
-   * @returns {string[]}
-   */
-  const extractMentions = useCallback((text, validAgentIds, nameToIdMap) => {
-    if (!text) return [];
-    const mentioned = new Set();
-
-    // 1. 检测 @agentId 格式
-    for (const id of validAgentIds) {
-      if (text.includes(`@${id}`)) {
-        mentioned.add(id);
-      }
-    }
-
-    // 2. 检测 @人名 格式（如果提供了映射）
-    if (nameToIdMap) {
-      for (const [name, id] of nameToIdMap.entries()) {
-        if (text.includes(`@${name}`)) {
-          mentioned.add(id);
-        }
-      }
-    }
-
-    return [...mentioned];
-  }, []);
-
-  /**
    * 处理群聊消息（支持 Agent 间 @ 连锁回复）
-   * 最多允许 5 轮连锁，防止无限循环
+   * 最多允许 MAX_CHAIN_ROUNDS 轮连锁，防止无限循环
+   *
+   * 业务逻辑（map 构建、规则文本、历史构建、提及相关）已委托给 chat-agent-logic 纯函数，
+   * 本函数仅保留与 store 读取 + sendToSingleAgent 编排相关的不可纯化部分。
    */
   const handleGroupChat = useCallback(
     async (conversationId, conversation, agentIds, userContent) => {
-      const MAX_CHAIN_ROUNDS = 5; // 最大连锁轮数
       const agentsMap = useAgentStore.getState().agents;
 
       // 重置中断标记
       groupAbortRef.current = false;
 
       // ── 构建 ID ↔ 人名 映射 ────────────────────────
-      const idToName = new Map();  // agentId → 人名
-      const nameToId = new Map();  // 人名 → agentId
-      for (const id of agentIds) {
-        const agent = agentsMap.get(id);
-        const name = agent?.name || id;
-        idToName.set(id, name);
-        nameToId.set(name, id);
-      }
+      const { idToName, nameToId } = buildIdNameMaps(agentIds, agentsMap);
 
       // 构建参与者列表（人名格式）
-      const participantsList = agentIds
-        .map((id) => {
-          const agent = agentsMap.get(id);
-          const name = idToName.get(id);
-          const title = agent?.title || '';
-          return `  - ${name}${title ? `（${title}）` : ''}`;
-        })
-        .join('\n');
+      const participantsList = buildParticipantsList(agentIds, agentsMap, idToName);
 
       // 判断是否是部门群聊
       const isDepartmentChat = conversation.type === 'department';
       const groupTypeLabel = isDepartmentChat ? '部门工作群' : '群聊';
-      
-      // 部门群聊额外规则
-      const departmentRules = isDepartmentChat ? `
-7. 这是部门工作群，主要用于工作进度汇报和项目讨论。
-8. 发言要简洁专业，聚焦工作相关内容。
-9. 如果需要汇报进度，请使用 post_to_department 工具而不是直接发消息。
-10. 老板能看到所有消息，请保持专业态度。
-` : '';
 
       // 通用群聊规则（不含身份信息，身份信息在每个 Agent 的消息中单独注入）
-      const groupRules = `[${groupTypeLabel}: ${conversation.name}]
-
-【群内成员】
-${participantsList}
-
-【群聊规则 - 必须严格遵守】
-0. 你已经被点名发言了（系统只会把消息发给被 @ 的人），请直接回复。
-1. 禁止使用 send_to_agent 联系群内成员！群里所有人都能看到你的发言，直接说即可。需要其他成员回应时，用 @人名 的格式（如 @${idToName.get(agentIds[0]) || agentIds[0]}）。只有联系群外人员才可用 send_to_agent。
-2. 提到其他群成员时，必须使用 @人名，不要使用 @ID 格式。绝对禁止 @你自己——你不能点名自己。
-3. 发言前务必仔细阅读上方所有人的发言内容。如果别人已经提出了某个观点或方案，你不要重复提出类似的内容。
-4. 你应该基于他人已有的发言进行补充、提出不同角度、指出潜在问题、或表示认同并补充细节。避免"各说各话"。
-5. 只从你自己的专业领域角度发言。不要越界分析其他部门的专业问题。
-6. 如果前面已有人充分阐述了与你观点一致的内容，简要表示认同并补充你的专业视角即可，不必重复长篇论述。
-${departmentRules}`;
+      const groupRules = buildGroupRules({
+        groupTypeLabel,
+        conversationName: conversation.name,
+        participantsList,
+        isDepartmentChat,
+        firstAgentMention: idToName.get(agentIds[0]) || agentIds[0],
+      });
 
       // 第一轮：用户 @ 的 Agent（同时支持 @ID 和 @人名）
       const initialMentions = extractMentions(userContent, agentIds, nameToId);
@@ -318,7 +259,7 @@ ${departmentRules}`;
 
       while (pendingAgents.length > 0 && round < MAX_CHAIN_ROUNDS) {
         // 检查中断标记
-        if (groupAbortRef.current) {
+        if (shouldStopChain(groupAbortRef.current)) {
           console.log('群聊已被肃静，停止后续回复');
           break;
         }
@@ -326,16 +267,14 @@ ${departmentRules}`;
         round++;
 
         // 按层级排序
-        const sorted = pendingAgents
-          .map((id) => ({ id, level: agentsMap.get(id)?.level ?? 99 }))
-          .sort((a, b) => a.level - b.level);
+        const sorted = sortByLevel(pendingAgents, agentsMap);
 
         // 本轮新 @ 的 Agent（下一轮待处理）
         const nextPending = [];
 
         for (const { id: targetAgent } of sorted) {
           // 检查中断标记
-          if (groupAbortRef.current) {
+          if (shouldStopChain(groupAbortRef.current)) {
             console.log('群聊已被肃静，跳过剩余 Agent');
             break;
           }
@@ -345,21 +284,12 @@ ${departmentRules}`;
           const agentName = idToName.get(targetAgent) || targetAgent;
 
           // 个性化身份提醒（注入到每个 Agent 的消息开头）
-          const identityReminder = `【你的身份提醒】你是「${agentName}」。你在这个群聊中被点名了，请直接发言。记住：不要 @${agentName}（那是你自己）。\n\n`;
+          const identityReminder = buildIdentityReminder(agentName);
 
           // 获取最新 history（排除已删除的消息）
           const updatedMessages =
             useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-          const updatedHistory = updatedMessages
-            .filter((m) => !m.deleted)
-            .slice(-20)
-            .map((m) => ({
-              role: m.senderType === 'user' ? 'user' : 'assistant',
-              content:
-                m.senderType === 'agent'
-                  ? `[${idToName.get(m.senderId) || m.senderId}]: ${m.content}`
-                  : m.content,
-            }));
+          const updatedHistory = buildHistoryFromMessages(updatedMessages, idToName);
 
           // 让 Agent 回复（注入身份提醒 + 群规 + 用户消息）
           await sendToSingleAgent(
@@ -372,13 +302,15 @@ ${departmentRules}`;
           // 检查 Agent 的回复中是否 @ 了其他 Agent（支持人名和ID两种格式）
           const latestMsgs =
             useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-          const agentReply = [...latestMsgs]
-            .reverse()
-            .find((m) => m.senderId === targetAgent && m.senderType === 'agent');
+          const agentReply = findLatestAgentReply(latestMsgs, targetAgent);
 
           if (agentReply?.content) {
-            const newMentions = extractMentions(agentReply.content, agentIds, nameToId).filter(
-              (id) => !repliedAgents.has(id) && id !== targetAgent
+            const newMentions = filterNewMentions(
+              agentReply.content,
+              agentIds,
+              nameToId,
+              repliedAgents,
+              targetAgent
             );
             if (newMentions.length > 0) {
               console.log(
@@ -393,11 +325,11 @@ ${departmentRules}`;
         pendingAgents = [...new Set(nextPending)];
       }
 
-      if (round >= MAX_CHAIN_ROUNDS && pendingAgents.length > 0) {
+      if (isMaxRoundsReached(round) && pendingAgents.length > 0) {
         console.warn('群聊连锁回复达到最大轮数限制:', MAX_CHAIN_ROUNDS);
       }
     },
-    [sendToSingleAgent, extractMentions]
+    [sendToSingleAgent]
   );
 
   /**
@@ -418,13 +350,7 @@ ${departmentRules}`;
       // 获取对话历史（排除已删除的消息）
       // 重要：直接从 store 获取最新状态，避免 useCallback 闭包导致读到旧数据
       const freshMessages = useChatStore.getState().messagesByConversation.get(conversationId) ?? [];
-      const history = freshMessages
-        .filter((m) => !m.deleted) // 被用户删除的消息不进入上下文
-        .slice(-20) // 只保留最近 20 条，避免 context 过长
-        .map((m) => ({
-          role: m.senderType === 'user' ? 'user' : 'assistant',
-          content: m.senderType === 'agent' ? `[${m.senderId}]: ${m.content}` : m.content,
-        }));
+      const history = buildHistoryFromMessages(freshMessages);
 
       if (conversation.type === 'private') {
         // 私聊：只发给一个 Agent（含附件）
@@ -437,265 +363,13 @@ ${departmentRules}`;
     [conversations, messagesByConversation, sendToSingleAgent, handleGroupChat]
   );
 
-  // 监听主进程推送的流式消息（如果有）
-  const addToolCalls = useChatStore((s) => s.addToolCalls);
-  const updateToolCall = useChatStore((s) => s.updateToolCall);
-
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onStream) return;
-
-    const unsubscribe = window.soloforge.chat.onStream((chunk) => {
-      // 文本内容（包括 <!--tool-group:N--> 标记）
-      if (chunk.messageId && chunk.content) {
-        appendMessageContent(chunk.messageId, chunk.content);
-      }
-      // 工具事件（结构化数据）
-      if (chunk.messageId && chunk.toolEvent) {
-        const { toolEvent } = chunk;
-        if (toolEvent.type === 'tool_start' && toolEvent.tools?.length) {
-          addToolCalls(chunk.messageId, toolEvent.groupIndex, toolEvent.tools);
-        } else if (toolEvent.type === 'tool_result' && toolEvent.id) {
-          updateToolCall(chunk.messageId, toolEvent.id, {
-            success: toolEvent.success,
-            result: toolEvent.result,
-            error: toolEvent.error,
-            duration: toolEvent.duration,
-          });
-        }
-      }
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [appendMessageContent, addToolCalls, updateToolCall]);
-
-  // 监听 Agent 主动推送消息（审批通知、工作汇报等）
-  // 使用 ensurePrivateChat 而非 getOrCreatePrivateChat，避免自动切换对话打断用户
-  const ensurePrivateChat = useChatStore((s) => s.ensurePrivateChat);
-
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onProactiveMessage) return;
-
-    const unsubscribe = window.soloforge.chat.onProactiveMessage((data) => {
-      const { agentId, agentName, content } = data;
-      if (!agentId || !content) return;
-
-      console.log(`收到 Agent 主动推送: ${agentName} (${agentId})`);
-
-      // 确保该 Agent 的私聊对话存在（不切换当前对话）
-      const conversationId = ensurePrivateChat(agentId, agentName);
-
-      // 添加消息到对话中（senderType: 'agent' 会自动增加 unreadCount）
-      sendMessage({
-        conversationId,
-        senderId: agentId,
-        senderType: 'agent',
-        content,
-        metadata: { proactive: true },
-      });
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [ensurePrivateChat, sendMessage]);
-
-  // 监听后端创建群聊事件（Agent 拉群）
-  const createGroupChat = useChatStore((s) => s.createGroupChat);
-
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onCreateGroup) return;
-
-    const unsubscribe = window.soloforge.chat.onCreateGroup((data) => {
-      const { groupId, name, participants, creatorId, creatorName, initialMessage } = data;
-      if (!groupId || !participants?.length) return;
-
-      console.log(`收到后端创建群聊: ${name} (${groupId})，由 ${creatorName} 发起`);
-
-      // 创建群聊（不自动切换当前对话，避免打断用户）
-      createGroupChat({ id: groupId, name, participants, switchTo: false });
-
-      // 如果有初始消息，添加到群里
-      if (initialMessage && creatorId) {
-        sendMessage({
-          conversationId: groupId,
-          senderId: creatorId,
-          senderType: 'agent',
-          content: initialMessage,
-          metadata: { groupCreation: true },
-        });
-      }
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [createGroupChat, sendMessage]);
-
-  // 监听后端创建部门群聊事件
-  const createDepartmentChat = useChatStore((s) => s.createDepartmentChat);
-  const updateDepartmentMembers = useChatStore((s) => s.updateDepartmentMembers);
-  const renameDepartmentChat = useChatStore((s) => s.renameDepartmentChat);
-
-  // 初始化时主动获取所有部门群聊（解决 IPC 时序问题）
-  useEffect(() => {
-    const fetchDepartmentGroups = async () => {
-      if (!window.soloforge?.chat?.getAllDepartmentGroups) return;
-
-      try {
-        const groups = await window.soloforge.chat.getAllDepartmentGroups();
-        console.log('获取部门群聊列表:', groups?.length || 0);
-
-        if (groups && groups.length > 0) {
-          for (const { groupId, departmentId, ownerId, name, participants } of groups) {
-            createDepartmentChat({
-              departmentId,
-              ownerId,
-              name,
-              participants: participants || [ownerId],
-              switchTo: false,
-            });
-          }
-        }
-      } catch (err) {
-        console.error('获取部门群聊失败:', err);
-      }
-    };
-
-    // 稍微延迟以确保 store 已初始化
-    const timer = setTimeout(fetchDepartmentGroups, 500);
-    return () => clearTimeout(timer);
-  }, [createDepartmentChat]);
-
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onDeptGroupCreate) return;
-
-    const unsubscribe = window.soloforge.chat.onDeptGroupCreate((data) => {
-      const { groupId, departmentId, ownerId, name, participants } = data;
-      if (!groupId || !departmentId) return;
-
-      console.log(`收到后端创建部门群聊: ${name} (${groupId})`, { ownerId, members: participants?.length });
-
-      // 创建部门群聊（不自动切换当前对话）
-      createDepartmentChat({
-        departmentId,
-        ownerId,
-        name,
-        participants: participants || [ownerId],
-        switchTo: false,
-      });
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [createDepartmentChat]);
-
-  // 监听部门群聊成员变更
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onDeptGroupUpdate) return;
-
-    const unsubscribe = window.soloforge.chat.onDeptGroupUpdate((data) => {
-      const { action, departmentId, agentId, agentName } = data;
-      if (!departmentId || !agentId) return;
-
-      console.log(`部门群聊成员变更: ${action} ${agentName || agentId} -> dept-${departmentId}`);
-
-      updateDepartmentMembers(departmentId, agentId, action);
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [updateDepartmentMembers]);
-
-  // 监听部门群聊消息（支持 @ 触发回复）
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onDeptGroupMessage) return;
-
-    const unsubscribe = window.soloforge.chat.onDeptGroupMessage(async (data) => {
-      const { groupId, departmentId, senderId, senderName, content, mentions, timestamp } = data;
-      if (!groupId || !content) return;
-
-      console.log(`部门群聊消息: ${senderName} -> ${groupId}`, { mentions });
-
-      // 1. 添加消息到部门群聊
-      sendMessage({
-        conversationId: groupId,
-        senderId,
-        senderType: 'agent',
-        content,
-        metadata: {
-          departmentMessage: true,
-          mentions: mentions || [],
-        },
-      });
-
-      // 2. 如果有 @ 某人，触发他们回复
-      if (mentions && mentions.length > 0) {
-        // 获取对话信息
-        const conversation = useChatStore.getState().conversations.get(groupId);
-        if (!conversation) return;
-
-        // 过滤出有效的被 @ 的 Agent（必须是群成员、不是发送者、不在冷却中）
-        const validMentions = mentions.filter((id) => {
-          if (id === senderId) return false;
-          if (!conversation.participants.includes(id)) return false;
-          // 检查前端冷却（双重保险，后端也有冷却）
-          if (isAgentInDeptCooldown(groupId, id)) {
-            console.log(`部门群聊冷却: ${id} 正在冷却中，跳过`);
-            return false;
-          }
-          return true;
-        });
-
-        if (validMentions.length > 0) {
-          console.log(`部门群聊触发回复: ${validMentions.join(', ')}`);
-          
-          // 记录冷却时间
-          validMentions.forEach((id) => recordDeptTrigger(groupId, id));
-          
-          // 构造触发内容，确保包含 @ID 格式以便 extractMentions 能识别
-          // 例如：[发送者]: 原始内容 @agent1 @agent2
-          const mentionTags = validMentions.map((id) => `@${id}`).join(' ');
-          const triggerContent = `[${senderName}]: ${content}\n\n（被点名的同事：${mentionTags}）`;
-          
-          // 使用现有的群聊处理逻辑
-          const agentIds = conversation.participants.filter((p) => p !== 'user');
-          
-          // 直接调用 handleGroupChat，它会处理连锁回复
-          try {
-            await handleGroupChat(groupId, conversation, agentIds, triggerContent);
-          } catch (err) {
-            console.error('部门群聊回复处理失败:', err);
-          }
-        }
-      }
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [sendMessage, handleGroupChat, isAgentInDeptCooldown, recordDeptTrigger]);
-
-  // 监听部门群聊重命名
-  useEffect(() => {
-    if (!window.soloforge?.chat?.onDeptGroupRename) return;
-
-    const unsubscribe = window.soloforge.chat.onDeptGroupRename((data) => {
-      const { departmentId, newName } = data;
-      if (!departmentId || !newName) return;
-
-      console.log(`部门群聊重命名: dept-${departmentId} -> ${newName}`);
-
-      renameDepartmentChat(departmentId, newName);
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [renameDepartmentChat]);
+  // ── 订阅主进程 IPC 事件（所有 useEffect 已迁移至 useAgentIpcEvents） ──
+  useAgentIpcEvents({
+    handleGroupChat,
+    isAgentInDeptCooldown,
+    recordDeptTrigger,
+    setAgentIdle,
+  });
 
   /**
    * 肃静！—— 停止群聊中所有 Agent 发言
