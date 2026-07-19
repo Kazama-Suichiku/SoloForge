@@ -200,6 +200,135 @@ function getDepartmentMembers(departmentId, ownerId) {
 }
 
 /**
+ * 检查 Agent 是否属于指定部门（兼容新旧 department / departments 字段）
+ * @param {import('../config/agent-config-store').AgentConfig} config - Agent 配置
+ * @param {string} departmentId - 部门 ID
+ * @returns {boolean}
+ * @private
+ */
+function _isAgentInDepartment(config, departmentId) {
+  if (!config || !departmentId) return false;
+  // 已离职的 Agent 永远不属于任何部门群聊
+  if ((config.status || 'active') === 'terminated') return false;
+  if (Array.isArray(config.departments) && config.departments.length > 0) {
+    return config.departments.includes(departmentId);
+  }
+  if (config.department && typeof config.department === 'string') {
+    return config.department === departmentId;
+  }
+  return false;
+}
+
+/**
+ * 检查 Agent 是否有权在指定部门群聊中发言
+ *
+ * 强制路由核心：Agent 只能在自己所属部门的群聊发言。
+ * 判定依据：Agent 配置的 departments 数组（兼容旧 department 字段）必须包含该 departmentId，
+ * 且 Agent 状态非 terminated。
+ *
+ * @param {string} agentId - 发言者 Agent ID
+ * @param {string} groupId - 群聊 ID（形如 `dept-{departmentId}`，或直接传 departmentId）
+ * @returns {{ allowed: boolean, reason: string, departmentId: string|null }}
+ */
+function canAgentPostInGroup(agentId, groupId) {
+  if (!agentId || !groupId) {
+    return { allowed: false, reason: '参数缺失：agentId/groupId 必填', departmentId: null };
+  }
+
+  // 从 groupId 提取 departmentId：支持 `dept-{x}` 与直接传 departmentId 两种形式
+  let departmentId = null;
+  if (typeof groupId === 'string' && groupId.startsWith('dept-')) {
+    departmentId = groupId.slice('dept-'.length);
+  } else {
+    departmentId = groupId;
+  }
+
+  const config = agentConfigStore.get(agentId);
+  if (!config) {
+    return { allowed: false, reason: `Agent 不存在: ${agentId}`, departmentId };
+  }
+
+  if ((config.status || 'active') === 'terminated') {
+    return { allowed: false, reason: `Agent ${config.name || agentId} 已离职，不能在部门群聊发言`, departmentId };
+  }
+  if (config.status === 'suspended') {
+    return { allowed: false, reason: `Agent ${config.name || agentId} 处于停职状态，不能在部门群聊发言`, departmentId };
+  }
+
+  if (!_isAgentInDepartment(config, departmentId)) {
+    const depts = Array.isArray(config.departments) && config.departments.length > 0
+      ? config.departments.join(',')
+      : (config.department || '（无）');
+    return {
+      allowed: false,
+      reason: `Agent ${config.name || agentId} 不属于部门 ${departmentId}（当前所属: ${depts}），禁止跨部门发言`,
+      departmentId,
+    };
+  }
+
+  return { allowed: true, reason: 'ok', departmentId };
+}
+
+/**
+ * 过滤 mentions 列表：只保留同部门且非发送者本人的成员
+ * 用于强制路由：群聊 @ 只能路由给本群（同部门）成员，防止跨部门 @
+ *
+ * @param {string} departmentId - 部门 ID
+ * @param {string} senderId - 发送者 Agent ID
+ * @param {string[]} mentions - 被 @ 的 Agent ID 列表
+ * @returns {{ valid: string[], rejected: { id: string, reason: string }[] }}
+ */
+function filterMentionsToMembers(departmentId, senderId, mentions) {
+  const valid = [];
+  const rejected = [];
+  if (!Array.isArray(mentions) || mentions.length === 0) {
+    return { valid, rejected };
+  }
+
+  const members = new Set(getDepartmentMembers(departmentId, senderId));
+  // 兜底：若 getDepartmentMembers 因 owner 缺失返回空，用 canAgentPostInGroup 单独校验每个 mention
+  const fallbackMode = members.size === 0;
+
+  for (const m of mentions) {
+    if (!m || typeof m !== 'string') {
+      rejected.push({ id: String(m), reason: '无效的 Agent ID' });
+      continue;
+    }
+    if (m === senderId) {
+      // @ 自己没有意义，直接过滤
+      rejected.push({ id: m, reason: '不能 @ 自己' });
+      continue;
+    }
+    const config = agentConfigStore.get(m);
+    if (!config) {
+      rejected.push({ id: m, reason: 'Agent 不存在' });
+      continue;
+    }
+    if ((config.status || 'active') === 'terminated') {
+      rejected.push({ id: m, reason: 'Agent 已离职' });
+      continue;
+    }
+    if (config.status === 'suspended') {
+      rejected.push({ id: m, reason: 'Agent 处于停职状态' });
+      continue;
+    }
+    if (fallbackMode) {
+      // 单独校验是否属于该部门
+      if (!_isAgentInDepartment(config, departmentId)) {
+        rejected.push({ id: m, reason: '不属于本部门群聊' });
+        continue;
+      }
+    } else if (!members.has(m)) {
+      rejected.push({ id: m, reason: '不属于本部门群聊' });
+      continue;
+    }
+    valid.push(m);
+  }
+
+  return { valid, rejected };
+}
+
+/**
  * 确保部门群聊存在（如果不存在则创建）
  * @param {string} departmentId - 部门 ID
  * @param {string} ownerId - 群主（CXO）Agent ID
@@ -314,7 +443,24 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     return { success: false, error: 'UI 未就绪' };
   }
 
+  // ── 强制路由 1：发送者校验 ──
+  // 只有属于该部门的 Agent 才能在部门群聊发言，禁止跨部门乱发
   const groupId = getDepartmentGroupId(departmentId);
+  const senderCheck = canAgentPostInGroup(senderId, groupId);
+  if (!senderCheck.allowed) {
+    logger.warn(`部门群聊发言被拒: ${senderCheck.reason}`, {
+      departmentId,
+      senderId,
+      groupId,
+    });
+    return {
+      success: false,
+      error: `发言被拒：${senderCheck.reason}`,
+      rejected: true,
+      reason: senderCheck.reason,
+    };
+  }
+
   const senderConfig = agentConfigStore.get(senderId);
   const senderName = senderConfig?.name || senderId;
 
@@ -327,14 +473,25 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     };
   }
 
-  // 过滤冷却中的 mentions（防止同一 Agent 被频繁触发）
+  // ── 强制路由 2：mentions 成员过滤 ──
+  // 先过滤掉非本部门成员（跨部门 @、已离职、不存在、@ 自己），再叠加冷却过滤
   let effectiveMentions = mentions;
   let filteredAgents = [];
+  let rejectedMentions = [];
   if (mentions.length > 0) {
-    const { valid, filtered } = filterCooldownMentions(groupId, mentions);
+    const { valid: memberValid, rejected } = filterMentionsToMembers(departmentId, senderId, mentions);
+    rejectedMentions = rejected;
+    if (rejected.length > 0) {
+      logger.warn(`部门群聊 mention 成员过滤: ${rejected.length} 个被拒`, {
+        departmentId,
+        senderId,
+        rejected: rejected.map((r) => `${r.id}(${r.reason})`).join(', '),
+      });
+    }
+    // 再叠加冷却过滤
+    const { valid, filtered } = filterCooldownMentions(groupId, memberValid);
     effectiveMentions = valid;
     filteredAgents = filtered;
-    
     if (filtered.length > 0) {
       logger.info(`部门群聊冷却过滤: ${filtered.join(', ')} 正在冷却中，不触发回复`);
     }
@@ -347,7 +504,7 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     senderId,
     senderName,
     content,
-    mentions: effectiveMentions, // 只发送有效的 mentions
+    mentions: effectiveMentions, // 只发送经过部门成员校验 + 冷却过滤后的有效 mentions
     timestamp: Date.now(),
   });
 
@@ -356,12 +513,14 @@ function postToDepartment(departmentId, senderId, content, mentions = []) {
     requestedMentions: mentions.length,
     effectiveMentions: effectiveMentions.length,
     filteredMentions: filteredAgents.length,
+    rejectedMentions: rejectedMentions.length,
   });
 
   return {
     success: true,
     effectiveMentions,
     filteredMentions: filteredAgents,
+    rejectedMentions,
   };
 }
 
@@ -460,6 +619,9 @@ module.exports = {
   getDepartmentGroupId,
   getAgentDepartmentInfo,
   getDepartmentMembers,
+  // ── 群聊路由强制（Phase 3-D）──
+  canAgentPostInGroup,
+  filterMentionsToMembers,
   ensureDepartmentGroup,
   addMemberToGroup,
   removeMemberFromGroup,

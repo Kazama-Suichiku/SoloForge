@@ -1,82 +1,156 @@
-import React, { useState, useEffect } from 'react';
-import { ArrowPathIcon, CloudIcon, CheckCircleIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline';
+/**
+ * SoloForge - 同步状态轻量指示器
+ *
+ * 设计：小图标 + 文字，适合放在标题栏 / 侧边栏。
+ * 点击展开 SyncPanel（浮窗模式，fixed 定位）。
+ *
+ * 状态显示规则（派生自 sync-store）：
+ *   syncing       → 旋转图标 + "同步中"
+ *   needsReauth   → 警告图标（琥珀色）+ "需登录"
+ *   error/failed  → 警告图标（红色）+ "同步失败"
+ *   configured    → 勾选图标（绿色）+ 上次同步相对时间
+ *   未配置         → 云图标（灰色）+ "未配置"（点击展开面板引导登录）
+ *
+ * 旧组件通过轮询 window.electronAPI.sync.getStatus 自管状态；本重写改用 sync-store
+ * 单一数据源，避免与 SyncPanel 重复请求。挂载时启动 store 轮询。
+ *
+ * @module components/sync/SyncStatus
+ */
 
-export default function SyncStatus() {
-  const [status, setStatus] = useState(null);
-  const [syncing, setSyncing] = useState(false);
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  ArrowPathIcon,
+  CloudIcon,
+  CheckCircleIcon,
+  ExclamationCircleIcon,
+  ExclamationTriangleIcon,
+} from '@heroicons/react/24/outline';
+import { useSyncStore } from '../../store/sync-store';
+import SyncPanel from './SyncPanel';
 
+// ─── 相对时间格式化（轻量） ─────────────────────────────────
+function relativeTime(lastSyncAt) {
+  if (!lastSyncAt) return '未同步';
+  let ts = null;
+  if (typeof lastSyncAt === 'number') ts = lastSyncAt;
+  else if (typeof lastSyncAt === 'object') {
+    const vals = Object.values(lastSyncAt).filter((v) => typeof v === 'number');
+    if (vals.length > 0) ts = Math.max(...vals);
+  }
+  if (!ts) return '未同步';
+  const diffMin = Math.floor((Date.now() - ts) / 60000);
+  if (diffMin < 1) return '刚刚';
+  if (diffMin < 60) return `${diffMin}分钟前`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}小时前`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}天前`;
+  return new Date(ts).toLocaleDateString();
+}
+
+/**
+ * @param {Object} props
+ * @param {boolean} [props.compact=false] - 紧凑模式：仅图标，无文字
+ * @param {string} [props.className]
+ * @param {'right'|'left'|'center'} [props.panelAlign='right'] - 浮窗水平对齐
+ */
+export default function SyncStatus({ compact = false, className = '', panelAlign = 'right' }) {
+  const {
+    syncStatus,
+    syncing,
+    error,
+    lastResult,
+    startPolling,
+    stopPolling,
+  } = useSyncStore();
+
+  const [panelOpen, setPanelOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  // 挂载时启动轮询（store 内部幂等）
   useEffect(() => {
-    loadStatus();
-    const interval = setInterval(loadStatus, 10000); // 每 10 秒更新状态
-    return () => clearInterval(interval);
-  }, []);
+    startPolling();
+    return () => stopPolling();
+  }, [startPolling, stopPolling]);
 
-  const loadStatus = async () => {
-    try {
-      const result = await window.electronAPI.sync.getStatus();
-      // sync:get-status 返回 { success, configured, needsReauth, ...服务端字段 }
-      // 旧组件逻辑依赖 status.isLoggedIn，而云同步服务返回的是 configured/isConfigured，
-      // 这里做兼容：configured=true 且非 needsReauth 视为已登录可用。
-      if (result?.success) {
-        setStatus({
-          ...result,
-          isLoggedIn: result.configured && !result.needsReauth,
-          syncing: result.syncing || false,
-          lastSyncTime: result.lastSyncTime,
-        });
-      } else if (result?.needsReauth) {
-        setStatus({ isLoggedIn: false, needsReauth: true });
+  // 点击外部关闭浮窗
+  useEffect(() => {
+    if (!panelOpen) return;
+    const handler = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setPanelOpen(false);
       }
-    } catch (err) {
-      console.error('加载同步状态失败:', err);
-    }
-  };
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [panelOpen]);
 
-  const handleManualSync = async () => {
-    setSyncing(true);
-    try {
-      await window.electronAPI.sync.manualSync();
-      await loadStatus();
-    } catch (err) {
-      console.error('手动同步失败:', err);
-    } finally {
-      setSyncing(false);
-    }
-  };
+  const togglePanel = useCallback(() => setPanelOpen((v) => !v), []);
 
-  if (!status || !status.isLoggedIn) {
-    return null;
+  // ─── 状态派生 ─────────────────────────────────────────────
+  const needsReauth = !!syncStatus?.needsReauth;
+  const isConfigured = !!syncStatus?.configured;
+  const hasError = !!error || (lastResult && lastResult.success === false && !lastResult.skipped);
+
+  let Icon = CloudIcon;
+  let iconCls = 'text-[var(--text-tertiary)]';
+  let label = '未配置';
+  let labelCls = 'text-[var(--text-tertiary)]';
+
+  if (needsReauth) {
+    Icon = ExclamationTriangleIcon;
+    iconCls = 'text-amber-500';
+    label = '需登录';
+    labelCls = 'text-amber-600 dark:text-amber-400';
+  } else if (syncing) {
+    Icon = ArrowPathIcon;
+    iconCls = 'text-[var(--color-primary)] animate-spin';
+    label = '同步中';
+    labelCls = 'text-[var(--text-secondary)]';
+  } else if (hasError) {
+    Icon = ExclamationCircleIcon;
+    iconCls = 'text-red-500';
+    label = '同步失败';
+    labelCls = 'text-red-600 dark:text-red-400';
+  } else if (isConfigured) {
+    Icon = CheckCircleIcon;
+    iconCls = 'text-green-500';
+    label = relativeTime(syncStatus?.lastSyncAt);
+    labelCls = 'text-[var(--text-secondary)]';
   }
 
-  return (
-    <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-      <CloudIcon className="w-4 h-4" />
-      
-      {status.syncing ? (
-        <span className="flex items-center gap-1">
-          <ArrowPathIcon className="w-4 h-4 animate-spin" />
-          同步中...
-        </span>
-      ) : status.lastSyncTime ? (
-        <span className="flex items-center gap-1">
-          <CheckCircleIcon className="w-4 h-4 text-green-500" />
-          {new Date(status.lastSyncTime).toLocaleTimeString()}
-        </span>
-      ) : (
-        <span className="flex items-center gap-1">
-          <ExclamationCircleIcon className="w-4 h-4 text-yellow-500" />
-          未同步
-        </span>
-      )}
+  // ─── 浮窗定位 ─────────────────────────────────────────────
+  const alignCls =
+    panelAlign === 'left' ? 'left-0' :
+    panelAlign === 'center' ? 'left-1/2 -translate-x-1/2' :
+    'right-0';
 
+  return (
+    <div ref={containerRef} className={`relative inline-block ${className}`}>
       <button
-        onClick={handleManualSync}
-        disabled={syncing || status.syncing}
-        className="ml-2 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded
-                 disabled:opacity-50 disabled:cursor-not-allowed"
+        type="button"
+        onClick={togglePanel}
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs
+                   hover:bg-[var(--bg-elevated)] transition-colors
+                   focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+        aria-label={`云同步：${label}（点击${panelOpen ? '关闭' : '展开'}面板）`}
+        aria-expanded={panelOpen}
       >
-        手动同步
+        <Icon className={`w-4 h-4 ${iconCls}`} aria-hidden="true" />
+        {!compact && (
+          <span className={labelCls}>{label}</span>
+        )}
       </button>
+
+      {panelOpen && (
+        <div
+          className={`absolute top-full mt-1 ${alignCls} z-50`}
+          role="dialog"
+          aria-label="云同步面板"
+        >
+          <SyncPanel onClose={() => setPanelOpen(false)} />
+        </div>
+      )}
     </div>
   );
 }

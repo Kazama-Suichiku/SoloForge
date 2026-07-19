@@ -1,5 +1,5 @@
 /**
- * SoloForge - IPC 注册集中入口（P1-2 拆分产物）
+ * SoloForge - IPC 注册集中入口（P1-2 拆分产物 / P3-E DI 适配）
  *
  * 从 main.js 抽出全部 IPC 注册逻辑：
  * - 14 个 setup*IpcHandlers（账号 / agent / chat / 权限 / 报告 / agent-config /
@@ -7,6 +7,14 @@
  * - 10 个内联 ipcMain.handle（app:get-version / app:open-external / app:quit /
  *   chat-history:get|set|remove / todo:get-all|get-agent / patrol:get-status|toggle）
  * - todoStore.onChanged 订阅（向所有窗口广播 todo:updated）
+ *
+ * P3-E 适配：
+ * - 运行时依赖（store / manager）改为从 appContext.get(name) 获取，而非直接引用
+ *   模块顶层 require 的全局单例。这样测试时可用 appContext.override(name, mock)
+ *   替换依赖，而无需修改本模块。
+ * - 顶层 require 保留（用于初始化期把实例注册到 DI 容器 —— 但本模块不再承担注册职责，
+ *   已由 lifecycle.js 统一完成；此处 require 仅是为了获取 setup 函数引用）。
+ * - setup 函数的逻辑完全不变，只改依赖获取方式。
  *
  * 模块结构：
  * - registerGlobalIpcHandlers()：注册不依赖 webContents 的全局 handler + todoStore 订阅。
@@ -22,6 +30,8 @@
 const { app, ipcMain, shell } = require('electron');
 const { logger } = require('./utils/logger');
 const { appContext } = require('./app-context');
+// 引入 lifecycle 会触发其模块加载期的 registerFlushableStores()，
+// 把 chatHistoryStore / todoStore / memoryManager 等 store 单例注册进 DI 容器。
 const { flushAll } = require('./lifecycle');
 
 // 14 个 setup handler 模块（账号 / agent / chat / 权限 / 报告 / agent-config /
@@ -35,8 +45,10 @@ const { setupOperationsIpcHandlers } = require('./operations/operations-ipc-hand
 const { setupCollaborationIpcHandlers } = require('./collaboration/collaboration-ipc-handlers');
 const { setupPMIpcHandlers } = require('./pm/pm-ipc-handlers');
 const { setupAccountIpcHandlers } = require('./account/account-ipc-handlers');
+const { setupDeviceIpcHandlers } = require('./account/device-ipc-handlers');
 
-// 依赖单例
+// 依赖单例：这些 require 同时让对应模块在 DI 容器外也保持单例语义。
+// 运行时通过 appContext.get(name) 获取，以便支持测试期 override。
 const { chatManager } = require('./chat');
 const { chatHistoryStore } = require('./chat/chat-history-store');
 const { todoStore } = require('./tools/todo-store');
@@ -78,30 +90,37 @@ function registerGlobalIpcHandlers() {
   });
 
   // ─── 聊天历史持久化 IPC（文件存储，不依赖 localStorage） ───
+  // 依赖从 DI 容器获取，便于测试 override。
   ipcMain.handle('chat-history:get', () => {
-    return chatHistoryStore.getItem();
+    const store = appContext.get('chatHistoryStore') || chatHistoryStore;
+    return store.getItem();
   });
 
   ipcMain.handle('chat-history:set', (_event, value) => {
-    chatHistoryStore.setItem(value);
+    const store = appContext.get('chatHistoryStore') || chatHistoryStore;
+    store.setItem(value);
   });
 
   ipcMain.handle('chat-history:remove', () => {
-    chatHistoryStore.removeItem();
+    const store = appContext.get('chatHistoryStore') || chatHistoryStore;
+    store.removeItem();
   });
 
   // ─── Agent TODO IPC ───────────────────────────────────────────
   ipcMain.handle('todo:get-all', () => {
-    return todoStore.getAll();
+    const store = appContext.get('todoStore') || todoStore;
+    return store.getAll();
   });
 
   ipcMain.handle('todo:get-agent', (_event, agentId) => {
-    return todoStore.getTodos(agentId);
+    const store = appContext.get('todoStore') || todoStore;
+    return store.getTodos(agentId);
   });
 
   // ─── 任务巡查开关 IPC ────────────────────────────────────────
   // 注意：这里通过 appContext.getTaskPatrol() 读取当前实例，
   // 用 isRunning() 公开方法代替原来的 _running 私有字段访问（P1-10）。
+  // getTaskPatrol() 内部等价于 appContext.get('taskPatrol')。
   ipcMain.handle('patrol:get-status', () => {
     const patrol = appContext.getTaskPatrol();
     return { running: patrol?.isRunning() ?? false };
@@ -128,8 +147,9 @@ function registerGlobalIpcHandlers() {
   setupSyncIpcHandlers();
   logger.info('云同步 IPC 已注册');
 
-  // TODO 变更时推送给所有渲染进程
-  todoStore.onChanged((agentId, todos) => {
+  // TODO 变更时推送给所有渲染进程。依赖从 DI 容器获取。
+  const todoStoreForSubscribe = appContext.get('todoStore') || todoStore;
+  todoStoreForSubscribe.onChanged((agentId, todos) => {
     const { BrowserWindow } = require('electron');
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('todo:updated', { agentId, todos });
@@ -151,8 +171,9 @@ function registerWindowHandlers(webContents) {
   setupChatIpcHandlers(webContents);
   setupPermissionsIpcHandlers(webContents);
 
-  // 设置部门群聊管理器的 webContents
-  departmentGroup.setWebContents(webContents);
+  // 设置部门群聊管理器的 webContents（依赖从 DI 容器获取，回退到顶层单例）
+  const group = appContext.get('departmentGroup') || departmentGroup;
+  group.setWebContents(webContents);
 
   // 不依赖 webContents 的 setup handler（原在 createWindow 内一并注册）
   setupReportIpcHandlers();
@@ -161,7 +182,9 @@ function registerWindowHandlers(webContents) {
   setupCollaborationIpcHandlers();
 
   setupPMIpcHandlers();
-  registerMemoryIPCHandlers(memoryManager);
+  // memoryManager 从 DI 容器获取，回退到顶层单例（保持兼容）
+  const mm = appContext.get('memoryManager') || memoryManager;
+  registerMemoryIPCHandlers(mm);
   setupAttachmentIpcHandlers();
 
   try {
@@ -180,6 +203,7 @@ function registerWindowHandlers(webContents) {
  */
 function registerAccountIpcHandlers(handlers) {
   setupAccountIpcHandlers(handlers);
+  setupDeviceIpcHandlers();
   logger.info('账号系统 IPC 已注册');
 }
 

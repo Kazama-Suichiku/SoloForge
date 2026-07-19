@@ -110,6 +110,11 @@ const CHANNELS = {
   CHAT_DEPT_GROUP_MESSAGE: 'chat:dept-group-message',
   CHAT_DEPT_GROUP_RENAME: 'chat:dept-group-rename',
   CHAT_DEPT_GROUP_GET_ALL: 'chat:dept-group-get-all',
+  // 设备管理
+  DEVICE_GET_CURRENT: 'device:get-current',
+  DEVICE_LIST: 'device:list',
+  DEVICE_RENAME: 'device:rename',
+  DEVICE_REMOVE: 'device:remove',
 };
 
 contextBridge.exposeInMainWorld('soloforge', {
@@ -484,5 +489,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     push: () => ipcRenderer.invoke('sync:push'),
     getStatus: () => ipcRenderer.invoke('sync:get-status'),
     setAutoSync: (enabled) => ipcRenderer.invoke('sync:set-auto-sync', enabled),
+  },
+
+  // 设备管理
+  // 通道：device:get-current / device:list / device:rename / device:remove
+  // 对应 src/main/account/device-ipc-handlers.js 的 setupDeviceIpcHandlers()。
+  // getCurrent：返回 { success, device: { deviceId, deviceName, deviceType, userId, isCurrent } | null }
+  // list：返回 { success, devices: [...] }
+  // rename：参数 name: string，返回 { success, deviceName }
+  // remove：参数 deviceId: string，返回 { success }（不允许注销当前设备）
+  device: {
+    getCurrent: () => ipcRenderer.invoke(CHANNELS.DEVICE_GET_CURRENT),
+    list: () => ipcRenderer.invoke(CHANNELS.DEVICE_LIST),
+    rename: (name) => ipcRenderer.invoke(CHANNELS.DEVICE_RENAME, name),
+    remove: (deviceId) => ipcRenderer.invoke(CHANNELS.DEVICE_REMOVE, deviceId),
   },
 });

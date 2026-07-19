@@ -6,6 +6,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuthStore } from '../store/auth-store';
 import { useAgentStore } from '../store/agent-store';
 import AgentAvatar, { isImageAvatar } from '../components/AgentAvatar';
+import SyncPanel from '../components/sync/SyncPanel';
+import DeviceManager from '../components/settings/DeviceManager';
 
 /**
  * 权限开关组件
@@ -508,6 +510,20 @@ export default function Settings({ onBack, onOpenAgentSettings, onOpenDashboard 
                   切换公司
                 </button>
               </div>
+            </div>
+          </SettingsSection>
+
+          {/* 云同步 */}
+          <SettingsSection title="☁️ 云同步">
+            <div className="py-4">
+              <SyncPanel />
+            </div>
+          </SettingsSection>
+
+          {/* 设备管理 */}
+          <SettingsSection title="📱 设备管理">
+            <div className="py-4">
+              <DeviceManager />
             </div>
           </SettingsSection>
 

@@ -7,6 +7,9 @@
  * - GET /sync/status - 获取同步状态
  * - GET /app/version - 检查应用版本
  * - GET /app/download - 下载最新 APK
+ * - GET /devices?userId=xxx - 列出用户设备（P3-C）
+ * - POST /devices/register - 注册/更新设备（P3-C）
+ * - DELETE /devices/:deviceId?userId=xxx - 删除设备（P3-C）
  */
 
 export interface Env {
@@ -141,7 +144,8 @@ interface DocumentRecord {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    // P3-C：新增 DELETE（/devices/:deviceId）
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
@@ -154,6 +158,112 @@ function jsonResponse(data: any, status = 200) {
       ...corsHeaders(),
     },
   });
+}
+
+// ============ P3-C：限流中间件 ============
+//
+// 设计要点：
+// 1. Cloudflare Worker 无持久存储，限流计数存于 globalThis。
+//    同一隔离体（isolate）在生命周期内复用 globalThis，可防恶意高频请求；
+//    隔离体回收/重启后计数清零，这是已知限制，单隔离体内有效即可。
+// 2. 滑动窗口策略：每个 key 维护请求时间戳数组，剔除已过期窗口外的记录，
+//    再判断当前窗口内请求数是否超限。实现简单、内存占用低。
+// 3. 429 响应包含 Retry-After header（windowMs/1000 秒），遵循 HTTP 语义。
+// 4. key 选择：用户鉴权后用 userId；未鉴权（如 /auth/login）用 IP。
+//    IP 取自 CF-Connecting-IP（Cloudflare 注入），缺失时回退 X-Forwarded-For
+//    第一个值，再缺失则用 'unknown'。
+//
+// 限流策略表：
+// | 端点             | key    | limit | window  | 说明                 |
+// |------------------|--------|-------|---------|----------------------|
+// | /sync/*          | userId | 60    | 60s     | 同步不需高频          |
+// | /auth/login      | IP     | 10    | 60s     | 防暴力破解            |
+// | /auth/register   | IP     | 5     | 60s     | 防注册刷号            |
+// | /app/publish     | secret | 5     | 60s     | 用 SYNC_SECRET 鉴权后 |
+// | /devices/*       | userId | 60    | 60s     | 设备管理（与 sync 同级）|
+// | 其他端点         | IP     | 120   | 60s     | 宽松默认              |
+
+interface RateLimitEntry {
+  timestamps: number[];
+}
+
+// globalThis 上挂载限流存储。Cloudflare Worker 隔离体间不共享 globalThis，
+// 但同一隔离体生命周期内有效，足以防单点高频攻击。
+function getRateLimitStore(): Map<string, RateLimitEntry> {
+  const g = globalThis as any;
+  if (!g._rateLimitStore) {
+    g._rateLimitStore = new Map<string, RateLimitEntry>();
+  }
+  return g._rateLimitStore as Map<string, RateLimitEntry>;
+}
+
+// 取客户端 IP。Cloudflare 注入 CF-Connecting-IP；无则回退到 X-Forwarded-For 首段。
+function getClientIP(request: Request): string {
+  const cf = request.headers.get('CF-Connecting-IP');
+  if (cf) return cf;
+  const xff = request.headers.get('X-Forwarded-For');
+  if (xff) {
+    const first = xff.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return 'unknown';
+}
+
+// 限流检查。返回 null 表示放行；返回 Response 表示已超限（429，含 Retry-After）。
+// key：限流维度键（userId 或 IP 或 secret 标识）。
+// limit：窗口内允许的最大请求数。windowMs：窗口时长（毫秒）。
+function rateLimit(
+  request: Request,
+  key: string,
+  limit: number,
+  windowMs: number
+): Response | null {
+  const store = getRateLimitStore();
+  const now = Date.now();
+  const windowStart = now - windowMs;
+
+  let entry = store.get(key);
+  if (!entry) {
+    entry = { timestamps: [] };
+    store.set(key, entry);
+  }
+
+  // 剔除窗口外的旧时间戳（滑动窗口）
+  entry.timestamps = entry.timestamps.filter(ts => ts > windowStart);
+
+  if (entry.timestamps.length >= limit) {
+    // 已超限：返回 429 + Retry-After
+    const retryAfterSec = Math.max(1, Math.ceil(windowMs / 1000));
+    return new Response(
+      JSON.stringify({
+        error: 'Too many requests',
+        retryAfter: retryAfterSec,
+      }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': String(retryAfterSec),
+          ...corsHeaders(),
+        },
+      }
+    );
+  }
+
+  // 放行并记录本次请求时间戳
+  entry.timestamps.push(now);
+  return null;
+}
+
+// 针对鉴权后端点的便捷封装：用 token.userId 作 key 限流。
+// 调用方需先通过 requireToken 拿到 auth.userId。
+function rateLimitByUserId(
+  request: Request,
+  userId: string,
+  limit: number,
+  windowMs: number
+): Response | null {
+  return rateLimit(request, `user:${userId}`, limit, windowMs);
 }
 
 export default {
@@ -179,10 +289,16 @@ export default {
       }
 
       if (path === '/health') {
+        // P3-C：默认限流（每 IP 120 次/分钟）。
+        const rlHealth = rateLimit(request, `ip:${getClientIP(request)}`, 120, 60_000);
+        if (rlHealth) return rlHealth;
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
 
       if (path === '/app/version') {
+        // P3-C：默认限流（每 IP 120 次/分钟）。
+        const rlVer = rateLimit(request, `ip:${getClientIP(request)}`, 120, 60_000);
+        if (rlVer) return rlVer;
         // 从数据库获取最新版本信息（如果有的话）
         let versionInfo = { ...APP_VERSION };
         try {
@@ -217,15 +333,41 @@ export default {
 
       // 用户认证相关
       if (path === '/auth/register' && request.method === 'POST') {
+        // P3-C：限流（每 IP 5 次/分钟，防注册刷号）。在鉴权之前，用 IP 作 key。
+        const ip = getClientIP(request);
+        const rl = rateLimit(request, `ip:${ip}`, 5, 60_000);
+        if (rl) return rl;
         return await handleRegister(request, env);
       }
 
       if (path === '/auth/login' && request.method === 'POST') {
+        // P3-C：限流（每 IP 10 次/分钟，防暴力破解）。在鉴权之前，用 IP 作 key。
+        const ip = getClientIP(request);
+        const rl = rateLimit(request, `ip:${ip}`, 10, 60_000);
+        if (rl) return rl;
         return await handleLogin(request, env);
       }
 
       if (path === '/auth/profile' && request.method === 'GET') {
+        // P3-C：默认限流（每 IP 120 次/分钟）。
+        const rlProf = rateLimit(request, `ip:${getClientIP(request)}`, 120, 60_000);
+        if (rlProf) return rlProf;
         return await handleGetProfile(request, env);
+      }
+
+      // P3-C：设备管理端点。requireToken 鉴权 + 每用户限流在 handler 内部完成。
+      if (path === '/devices' && request.method === 'GET') {
+        return await handleDevicesList(request, env);
+      }
+
+      if (path === '/devices/register' && request.method === 'POST') {
+        return await handleDeviceRegister(request, env);
+      }
+
+      // DELETE /devices/:deviceId?userId=xxx
+      if (path.startsWith('/devices/') && request.method === 'DELETE') {
+        const deviceId = decodeURIComponent(path.slice('/devices/'.length));
+        return await handleDeviceDelete(request, env, deviceId);
       }
 
       return jsonResponse({ error: 'Not found' }, 404);
@@ -255,6 +397,10 @@ async function handlePush(request: Request, env: Env): Promise<Response> {
     return auth;
   }
 
+  // P3-C：限流（每用户 60 次/分钟，同步不需高频）。鉴权后用 userId 作 key。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
+
   if (!data) {
     return jsonResponse({ error: 'Missing data field' }, 400);
   }
@@ -274,12 +420,17 @@ async function handlePush(request: Request, env: Env): Promise<Response> {
   const errors: string[] = [];
 
   // 更新设备信息
+  // P3-C：UPSERT 同时更新 device_name / device_type / last_sync_at，
+  // 与 POST /devices/register 语义一致；push 成功即视为一次有效同步。
   try {
     await env.DB.prepare(`
       INSERT INTO devices (id, user_id, device_name, device_type, last_sync_at)
       VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET last_sync_at = ?
-    `).bind(deviceId, userId, deviceId, deviceType || 'unknown', now, now).run();
+      ON CONFLICT(id) DO UPDATE SET
+        device_name = COALESCE(excluded.device_name, devices.device_name),
+        device_type = COALESCE(excluded.device_type, devices.device_type),
+        last_sync_at = excluded.last_sync_at
+    `).bind(deviceId, userId, deviceId, deviceType || 'unknown', now).run();
   } catch (e) {
     errors.push(`devices: ${String(e)}`);
   }
@@ -547,6 +698,10 @@ async function handlePull(request: Request, env: Env): Promise<Response> {
     return auth;
   }
 
+  // P3-C：限流（每用户 60 次/分钟，同步不需高频）。鉴权后用 userId 作 key。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
+
   const sinceTimestamp = since || 0;
 
   // P2-4c：可选 company_id 过滤。
@@ -626,6 +781,17 @@ async function handlePull(request: Request, env: Env): Promise<Response> {
 
   const now = Date.now();
 
+  // P3-C：pull 成功后更新该设备的 last_sync_at（仅更新本用户本设备，防越权）。
+  // 失败不阻断响应（best-effort），仅记录到 errors 数组并省略——pull 主路径不应因
+  // 元数据写入失败而让客户端拿不到数据。这里静默 try/catch。
+  try {
+    await env.DB.prepare(
+      `UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?`
+    ).bind(now, deviceId, auth.userId).run();
+  } catch (e) {
+    // 静默：设备行可能尚未由 push 创建；客户端通常先 push 再 pull。
+  }
+
   return jsonResponse({
     success: true,
     data: {
@@ -654,6 +820,10 @@ async function handleStatus(request: Request, env: Env): Promise<Response> {
   if (auth instanceof Response) {
     return auth;
   }
+
+  // P3-C：限流（每用户 60 次/分钟，/sync/* 统一策略）。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
 
   // 获取各数据类型的数量
   const convCount = await env.DB.prepare(`SELECT COUNT(*) as count FROM conversations WHERE user_id = ? AND deleted = 0`).bind(userId).first();
@@ -699,6 +869,11 @@ async function handleAppPublish(request: Request, env: Env): Promise<Response> {
   if (!secret || secret !== env.SYNC_SECRET) {
     return jsonResponse({ error: 'Unauthorized' }, 401);
   }
+
+  // P3-C：限流（全局 5 次/分钟）。publish 用 SYNC_SECRET 鉴权（无用户维度），
+  // 用固定 key 'publish' 限流，防止发布接口被高频调用刷版本。
+  const rl = rateLimit(request, 'publish', 5, 60_000);
+  if (rl) return rl;
 
   try {
     const body = await request.json() as {
@@ -1096,4 +1271,184 @@ async function handleGetProfile(request: Request, env: Env): Promise<Response> {
     createdAt: user.created_at,
     lastLoginAt: user.last_login_at,
   });
+}
+
+// ============ P3-C：设备管理端点 ============
+//
+// 三个端点均用 requireToken 鉴权：
+// - GET    /devices?userId=xxx        列出该用户的所有设备
+// - POST   /devices/register          注册/更新设备（UPSERT）
+// - DELETE /devices/:deviceId?userId=xxx  删除设备（带 user_id 校验，防删别人的）
+//
+// 限流：每用户 60 次/分钟（与 /sync/* 同级），在 handler 内鉴权后执行。
+//
+// 与批次1 DeviceManager.jsx 的对接：
+// - fetchDevices()  → GET /devices?userId=...（带 Authorization: Bearer <token>）
+// - registerDevice() → POST /devices/register（body: { deviceId, deviceName?, deviceType? }）
+// - removeDevice()  → DELETE /devices/<deviceId>?userId=...（带 Authorization: Bearer <token>）
+
+// 设备记录返回给客户端的形状（字段名转 camelCase）。
+interface DeviceRecord {
+  id: string;
+  userId: string;
+  deviceName: string | null;
+  deviceType: string | null;
+  lastSyncAt: number | null;
+  createdAt: number | null;
+}
+
+// GET /devices?userId=xxx
+async function handleDevicesList(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const userId = url.searchParams.get('userId');
+
+  if (!userId) {
+    return jsonResponse({ error: 'Missing userId' }, 400);
+  }
+
+  // P0-12：要求 token，且 token.userId 必须与查询参数 userId 一致
+  const auth = await requireToken(request, env, userId);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  // P3-C：限流（每用户 60 次/分钟）。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
+
+  try {
+    const result = await env.DB.prepare(`
+      SELECT id, user_id, device_name, device_type, last_sync_at, created_at
+      FROM devices
+      WHERE user_id = ?
+      ORDER BY created_at ASC
+    `).bind(userId).all<DeviceRecord>();
+
+    const devices = (result.results || []).map((d: any): DeviceRecord => ({
+      id: d.id as string,
+      userId: d.user_id as string,
+      deviceName: d.device_name ?? null,
+      deviceType: d.device_type ?? null,
+      lastSyncAt: d.last_sync_at ?? null,
+      createdAt: d.created_at ?? null,
+    }));
+
+    return jsonResponse({ success: true, devices });
+  } catch (error) {
+    console.error('Devices list error:', error);
+    return jsonResponse({ error: '获取设备列表失败: ' + String(error) }, 500);
+  }
+}
+
+// POST /devices/register
+// body: { deviceId, deviceName?, deviceType? }
+// UPSERT：已有 deviceId 则更新 device_name/device_type/last_sync_at，没有则插入。
+async function handleDeviceRegister(request: Request, env: Env): Promise<Response> {
+  let body: { deviceId?: string; deviceName?: string; deviceType?: string };
+  try {
+    body = await request.json() as typeof body;
+  } catch (e) {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { deviceId, deviceName, deviceType } = body;
+  if (!deviceId) {
+    return jsonResponse({ error: 'Missing deviceId' }, 400);
+  }
+
+  // requireToken 不传 expectedUserId：deviceId 由客户端生成，token.userId 即归属用户。
+  // token.userId 即设备归属者，后续所有读写都以它为准。
+  const auth = await requireToken(request, env);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  // P3-C：限流（每用户 60 次/分钟）。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
+
+  const userId = auth.userId;
+  const now = Date.now();
+  // deviceName 缺省用 deviceId；deviceType 缺省用 'unknown'
+  const name = deviceName || deviceId;
+  const type = deviceType || 'unknown';
+
+  try {
+    // UPSERT：主键 id 冲突时更新 device_name/device_type/last_sync_at。
+    // created_at 不在冲突更新列表中（保留首次注册时间）。
+    await env.DB.prepare(`
+      INSERT INTO devices (id, user_id, device_name, device_type, last_sync_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        device_name = excluded.device_name,
+        device_type = excluded.device_type,
+        last_sync_at = excluded.last_sync_at
+    `).bind(deviceId, userId, name, type, now).run();
+
+    // 回读返回完整记录（含 created_at）
+    const row = await env.DB.prepare(`
+      SELECT id, user_id, device_name, device_type, last_sync_at, created_at
+      FROM devices
+      WHERE id = ? AND user_id = ?
+    `).bind(deviceId, userId).first<any>();
+
+    const device: DeviceRecord = {
+      id: row?.id as string,
+      userId: row?.user_id as string,
+      deviceName: row?.device_name ?? null,
+      deviceType: row?.device_type ?? null,
+      lastSyncAt: row?.last_sync_at ?? null,
+      createdAt: row?.created_at ?? null,
+    };
+
+    return jsonResponse({ success: true, device });
+  } catch (error) {
+    console.error('Device register error:', error);
+    return jsonResponse({ error: '注册设备失败: ' + String(error) }, 500);
+  }
+}
+
+// DELETE /devices/:deviceId?userId=xxx
+// 从 devices 表删除，WHERE id = ? AND user_id = ?（防删别人的设备）。
+async function handleDeviceDelete(
+  request: Request,
+  env: Env,
+  deviceId: string
+): Promise<Response> {
+  const url = new URL(request.url);
+  const userId = url.searchParams.get('userId');
+
+  if (!userId) {
+    return jsonResponse({ error: 'Missing userId' }, 400);
+  }
+  if (!deviceId) {
+    return jsonResponse({ error: 'Missing deviceId' }, 400);
+  }
+
+  // P0-12：要求 token，且 token.userId 必须与查询参数 userId 一致
+  const auth = await requireToken(request, env, userId);
+  if (auth instanceof Response) {
+    return auth;
+  }
+
+  // P3-C：限流（每用户 60 次/分钟）。
+  const rl = rateLimitByUserId(request, auth.userId, 60, 60_000);
+  if (rl) return rl;
+
+  try {
+    // 带上 user_id 校验，防止 token 持有者删除别人的设备。
+    // ON CONFLICT 无关；直接 DELETE，未匹配则 affectedRows=0（视为成功，幂等删除）。
+    const result = await env.DB.prepare(
+      `DELETE FROM devices WHERE id = ? AND user_id = ?`
+    ).bind(deviceId, auth.userId).run();
+
+    // D1 不一定返回 meta.changes，best-effort：不区分"存在 vs 不存在"。
+    // 只要 SQL 执行不抛错即视为成功（DELETE 是幂等的）。
+    void result;
+
+    return jsonResponse({ success: true });
+  } catch (error) {
+    console.error('Device delete error:', error);
+    return jsonResponse({ error: '删除设备失败: ' + String(error) }, 500);
+  }
 }

@@ -132,6 +132,54 @@ function setupChatIpcHandlers(webContents) {
       return [];
     }
   });
+
+  // ── Phase 3-D：IPC 层群聊发送者校验 ──────────────────────────
+  // 渲染进程/未来调用方通过此 invoke 在部门群聊发消息。
+  // 强制：发送者必须属于该部门群聊，否则拒绝。mentions 同样做成员过滤。
+  // 通道名以字符串字面量定义，避免修改 shared/ipc-channels.js（本任务文件范围外）。
+  const CHAT_DEPT_GROUP_POST = 'chat:dept-group-post';
+  ipcMain.handle(CHAT_DEPT_GROUP_POST, async (_event, request) => {
+    const { departmentId, senderId, content, mentions } = request || {};
+
+    if (!departmentId || !senderId || !content) {
+      return { success: false, error: '参数不完整：需要 departmentId、senderId、content' };
+    }
+
+    // 1) 发送者校验：必须属于该部门
+    const groupId = departmentGroup.getDepartmentGroupId(departmentId);
+    const senderCheck = departmentGroup.canAgentPostInGroup(senderId, groupId);
+    if (!senderCheck.allowed) {
+      logger.warn('IPC 部门群聊发言被拒（发送者校验）:', {
+        departmentId, senderId, reason: senderCheck.reason,
+      });
+      return {
+        success: false,
+        error: `发言被拒：${senderCheck.reason}`,
+        rejected: true,
+        reason: senderCheck.reason,
+      };
+    }
+
+    // 2) 走主流程发送（内部会再做一次成员/冷却过滤，双重保险）
+    const result = departmentGroup.postToDepartment(
+      departmentId,
+      senderId,
+      content,
+      Array.isArray(mentions) ? mentions : []
+    );
+
+    if (!result.success) {
+      return { success: false, error: result.error || '发送失败' };
+    }
+
+    return {
+      success: true,
+      groupId,
+      effectiveMentions: result.effectiveMentions,
+      filteredMentions: result.filteredMentions,
+      rejectedMentions: result.rejectedMentions,
+    };
+  });
 }
 
 /**
@@ -146,6 +194,7 @@ function removeChatIpcHandlers() {
   ipcMain.removeHandler(CHANNELS.TERMINATION_DECIDE);
   ipcMain.removeHandler(CHANNELS.TERMINATION_CLEAR_PROCESSED);
   ipcMain.removeHandler(CHANNELS.CHAT_DEPT_GROUP_GET_ALL);
+  ipcMain.removeHandler('chat:dept-group-post');
 }
 
 module.exports = {
