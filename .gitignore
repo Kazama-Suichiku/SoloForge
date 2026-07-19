@@ -41,3 +41,16 @@ npm-debug.log*
 build/*.icns
 build/*.ico
 !build/ICONS.md
+
+# 安装包（APK / 其他）
+*.apk
+
+# Hermes 诊断 / 临时分析产物
+.hermes-diagnostic/
+
+# 备份文件
+*.backup
+
+# 日志文件（Phase 2-9 logger 落盘）
+soloforge-*.log
+audit-*.jsonl
