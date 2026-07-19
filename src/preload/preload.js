@@ -474,13 +474,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAgentBalance: (agentId) => ipcRenderer.invoke('salary:get-agent-balance', agentId),
 
   // 云同步 API
+  // 注意：登录/注册/登出走 account 命名空间（account:login/register/logout）。
+  // account-ipc-handlers 在登录成功后会自动调用 cloudSync.configure + startAutoSync，
+  // 因此 sync 命名空间不再暴露 login/logout/register。
+  // 以下通道均已在 sync-ipc-handlers.js 注册对应主进程 handler。
   sync: {
-    init: (config) => ipcRenderer.invoke('sync:init', config),
-    register: (credentials) => ipcRenderer.invoke('sync:register', credentials),
-    login: (credentials) => ipcRenderer.invoke('sync:login', credentials),
-    logout: () => ipcRenderer.invoke('sync:logout'),
-    restoreSession: () => ipcRenderer.invoke('sync:restore-session'),
-    getUser: () => ipcRenderer.invoke('sync:get-user'),
     manualSync: () => ipcRenderer.invoke('sync:manual-sync'),
     pull: () => ipcRenderer.invoke('sync:pull'),
     push: () => ipcRenderer.invoke('sync:push'),

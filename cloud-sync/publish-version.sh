@@ -6,7 +6,24 @@
 # ./publish-version.sh 2.2.0 220 "https://github.com/yourrepo/releases/download/v2.2.0/app-release.apk" "修复若干问题"
 
 SERVER_URL="https://soloforge-sync.fengzhongcuizhu.workers.dev"
-SECRET="soloforge-sync-secret-change-me"
+
+# P0-1 修复：不再硬编码 SECRET。读取顺序：环境变量 SYNC_SECRET → 本地 .dev.vars 文件。
+# 任一来源都没有则报错退出，避免误用空密钥或默认密钥发布。
+SECRET="${SYNC_SECRET:-}"
+DEV_VARS_PATH="${DEV_VARS_PATH:-$(dirname "$0")/.dev.vars}"
+
+if [ -z "$SECRET" ] && [ -f "$DEV_VARS_PATH" ]; then
+  # 仅取 SYNC_SECRET=... 行，剥离引号
+  SECRET=$(grep -E '^SYNC_SECRET=' "$DEV_VARS_PATH" | head -n1 | sed -E 's/^SYNC_SECRET=//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')
+fi
+
+if [ -z "$SECRET" ]; then
+  echo "❌ 未找到 SYNC_SECRET。" >&2
+  echo "   请通过环境变量提供：export SYNC_SECRET='your-secret'" >&2
+  echo "   或在 $DEV_VARS_PATH 写入：SYNC_SECRET=\"your-secret\"" >&2
+  echo "   生产密钥用 wrangler secret put SYNC_SECRET 设置于 Worker 侧。" >&2
+  exit 1
+fi
 
 VERSION="$1"
 VERSION_CODE="$2"
@@ -36,8 +53,9 @@ echo "   说明: ${RELEASE_NOTES}"
 echo ""
 
 RESPONSE=$(curl -s -X POST \
-    "${SERVER_URL}/app/publish?secret=${SECRET}" \
+    "${SERVER_URL}/app/publish" \
     -H "Content-Type: application/json" \
+    -H "X-Sync-Secret: ${SECRET}" \
     -d "{
         \"version\": \"${VERSION}\",
         \"versionCode\": ${VERSION_CODE},

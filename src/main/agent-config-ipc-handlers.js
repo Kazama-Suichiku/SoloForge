@@ -17,6 +17,7 @@ const {
 const { logger } = require('./utils/logger');
 const { dataPath } = require('./account/data-path');
 const CHANNELS = require('../shared/ipc-channels');
+const { safeHandler } = require('./utils/safe-handler');
 
 /**
  * 设置 Agent 配置相关的 IPC 处理器
@@ -32,68 +33,96 @@ function setupAgentConfigIpcHandlers() {
     }
   });
   // 获取所有 Agent 配置
-  ipcMain.handle('agent-config:get-all', async () => {
-    logger.info('IPC: agent-config:get-all');
-    return agentConfigStore.getAll();
-  });
+  ipcMain.handle(
+    'agent-config:get-all',
+    safeHandler(async () => {
+      logger.info('IPC: agent-config:get-all');
+      return agentConfigStore.getAll();
+    }, { channel: 'agent-config:get-all' })
+  );
 
   // 获取单个 Agent 配置
-  ipcMain.handle('agent-config:get', async (_event, agentId) => {
-    logger.info('IPC: agent-config:get', { agentId });
-    return agentConfigStore.get(agentId);
-  });
+  ipcMain.handle(
+    'agent-config:get',
+    safeHandler(async (_event, agentId) => {
+      logger.info('IPC: agent-config:get', { agentId });
+      return agentConfigStore.get(agentId);
+    }, { channel: 'agent-config:get' })
+  );
 
   // 更新 Agent 配置
-  ipcMain.handle('agent-config:update', async (_event, { agentId, updates }) => {
-    logger.info('IPC: agent-config:update', { agentId, updates });
-    const result = agentConfigStore.update(agentId, updates);
-    return { success: !!result, config: result };
-  });
+  ipcMain.handle(
+    'agent-config:update',
+    safeHandler(async (_event, { agentId, updates }) => {
+      logger.info('IPC: agent-config:update', { agentId, updates });
+      const result = agentConfigStore.update(agentId, updates);
+      return { success: !!result, config: result };
+    }, { channel: 'agent-config:update' })
+  );
 
   // 重置 Agent 配置为默认
-  ipcMain.handle('agent-config:reset', async (_event, agentId) => {
-    logger.info('IPC: agent-config:reset', { agentId });
-    const result = agentConfigStore.reset(agentId);
-    return { success: !!result, config: result };
-  });
+  ipcMain.handle(
+    'agent-config:reset',
+    safeHandler(async (_event, agentId) => {
+      logger.info('IPC: agent-config:reset', { agentId });
+      const result = agentConfigStore.reset(agentId);
+      return { success: !!result, config: result };
+    }, { channel: 'agent-config:reset' })
+  );
 
   // 获取职级列表
-  ipcMain.handle('agent-config:get-levels', async () => {
-    return Object.values(LEVELS);
-  });
+  ipcMain.handle(
+    'agent-config:get-levels',
+    safeHandler(async () => {
+      return Object.values(LEVELS);
+    }, { channel: 'agent-config:get-levels' })
+  );
 
   // 获取部门列表（包括自定义部门）
-  ipcMain.handle('agent-config:get-departments', async () => {
-    // 返回所有部门（预设 + 自定义）
-    return departmentStore.getAll();
-  });
+  ipcMain.handle(
+    'agent-config:get-departments',
+    safeHandler(async () => {
+      // 返回所有部门（预设 + 自定义）
+      return departmentStore.getAll();
+    }, { channel: 'agent-config:get-departments' })
+  );
 
   // 获取可用模型列表
-  ipcMain.handle('agent-config:get-models', async () => {
-    return AVAILABLE_MODELS;
-  });
+  ipcMain.handle(
+    'agent-config:get-models',
+    safeHandler(async () => {
+      return AVAILABLE_MODELS;
+    }, { channel: 'agent-config:get-models' })
+  );
 
   // 获取老板配置
-  ipcMain.handle('boss-config:get', async () => {
-    return agentConfigStore.getBossConfig();
-  });
+  ipcMain.handle(
+    'boss-config:get',
+    safeHandler(async () => {
+      return agentConfigStore.getBossConfig();
+    }, { channel: 'boss-config:get' })
+  );
 
   // 更新老板配置
-  ipcMain.handle('boss-config:update', async (_event, updates) => {
-    logger.info('IPC: boss-config:update', updates);
-    const result = agentConfigStore.updateBossConfig(updates);
-    // 通知前端
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed() && window.webContents) {
-        window.webContents.send('boss-config:changed', result);
+  ipcMain.handle(
+    'boss-config:update',
+    safeHandler(async (_event, updates) => {
+      logger.info('IPC: boss-config:update', updates);
+      const result = agentConfigStore.updateBossConfig(updates);
+      // 通知前端
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && window.webContents) {
+          window.webContents.send('boss-config:changed', result);
+        }
       }
-    }
-    return result;
-  });
+      return result;
+    }, { channel: 'boss-config:update' })
+  );
 
   // 上传 Agent 头像图片
-  ipcMain.handle('agent-config:upload-avatar', async (_event, agentId) => {
-    try {
+  ipcMain.handle(
+    'agent-config:upload-avatar',
+    safeHandler(async (_event, agentId) => {
       const result = await dialog.showOpenDialog({
         title: '选择头像图片',
         filters: [
@@ -126,11 +155,8 @@ function setupAgentConfigIpcHandlers() {
       logger.info('Agent 头像已上传', { agentId, destPath });
 
       return { success: true, avatarPath: destPath };
-    } catch (error) {
-      logger.error('上传 Agent 头像失败', { agentId, error: error.message });
-      return { success: false, error: error.message };
-    }
-  });
+    }, { channel: 'agent-config:upload-avatar' })
+  );
 }
 
 module.exports = { setupAgentConfigIpcHandlers };

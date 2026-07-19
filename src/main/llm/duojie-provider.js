@@ -7,6 +7,45 @@
 
 const { LLMProvider } = require('./llm-provider');
 
+/**
+ * 解析 Retry-After 头，返回应等待的毫秒数
+ * 支持：纯数字（秒）或 HTTP-date（UTC）
+ * @param {string|null|undefined} retryAfter
+ * @returns {number|null}
+ */
+function parseRetryAfterMs(retryAfter) {
+  if (!retryAfter) return null;
+  const asNumber = Number(retryAfter);
+  if (!Number.isNaN(asNumber) && asNumber > 0) {
+    return Math.ceil(asNumber * 1000);
+  }
+  const date = new Date(retryAfter);
+  const delta = date.getTime() - Date.now();
+  if (!Number.isNaN(delta) && delta > 0) {
+    return Math.ceil(delta);
+  }
+  return null;
+}
+
+/**
+ * 构造带 HTTP 状态码与 Retry-After 信息的错误对象
+ * 供 llm-manager 的重试逻辑读取 err.status / err.retryAfterMs
+ * @param {number} status
+ * @param {string} body
+ * @param {Response} response
+ * @returns {Error}
+ */
+function buildHttpError(status, body, response) {
+  const err = new Error(`Duojie API error: ${status} - ${body}`);
+  err.status = status;
+  err.response = { status };
+  const retryAfterMs = parseRetryAfterMs(
+    response && response.headers ? response.headers.get('retry-after') : null
+  );
+  if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
+  return err;
+}
+
 // 使用 Anthropic 协议的模型（Claude 系列 + GLM 系列）
 // Claude 使用 Anthropic 协议可以避免代理层通过 OpenAI 协议注入的默认身份
 const ANTHROPIC_MODELS = new Set([
@@ -224,12 +263,49 @@ class DuojieProvider extends LLMProvider {
   }
 
   /**
+   * 是否已配置：检查 DUOJIE_API_KEY 是否存在。
+   * @returns {boolean}
+   */
+  isConfigured() {
+    return !!this.apiKey;
+  }
+
+  /**
+   * 健康检查：查询 Duojie /v1/models 是否可达。
+   * 无 apiKey 时直接返回不可用，避免发出必然 401 的请求。
+   * @returns {Promise<{available: boolean, error?: string, model?: string}>}
+   */
+  async checkHealth() {
+    if (!this.apiKey) {
+      return { available: false, error: 'DUOJIE_API_KEY not configured' };
+    }
+    try {
+      const url = `${this.baseUrl}/models`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+      });
+      if (res.ok) {
+        return { available: true, model: this.model };
+      }
+      // 401 也代表网络可达但鉴权失败，视为不可用
+      return { available: false, error: `HTTP ${res.status}` };
+    } catch (err) {
+      return { available: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * 发送对话请求
+   *
+   * 统一返回类型：非流式始终返回 { content, model?, usage?, finish_reason? }。
+   * 兼容旧选项 returnUsage：无论是否传 returnUsage，非流式均返回对象（旧代码读取 .content 仍可用）。
+   *
    * @param {Array<{role: string, content: string}>} messages
    * @param {Object} options
    * @param {boolean} [options.stream=false] - 是否使用流式输出
-   * @param {boolean} [options.returnUsage=false] - 是否返回包含 token 用量的对象
-   * @returns {Promise<string | AsyncGenerator<string> | { content: string, usage: {...} }>}
+   * @param {boolean} [options.returnUsage=false] - 历史兼容选项（现已默认返回 usage，字段保留以避免破坏调用方）
+   * @returns {Promise<{content: string, model?: string, usage?: {prompt_tokens, completion_tokens, total_tokens}, finish_reason?: string} | AsyncGenerator<string>>}
    */
   async chat(messages, options = {}) {
     // 如果请求流式输出，返回流式生成器
@@ -303,31 +379,36 @@ class DuojieProvider extends LLMProvider {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Duojie API error: ${response.status} - ${error}`);
+      throw buildHttpError(response.status, error, response);
     }
 
     const data = await response.json();
     logger.info('Duojie API 响应', { data: JSON.stringify(data).slice(0, 500) });
 
-    // 提取 token 用量
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    // 提取 token 用量，统一为 OpenAI 风格下划线字段，同时保留 camelCase 别名兼容旧调用方
+    // 注意：Anthropic 响应同样带有 data.usage 字段（{input_tokens, output_tokens}），
+    // 不能仅靠 data.usage 区分协议，需按字段存在性判断。
+    let usage;
     if (data.usage) {
-      // OpenAI 格式
+      const prompt_tokens =
+        data.usage.prompt_tokens ?? data.usage.input_tokens ?? 0;
+      const completion_tokens =
+        data.usage.completion_tokens ?? data.usage.output_tokens ?? 0;
+      const total_tokens =
+        data.usage.total_tokens ?? prompt_tokens + completion_tokens;
       usage = {
-        promptTokens: data.usage.prompt_tokens || 0,
-        completionTokens: data.usage.completion_tokens || 0,
-        totalTokens: data.usage.total_tokens || 0,
-      };
-    } else if (isAnthropic && data.usage) {
-      // Anthropic 格式
-      usage = {
-        promptTokens: data.usage.input_tokens || 0,
-        completionTokens: data.usage.output_tokens || 0,
-        totalTokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        // 兼容旧调用方（chat-agent.js 读取 response.usage.promptTokens）
+        promptTokens: prompt_tokens,
+        completionTokens: completion_tokens,
+        totalTokens: total_tokens,
       };
     }
 
     let content;
+    let finish_reason;
     if (isAnthropic) {
       // Anthropic 响应格式：遍历所有 content block，拼接文本和工具调用
       let textParts = '';
@@ -340,17 +421,21 @@ class DuojieProvider extends LLMProvider {
         }
       }
       content = textParts || '';
+      finish_reason = data.stop_reason;
     } else {
       // OpenAI 响应格式
       content = data.choices?.[0]?.message?.content || '';
+      finish_reason = data.choices?.[0]?.finish_reason;
     }
 
-    // 如果请求返回用量信息，返回对象；否则保持向后兼容返回字符串
-    if (options.returnUsage) {
-      return { content, usage, model };
-    }
-
-    return content;
+    // 统一返回类型：非流式始终返回对象 { content, model, usage?, finish_reason }
+    // （历史 returnUsage 选项已被忽略，旧调用方读 .content / .usage 仍可正常工作）
+    return {
+      content,
+      model: data.model || model,
+      ...(usage ? { usage } : {}),
+      ...(finish_reason ? { finish_reason } : {}),
+    };
   }
 
   /**
@@ -426,7 +511,7 @@ class DuojieProvider extends LLMProvider {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Duojie API error: ${response.status} - ${error}`);
+      throw buildHttpError(response.status, error, response);
     }
 
     const reader = response.body.getReader();

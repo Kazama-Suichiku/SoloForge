@@ -93,9 +93,10 @@ class PermissionChecker {
   /**
    * 检查是否允许执行 Shell 命令
    * @param {string} command - 要执行的命令
+   * @param {string} [cwd] - 工作目录
    * @returns {{ allowed: boolean, reason?: string, needConfirm?: boolean }}
    */
-  checkShell(command) {
+  checkShell(command, cwd) {
     if (!this.permissions.shell?.enabled) {
       return { allowed: false, reason: '用户未启用 Shell 命令权限' };
     }
@@ -116,10 +117,169 @@ class PermissionChecker {
       }
     }
 
+    // 检查文件写入操作的路径安全性
+    const fileWriteCheck = this._checkShellFileOperations(command, cwd);
+    if (!fileWriteCheck.allowed) {
+      return fileWriteCheck;
+    }
+
     return {
       allowed: true,
       needConfirm: this.permissions.shell?.confirmEach ?? true,
     };
+  }
+
+  /**
+   * 检查 Shell 命令中的文件操作是否在允许的路径内
+   * @param {string} command - 命令
+   * @param {string} [cwd] - 工作目录
+   * @returns {{ allowed: boolean, reason?: string }}
+   */
+  _checkShellFileOperations(command, cwd) {
+    const allowedPaths = this.permissions.files?.allowedPaths ?? [];
+    
+    // 如果没有配置允许路径，则不检查（向后兼容）
+    if (allowedPaths.length === 0) {
+      return { allowed: true };
+    }
+
+    // 提取可能的文件写入目标路径
+    const writePaths = this._extractWritePathsFromCommand(command);
+    
+    if (writePaths.length === 0) {
+      return { allowed: true };
+    }
+
+    // 检查每个写入路径是否在允许范围内
+    for (const writePath of writePaths) {
+      // 解析相对路径
+      let absolutePath;
+      if (path.isAbsolute(writePath)) {
+        absolutePath = writePath;
+      } else if (cwd) {
+        absolutePath = path.resolve(cwd, writePath);
+      } else {
+        // 没有 cwd，使用相对路径检查
+        absolutePath = path.resolve(process.cwd(), writePath);
+      }
+
+      const normalizedTarget = path.resolve(this.expandPath(absolutePath));
+      let isAllowed = false;
+
+      for (const allowed of allowedPaths) {
+        const normalizedAllowed = path.resolve(this.expandPath(allowed));
+        if (
+          normalizedTarget === normalizedAllowed ||
+          normalizedTarget.startsWith(normalizedAllowed + path.sep)
+        ) {
+          isAllowed = true;
+          break;
+        }
+      }
+
+      if (!isAllowed) {
+        return {
+          allowed: false,
+          reason: `Shell 命令尝试写入不允许的路径: "${writePath}"。只能在以下目录操作: ${allowedPaths.join(', ')}`,
+        };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * 从 Shell 命令中提取可能的文件写入目标路径
+   * @param {string} command
+   * @returns {string[]}
+   */
+  _extractWritePathsFromCommand(command) {
+    const paths = [];
+
+    // 匹配重定向操作符 >, >>, 2>, 2>>, &>, &>>
+    // 例如: echo "test" > /path/to/file
+    // 例如: cat << EOF > /path/to/file
+    const redirectPatterns = [
+      /(?:^|[;&|])\s*[^>]*\s+>{1,2}\s*["']?([^\s"';&|]+)["']?/g,  // > 或 >>
+      /(?:^|[;&|])\s*[^>]*\s+2>{1,2}\s*["']?([^\s"';&|]+)["']?/g, // 2> 或 2>>
+      /(?:^|[;&|])\s*[^>]*\s+&>{1,2}\s*["']?([^\s"';&|]+)["']?/g, // &> 或 &>>
+    ];
+
+    for (const pattern of redirectPatterns) {
+      let match;
+      while ((match = pattern.exec(command)) !== null) {
+        const filePath = match[1];
+        if (filePath && filePath !== '/dev/null' && !filePath.startsWith('/dev/')) {
+          paths.push(filePath);
+        }
+      }
+    }
+
+    // 匹配 tee 命令
+    // 例如: echo "test" | tee /path/to/file
+    const teePattern = /\|\s*tee\s+(?:-a\s+)?["']?([^\s"';&|]+)["']?/g;
+    let teeMatch;
+    while ((teeMatch = teePattern.exec(command)) !== null) {
+      const filePath = teeMatch[1];
+      if (filePath && !filePath.startsWith('-')) {
+        paths.push(filePath);
+      }
+    }
+
+    // 匹配 cp, mv 命令的目标路径
+    // 例如: cp source dest
+    // 例如: mv source dest
+    const cpMvPattern = /(?:^|[;&|])\s*(?:cp|mv)\s+(?:-[a-zA-Z]+\s+)*["']?[^\s"';&|]+["']?\s+["']?([^\s"';&|]+)["']?/g;
+    let cpMvMatch;
+    while ((cpMvMatch = cpMvPattern.exec(command)) !== null) {
+      const destPath = cpMvMatch[1];
+      if (destPath && !destPath.startsWith('-')) {
+        paths.push(destPath);
+      }
+    }
+
+    // 匹配 mkdir 命令
+    // 例如: mkdir -p /path/to/dir
+    const mkdirPattern = /(?:^|[;&|])\s*mkdir\s+(?:-[a-zA-Z]+\s+)*["']?([^\s"';&|]+)["']?/g;
+    let mkdirMatch;
+    while ((mkdirMatch = mkdirPattern.exec(command)) !== null) {
+      const dirPath = mkdirMatch[1];
+      if (dirPath && !dirPath.startsWith('-')) {
+        paths.push(dirPath);
+      }
+    }
+
+    // 匹配 touch 命令
+    const touchPattern = /(?:^|[;&|])\s*touch\s+["']?([^\s"';&|]+)["']?/g;
+    let touchMatch;
+    while ((touchMatch = touchPattern.exec(command)) !== null) {
+      const filePath = touchMatch[1];
+      if (filePath && !filePath.startsWith('-')) {
+        paths.push(filePath);
+      }
+    }
+
+    // 匹配 rm 命令（删除也是危险操作）
+    const rmPattern = /(?:^|[;&|])\s*rm\s+(?:-[a-zA-Z]+\s+)*["']?([^\s"';&|]+)["']?/g;
+    let rmMatch;
+    while ((rmMatch = rmPattern.exec(command)) !== null) {
+      const filePath = rmMatch[1];
+      if (filePath && !filePath.startsWith('-')) {
+        paths.push(filePath);
+      }
+    }
+
+    // 匹配 cat << 'EOF' > file 的 heredoc 模式
+    const heredocPattern = /<<\s*['"]?(\w+)['"]?\s*>{1,2}\s*["']?([^\s"';&|]+)["']?/g;
+    let heredocMatch;
+    while ((heredocMatch = heredocPattern.exec(command)) !== null) {
+      const filePath = heredocMatch[2];
+      if (filePath) {
+        paths.push(filePath);
+      }
+    }
+
+    return [...new Set(paths)]; // 去重
   }
 
   /**
@@ -167,20 +327,45 @@ class PermissionChecker {
    */
   checkToolPermission(toolName, args = {}) {
     switch (toolName) {
+      // ───────────────────────────────────────────────────────────
+      // 只读工具：路径校验（保持原有逻辑）
+      // ───────────────────────────────────────────────────────────
       case 'read_file':
       case 'list_files':
         return this.checkPath(args.path);
 
+      // ───────────────────────────────────────────────────────────
+      // 写操作 / 低风险：路径 + 写权限校验（保持原有逻辑）
+      // ───────────────────────────────────────────────────────────
       case 'write_file': {
         const pathCheck = this.checkPath(args.path);
         if (!pathCheck.allowed) return pathCheck;
         return this.checkWrite();
       }
 
+      // ───────────────────────────────────────────────────────────
+      // 中风险：Shell / 网络 / Git（保持原有逻辑，依赖用户配置）
+      // ───────────────────────────────────────────────────────────
       case 'shell':
-        return this.checkShell(args.command);
+        return this.checkShell(args.command, args.cwd);
+
+      case 'shell_read_output':
+      case 'shell_kill_process': {
+        // Shell 衍生工具：需要 shell.enabled；kill 另需 confirm
+        const shellCheck = this.checkShell('', args.cwd);
+        if (!shellCheck.allowed) {
+          return shellCheck;
+        }
+        return {
+          allowed: true,
+          needConfirm: toolName === 'shell_kill_process'
+            ? true
+            : (this.permissions.shell?.confirmEach ?? true),
+        };
+      }
 
       case 'web_search':
+      case 'fetch_webpage':
         return this.checkNetwork();
 
       case 'git_status':
@@ -199,15 +384,220 @@ class PermissionChecker {
       case 'git_merge':
         return this.checkGitCommit();
 
+      // ───────────────────────────────────────────────────────────
+      // 只读工具：无路径要求（直接放行）
+      // ───────────────────────────────────────────────────────────
       case 'calculator':
       case 'token_stats':
       case 'token_set_budget':
-      case 'agent_approve':
         // 这些工具没有特殊权限要求
         return { allowed: true };
 
-      default:
+      // 上下文 / 虚拟文件（只读）
+      case 'read_virtual_file':
+      case 'list_virtual_files':
+      case 'view_scratchpad':
+      case 'recall_compressed_history':
         return { allowed: true };
+
+      // 记忆（只读）
+      case 'memory_recall':
+      case 'memory_search':
+      case 'memory_list_recent':
+      case 'memory_company_facts':
+      case 'memory_user_profile':
+      case 'memory_project_context':
+        return { allowed: true };
+
+      // Todo（只读）
+      case 'todo_list':
+        return { allowed: true };
+
+      // 历史（只读）
+      case 'load_history':
+      case 'history_info':
+        return { allowed: true };
+
+      // 报告（只读）
+      case 'list_reports':
+        return { allowed: true };
+
+      // HR 只读
+      case 'hr_list_agents':
+      case 'hr_org_chart':
+      case 'agent_requests':
+      case 'hr_question':
+      case 'hr_team_analytics':
+      case 'hr_onboarding_status':
+      case 'hr_list_departments':
+      case 'hr_view_budget':
+      case 'hr_personnel_history':
+        return { allowed: true };
+
+      // 协作只读
+      case 'list_colleagues':
+      case 'collaboration_stats':
+      case 'communication_info':
+      case 'communication_history':
+      case 'browse_communication_history':
+      case 'my_tasks':
+        return { allowed: true };
+
+      // PM 只读
+      case 'pm_list_projects':
+      case 'pm_project_detail':
+      case 'pm_status_report':
+        return { allowed: true };
+
+      // 运营只读
+      case 'ops_list_goals':
+      case 'ops_list_kpis':
+      case 'ops_list_tasks':
+      case 'ops_dashboard':
+      case 'ops_activity_log':
+      case 'ops_my_tasks':
+        return { allowed: true };
+
+      // 招聘只读（查看自己的请求）
+      case 'recruit_my_requests':
+        return { allowed: true };
+
+      // Shell 只读
+      case 'shell_process_status':
+      case 'shell_list_processes':
+        return { allowed: true };
+
+      // ───────────────────────────────────────────────────────────
+      // 写操作 / 低风险（放行）
+      // ───────────────────────────────────────────────────────────
+      // 记忆写入
+      case 'memory_store':
+        return { allowed: true };
+
+      // Todo 写入
+      case 'todo_create':
+      case 'todo_update':
+      case 'todo_clear_done':
+        return { allowed: true };
+
+      // 上下文写入
+      case 'update_scratchpad':
+        return { allowed: true };
+
+      // 报告写入
+      case 'create_report':
+        return { allowed: true };
+
+      // 部门管理（创建/修改/成员调整，低风险）
+      case 'hr_create_department':
+      case 'hr_update_department':
+      case 'hr_add_department':
+      case 'hr_remove_department':
+      case 'hr_set_primary_department':
+        return { allowed: true };
+
+      // 协作写入（低风险）
+      case 'post_to_department':
+      case 'rename_department_group':
+      case 'send_to_agent':
+      case 'delegate_task':
+      case 'notify_boss':
+      case 'submit_dev_plan':
+      case 'approve_dev_plan':
+      case 'reject_dev_plan':
+      case 'create_group_chat':
+        return { allowed: true };
+
+      // PM 写入（创建/更新/分配，低风险；删除见下方高风险区）
+      case 'pm_create_project':
+      case 'pm_update_project':
+      case 'pm_add_milestone':
+      case 'pm_update_milestone':
+      case 'pm_add_tasks':
+      case 'pm_start_project':
+      case 'pm_assign_task':
+      case 'pm_update_task':
+        return { allowed: true };
+
+      // 运营写入（创建/更新/认领/汇报，低风险；删除见下方高风险区）
+      case 'ops_create_goal':
+      case 'ops_update_goal':
+      case 'ops_create_kpi':
+      case 'ops_update_kpi':
+      case 'ops_create_task':
+      case 'ops_update_task':
+      case 'ops_claim_task':
+      case 'ops_report_progress':
+        return { allowed: true };
+
+      // ───────────────────────────────────────────────────────────
+      // 高风险：需老板审批（拒绝，并标记 requiresApproval）
+      // ───────────────────────────────────────────────────────────
+      // 人事高风险操作
+      case 'hr_dismiss_request':
+      case 'dismiss_confirm':
+      case 'hr_suspend_agent':
+      case 'hr_reinstate_agent':
+      case 'hr_promote_agent':
+      case 'hr_demote_agent':
+      case 'hr_end_probation':
+      case 'hr_performance_review':
+      case 'hr_transfer_agent':
+      case 'hr_update_agent':
+      case 'hr_batch_update':
+      case 'hr_delete_department':
+        return {
+          allowed: false,
+          reason: '需要老板审批',
+          requiresApproval: true,
+        };
+
+      // 协作高风险操作
+      case 'suspend_subordinate':
+      case 'reinstate_subordinate':
+      case 'cancel_delegated_task':
+        return {
+          allowed: false,
+          reason: '需要老板审批',
+          requiresApproval: true,
+        };
+
+      // 招聘高风险操作
+      case 'recruit_request':
+      case 'recruit_respond':
+        return {
+          allowed: false,
+          reason: '需要老板审批',
+          requiresApproval: true,
+        };
+
+      // 破坏性删除操作（宁可错杀）
+      case 'pm_delete_project':
+      case 'ops_delete_goal':
+      case 'ops_delete_kpi':
+      case 'ops_delete_task':
+        return {
+          allowed: false,
+          reason: '需要老板审批',
+          requiresApproval: true,
+        };
+
+      // ───────────────────────────────────────────────────────────
+      // 兼容旧入口（保持原 agent_approve 逻辑：放行）
+      // 注：任务文档将 agent_approve 列为高风险，但现有代码放行。
+      // 遵循"不改变现有 case 逻辑"原则，保持原状，后续可单独评估。
+      // ───────────────────────────────────────────────────────────
+      case 'agent_approve':
+        return { allowed: true };
+
+      // ───────────────────────────────────────────────────────────
+      // 默认拒绝：未明式声明的工具一律拒绝（P0-7 安全加固）
+      // ───────────────────────────────────────────────────────────
+      default:
+        return {
+          allowed: false,
+          reason: '未明式声明的工具默认拒绝',
+        };
     }
   }
 }

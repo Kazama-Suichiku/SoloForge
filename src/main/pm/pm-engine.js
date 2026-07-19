@@ -35,6 +35,7 @@ class PMEngine {
     this.checkInterval = null;
     this._lastProgressSnapshot = new Map(); // projectId → progress
     this._running = false;
+    this._checking = false; // 重入保护：防止上一轮 _runCheck 未完成时下一轮并行进入
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ class PMEngine {
       this.checkInterval = null;
     }
     this._running = false;
+    this._checking = false; // 清除重入标志，避免下次 start 后被卡住
     logger.info('PM 引擎已停止');
   }
 
@@ -71,15 +73,23 @@ class PMEngine {
   // ─────────────────────────────────────────────────────────────
 
   async _runCheck() {
+    // 重入保护（P0-8）：若上一轮检查尚未结束或引擎已停止，立即退出，
+    // 避免两个 _runCheck 并行修改 projectStore 造成数据竞争。
+    if (this._checking || !this._running) return;
+    this._checking = true;
     try {
       const projects = this.projectStore.getProjects({ status: 'active' });
       if (projects.length === 0) return;
 
       for (const project of projects) {
         await this._checkProject(project);
+        // 每个项目处理后再检查一次，stop() 被调用时尽快退出
+        if (!this._running) return;
       }
     } catch (error) {
       logger.error('PM 引擎检查失败', error);
+    } finally {
+      this._checking = false;
     }
   }
 

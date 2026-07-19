@@ -9,6 +9,7 @@ const { accountStore } = require('./account-store');
 const { companyStore } = require('./company-store');
 const { sessionManager } = require('./session-manager');
 const { dataPath } = require('./data-path');
+const { cloudSync } = require('../sync/cloud-sync');
 
 /**
  * Setup all account/company IPC handlers
@@ -25,6 +26,12 @@ function setupAccountIpcHandlers({ onCompanySelected, onLogout }) {
       if (result.success) {
         sessionManager.saveSession(result.accountId);
         companyStore.initForAccount(result.accountId);
+        
+        // 如果是云端账号，配置云同步
+        if (result.isCloud) {
+          cloudSync.configure({ userId: result.accountId });
+          logger.info('云同步已配置', { userId: result.accountId });
+        }
       }
       return result;
     } catch (error) {
@@ -39,6 +46,13 @@ function setupAccountIpcHandlers({ onCompanySelected, onLogout }) {
       if (result.success) {
         sessionManager.saveSession(result.accountId);
         companyStore.initForAccount(result.accountId);
+        
+        // 如果是云端账号，配置云同步并启动自动同步
+        if (result.isCloud) {
+          cloudSync.configure({ userId: result.accountId });
+          cloudSync.startAutoSync();
+          logger.info('云同步已启动', { userId: result.accountId });
+        }
       }
       return result;
     } catch (error) {
@@ -49,6 +63,15 @@ function setupAccountIpcHandlers({ onCompanySelected, onLogout }) {
 
   ipcMain.handle('account:logout', async () => {
     try {
+      // 停止云同步
+      cloudSync.stopAutoSync();
+
+      // P0-12: 清除当前账号的 token
+      const session = sessionManager.getSession();
+      if (session?.accountId) {
+        accountStore.clearToken(session.accountId);
+      }
+
       if (onLogout) await onLogout();
       sessionManager.clearSession();
       return { success: true };
@@ -65,15 +88,24 @@ function setupAccountIpcHandlers({ onCompanySelected, onLogout }) {
 
       const account = accountStore.getAccount(session.accountId);
       if (!account) {
-        // Session references a deleted account
         sessionManager.clearSession();
         return null;
+      }
+
+      // 如果是云端账号，确保云同步已配置并启动
+      if (account.isCloud) {
+        cloudSync.configure({ userId: session.accountId });
+        cloudSync.startAutoSync();
       }
 
       return {
         accountId: session.accountId,
         username: account.username,
+        displayName: account.displayName,
+        isCloud: account.isCloud,
         lastCompanyId: session.lastCompanyId,
+        // P0-12：暴露 token 状态，UI 据此决定是否引导重新登录
+        needsReauth: account.needsReauth || false,
       };
     } catch (error) {
       logger.error('获取会话失败', error);

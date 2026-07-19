@@ -12,15 +12,36 @@ export default function SyncStatus() {
   }, []);
 
   const loadStatus = async () => {
-    const result = await window.electron.invoke('sync:get-status');
-    setStatus(result);
+    try {
+      const result = await window.electronAPI.sync.getStatus();
+      // sync:get-status 返回 { success, configured, needsReauth, ...服务端字段 }
+      // 旧组件逻辑依赖 status.isLoggedIn，而云同步服务返回的是 configured/isConfigured，
+      // 这里做兼容：configured=true 且非 needsReauth 视为已登录可用。
+      if (result?.success) {
+        setStatus({
+          ...result,
+          isLoggedIn: result.configured && !result.needsReauth,
+          syncing: result.syncing || false,
+          lastSyncTime: result.lastSyncTime,
+        });
+      } else if (result?.needsReauth) {
+        setStatus({ isLoggedIn: false, needsReauth: true });
+      }
+    } catch (err) {
+      console.error('加载同步状态失败:', err);
+    }
   };
 
   const handleManualSync = async () => {
     setSyncing(true);
-    await window.electron.invoke('sync:manual-sync');
-    await loadStatus();
-    setSyncing(false);
+    try {
+      await window.electronAPI.sync.manualSync();
+      await loadStatus();
+    } catch (err) {
+      console.error('手动同步失败:', err);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   if (!status || !status.isLoggedIn) {

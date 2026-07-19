@@ -7,6 +7,7 @@
 const { ipcMain, dialog } = require('electron');
 const { permissionStore } = require('./config/permission-store');
 const { logger } = require('./utils/logger');
+const { safeHandler } = require('./utils/safe-handler');
 
 /**
  * 设置权限相关的 IPC 处理器
@@ -14,26 +15,35 @@ const { logger } = require('./utils/logger');
  */
 function setupPermissionsIpcHandlers(webContents) {
   // 获取当前权限配置
-  ipcMain.handle('permissions:get', async () => {
-    logger.debug('IPC: permissions:get');
-    return permissionStore.get();
-  });
+  ipcMain.handle(
+    'permissions:get',
+    safeHandler(async () => {
+      logger.debug('IPC: permissions:get');
+      return permissionStore.get();
+    }, { channel: 'permissions:get' })
+  );
 
   // 更新权限配置
-  ipcMain.handle('permissions:update', async (_event, permissions) => {
-    logger.info('IPC: permissions:update', permissions);
-    const success = permissionStore.update(permissions);
-    return { success, permissions: permissionStore.get() };
-  });
+  ipcMain.handle(
+    'permissions:update',
+    safeHandler(async (_event, permissions) => {
+      logger.info('IPC: permissions:update', permissions);
+      const success = permissionStore.update(permissions);
+      return { success, permissions: permissionStore.get() };
+    }, { channel: 'permissions:update' })
+  );
 
   // 重置权限配置
-  ipcMain.handle('permissions:reset', async () => {
-    logger.info('IPC: permissions:reset');
-    const permissions = permissionStore.reset();
-    return { success: true, permissions };
-  });
+  ipcMain.handle(
+    'permissions:reset',
+    safeHandler(async () => {
+      logger.info('IPC: permissions:reset');
+      const permissions = permissionStore.reset();
+      return { success: true, permissions };
+    }, { channel: 'permissions:reset' })
+  );
 
-  // 工具确认响应处理
+  // 工具确认响应处理（ipcMain.on 不通过 safeHandler 包裹，保持原样）
   ipcMain.on('tool:confirm-response', (_event, { requestId, confirmed }) => {
     logger.info('IPC: tool:confirm-response', { requestId, confirmed });
     // 触发确认回调（由 ToolExecutor 监听）
@@ -41,21 +51,24 @@ function setupPermissionsIpcHandlers(webContents) {
   });
 
   // 选择文件夹对话框
-  ipcMain.handle('dialog:select-folder', async (_event, options = {}) => {
-    logger.info('IPC: dialog:select-folder', options);
-    const result = await dialog.showOpenDialog({
-      title: options.title || '选择文件夹',
-      defaultPath: options.defaultPath,
-      properties: ['openDirectory', 'createDirectory'],
-      buttonLabel: options.buttonLabel || '选择',
-    });
+  ipcMain.handle(
+    'dialog:select-folder',
+    safeHandler(async (_event, options = {}) => {
+      logger.info('IPC: dialog:select-folder', options);
+      const result = await dialog.showOpenDialog({
+        title: options.title || '选择文件夹',
+        defaultPath: options.defaultPath,
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: options.buttonLabel || '选择',
+      });
 
-    if (result.canceled || result.filePaths.length === 0) {
-      return { canceled: true, path: null };
-    }
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true, path: null };
+      }
 
-    return { canceled: false, path: result.filePaths[0] };
-  });
+      return { canceled: false, path: result.filePaths[0] };
+    }, { channel: 'dialog:select-folder' })
+  );
 }
 
 /**

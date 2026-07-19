@@ -7,5 +7,18 @@ binding = "DB"
 database_name = "soloforge-sync"
 database_id = "d98d234e-81e3-4317-8bb1-667be929f2c1"
 
-[vars]
-SYNC_SECRET = "soloforge-sync-secret-change-me"
+# ⚠️ 安全警告 (P0-1 修复)：
+# SYNC_SECRET 绝不要写在 [vars] 中——[vars] 会随 wrangler.toml 进入 git 仓库，
+# 默认值一旦泄露，任何人可调 POST /app/publish 发布"新版本"指向任意 APK URL，
+# 配合 /app/version 构成供应链投毒（所有客户端下次检查更新会下载攻击者 APK）。
+#
+# 正确做法：用 wrangler secret 设置（加密存储于 Cloudflare，不进仓库）：
+#   wrangler secret put SYNC_SECRET
+# 然后输入一个高强度随机值（建议 `openssl rand -hex 32` 或更长）。
+#
+# 本地开发：在项目根目录创建 .dev.vars 文件（已被 .gitignore 默认排除）写入：
+#   SYNC_SECRET="your-local-dev-secret"
+# wrangler dev 会自动加载 .dev.vars。
+#
+# [vars]
+# SYNC_SECRET = "do-not-commit-here"  # 已移除，见上方说明

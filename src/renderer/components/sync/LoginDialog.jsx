@@ -16,11 +16,19 @@ export default function LoginDialog({ isOpen, onClose, onSuccess }) {
     setLoading(true);
 
     try {
-      const channel = mode === 'login' ? 'sync:login' : 'sync:register';
-      const result = await window.electron.invoke(channel, { email, password });
+      // 登录/注册走 account 模块（account-ipc-handlers.js → account-store → Worker /auth/*）
+      // account handler 在登录成功后会自动调用 cloudSync.configure + startAutoSync，
+      // 因此这里不需要再单独触发云同步初始化。
+      // account API 使用 { username, password }，旧表单字段叫 email，这里做映射。
+      const payload = { username: email, password };
+      const result =
+        mode === 'login'
+          ? await window.electronAPI.account.login(payload)
+          : await window.electronAPI.account.register(payload);
 
       if (result.success) {
-        onSuccess(result.user);
+        // 旧 onSuccess 期望传入 user 对象；account 模块返回 { success, accountId, isCloud, ... }
+        onSuccess({ id: result.accountId, username: email, isCloud: result.isCloud });
         onClose();
       } else {
         setError(result.error || '操作失败');
