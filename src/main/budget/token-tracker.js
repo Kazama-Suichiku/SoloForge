@@ -91,7 +91,7 @@ class TokenTracker {
   }
 
   /**
-   * 保存到磁盘
+   * 保存到磁盘（异步）
    */
   saveToDisk() {
     try {
@@ -101,9 +101,31 @@ class TokenTracker {
         lastUpdated: new Date().toISOString(),
         records: this.records,
       };
-      fs.writeFileSync(getUsageFile(), JSON.stringify(data, null, 2));
+      // 使用异步写入，不阻塞主进程
+      fs.writeFile(getUsageFile(), JSON.stringify(data, null, 2), (err) => {
+        if (err) {
+          logger.error('保存 token 使用记录失败:', err);
+        }
+      });
     } catch (error) {
       logger.error('保存 token 使用记录失败:', error);
+    }
+  }
+
+  /**
+   * 同步保存到磁盘（仅用于应用退出前）
+   */
+  saveToDiskSync() {
+    try {
+      this.ensureConfigDir();
+      const data = {
+        version: 1,
+        lastUpdated: new Date().toISOString(),
+        records: this.records,
+      };
+      fs.writeFileSync(getUsageFile(), JSON.stringify(data, null, 2));
+    } catch (error) {
+      logger.error('同步保存 token 使用记录失败:', error);
     }
   }
 

@@ -38,6 +38,29 @@ class DeepSeekProvider extends LLMProvider {
   }
 
   /**
+   * 健康检查：查询 DeepSeek /models 是否可达。
+   * 无 apiKey 时直接返回不可用，避免必然 401 的请求。
+   * @returns {Promise<{available: boolean, error?: string, model?: string}>}
+   */
+  async checkHealth() {
+    if (!this.apiKey) {
+      return { available: false, error: 'DEEPSEEK_API_KEY not configured' };
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+      });
+      if (res.ok) {
+        return { available: true, model: this.model };
+      }
+      return { available: false, error: `HTTP ${res.status}` };
+    } catch (err) {
+      return { available: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * 获取请求头
    */
   _getHeaders() {
@@ -62,6 +85,69 @@ class DeepSeekProvider extends LLMProvider {
   }
 
   /**
+   * 将内部工具定义转换为 OpenAI function calling 格式
+   * @param {Array<Object>} tools - 内部 ToolDefinition 列表
+   * @returns {Array<Object>} OpenAI tools 格式
+   */
+  _convertToolsToOpenAI(tools) {
+    if (!tools || tools.length === 0) return [];
+    return tools.map((tool) => {
+      // 转换参数格式：内部格式每个参数有 required 属性，需要提取为数组
+      const properties = {};
+      const requiredFields = [];
+
+      for (const [paramName, paramDef] of Object.entries(tool.parameters || {})) {
+        // 复制参数定义，但移除 required 字段（OpenAI 格式不允许在 properties 内有 required）
+        const { required, ...cleanParamDef } = paramDef;
+        properties[paramName] = cleanParamDef;
+
+        // 收集 required 字段名
+        if (required === true) {
+          requiredFields.push(paramName);
+        }
+      }
+
+      return {
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: (tool.description || '').slice(0, 1024),
+          parameters: {
+            type: 'object',
+            properties,
+            required: requiredFields.length > 0 ? requiredFields : undefined,
+          },
+        },
+      };
+    });
+  }
+
+  /**
+   * 将 OpenAI function call 响应转换为内部 XML 格式
+   * @param {string} name - 工具名称
+   * @param {Object|string} args - 工具参数
+   * @returns {string}
+   */
+  _functionCallToXml(name, args) {
+    let argsObj = args;
+    if (typeof args === 'string') {
+      try {
+        argsObj = JSON.parse(args);
+      } catch {
+        argsObj = {};
+      }
+    }
+
+    let argsXml = '';
+    for (const [key, value] of Object.entries(argsObj || {})) {
+      const valueStr = typeof value === 'object' ? JSON.stringify(value) : String(value);
+      argsXml += `<${key}>${valueStr}</${key}>`;
+    }
+
+    return `<tool_call><name>${name}</name><arguments>${argsXml}</arguments></tool_call>`;
+  }
+
+  /**
    * 发送对话请求
    * @param {Array<{role: string, content: string}>} messages
    * @param {Object} options
@@ -83,7 +169,12 @@ class DeepSeekProvider extends LLMProvider {
       stream: false,
     };
 
-    logger.info('DeepSeek API 请求', { model, messagesCount: messages.length });
+    // 添加原生 function calling 支持
+    if (options.tools?.length > 0) {
+      body.tools = this._convertToolsToOpenAI(options.tools);
+    }
+
+    logger.info('DeepSeek API 请求', { model, messagesCount: messages.length, toolsCount: body.tools?.length || 0 });
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -98,7 +189,18 @@ class DeepSeekProvider extends LLMProvider {
 
     const data = await response.json();
     const choice = data.choices?.[0];
-    const content = choice?.message?.content ?? '';
+    let content = choice?.message?.content ?? '';
+
+    // 处理原生 function call：转换为内部 XML 格式
+    const toolCalls = choice?.message?.tool_calls;
+    if (toolCalls?.length > 0) {
+      for (const tc of toolCalls) {
+        if (tc.type === 'function' && tc.function) {
+          content += this._functionCallToXml(tc.function.name, tc.function.arguments);
+        }
+      }
+      logger.info('DeepSeek 原生工具调用', { count: toolCalls.length, names: toolCalls.map(tc => tc.function?.name) });
+    }
 
     // DeepSeek-R1 的推理链在 reasoning_content 字段
     const reasoningContent = choice?.message?.reasoning_content;
@@ -107,6 +209,10 @@ class DeepSeekProvider extends LLMProvider {
       content,
       model: data.model,
       usage: data.usage ? {
+        prompt_tokens: data.usage.prompt_tokens,
+        completion_tokens: data.usage.completion_tokens,
+        total_tokens: data.usage.total_tokens,
+        // camelCase 别名兼容旧调用方
         promptTokens: data.usage.prompt_tokens,
         completionTokens: data.usage.completion_tokens,
         totalTokens: data.usage.total_tokens,
@@ -139,7 +245,12 @@ class DeepSeekProvider extends LLMProvider {
       stream: true,
     };
 
-    logger.info('DeepSeek 流式请求', { model, messagesCount: messages.length });
+    // 添加原生 function calling 支持
+    if (options.tools?.length > 0) {
+      body.tools = this._convertToolsToOpenAI(options.tools);
+    }
+
+    logger.info('DeepSeek 流式请求', { model, messagesCount: messages.length, toolsCount: body.tools?.length || 0 });
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -159,6 +270,9 @@ class DeepSeekProvider extends LLMProvider {
     let buffer = '';
     let chunkNum = 0;
 
+    // 用于累积流式 function call
+    const pendingToolCalls = new Map(); // index -> { name, arguments }
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -174,6 +288,13 @@ class DeepSeekProvider extends LLMProvider {
 
           const data = trimmed.slice(6);
           if (data === '[DONE]') {
+            // 流结束时，输出所有累积的 function calls
+            for (const [, tc] of pendingToolCalls) {
+              if (tc.name) {
+                yield this._functionCallToXml(tc.name, tc.arguments);
+                logger.info('DeepSeek 流式工具调用完成', { name: tc.name });
+              }
+            }
             logger.info('DeepSeek 流式收到 [DONE]');
             return;
           }
@@ -182,6 +303,7 @@ class DeepSeekProvider extends LLMProvider {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
 
+            // 处理文本内容
             if (delta?.content) {
               chunkNum++;
               if (chunkNum <= 3) {
@@ -193,11 +315,34 @@ class DeepSeekProvider extends LLMProvider {
               }
               yield delta.content;
             }
-            // DeepSeek-R1 的推理链在流式中通过 reasoning_content 传递
-            // 目前不输出推理链，只输出最终结果
+
+            // 处理流式 function call
+            if (delta?.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                if (!pendingToolCalls.has(idx)) {
+                  pendingToolCalls.set(idx, { name: '', arguments: '' });
+                }
+                const pending = pendingToolCalls.get(idx);
+                if (tc.function?.name) {
+                  pending.name = tc.function.name;
+                }
+                if (tc.function?.arguments) {
+                  pending.arguments += tc.function.arguments;
+                }
+              }
+            }
           } catch {
             // 忽略解析失败的行
           }
+        }
+      }
+
+      // 如果没有收到 [DONE]，也要输出累积的 function calls
+      for (const [, tc] of pendingToolCalls) {
+        if (tc.name) {
+          yield this._functionCallToXml(tc.name, tc.arguments);
+          logger.info('DeepSeek 流式工具调用完成（无 DONE）', { name: tc.name });
         }
       }
     } finally {

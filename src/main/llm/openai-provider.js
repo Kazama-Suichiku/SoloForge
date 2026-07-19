@@ -27,6 +27,37 @@ class OpenAIProvider extends LLMProvider {
   }
 
   /**
+   * 是否已配置：检查 OPENAI_API_KEY 是否存在
+   * @returns {boolean}
+   */
+  isConfigured() {
+    return !!this.apiKey;
+  }
+
+  /**
+   * 健康检查：查询 OpenAI /v1/models 是否可达。
+   * 无 apiKey 时直接返回不可用，避免必然 401 的请求。
+   * @returns {Promise<{available: boolean, error?: string, model?: string}>}
+   */
+  async checkHealth() {
+    if (!this.apiKey) {
+      return { available: false, error: 'OPENAI_API_KEY not configured' };
+    }
+    try {
+      const res = await fetch('https://api.openai.com/v1/models', {
+        method: 'GET',
+        headers: this._getAuthHeaders(),
+      });
+      if (res.ok) {
+        return { available: true, model: this.model };
+      }
+      return { available: false, error: `HTTP ${res.status}` };
+    } catch (err) {
+      return { available: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
    * 转换消息格式为 OpenAI 格式
    * 支持 { role, content }
    */
@@ -96,10 +127,26 @@ class OpenAIProvider extends LLMProvider {
 
     const data = await response.json();
     const choice = data.choices?.[0];
+    // 统一 usage 为下划线字段 + camelCase 别名
+    let usage;
+    if (data.usage) {
+      const prompt_tokens = data.usage.prompt_tokens ?? 0;
+      const completion_tokens = data.usage.completion_tokens ?? 0;
+      const total_tokens = data.usage.total_tokens ?? (prompt_tokens + completion_tokens);
+      usage = {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        // camelCase 别名兼容旧调用方
+        promptTokens: prompt_tokens,
+        completionTokens: completion_tokens,
+        totalTokens: total_tokens,
+      };
+    }
     return {
       content: choice?.message?.content ?? '',
       model: data.model,
-      usage: data.usage,
+      ...(usage ? { usage } : {}),
       finish_reason: choice?.finish_reason,
     };
   }

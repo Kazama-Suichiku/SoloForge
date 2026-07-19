@@ -9,6 +9,10 @@ const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
 
+// 防抖保存计时器
+let _saveTimer = null;
+const SAVE_DEBOUNCE_MS = 1000; // 1秒内的多次保存合并为一次
+
 // 延迟加载 tokenTracker 避免循环依赖
 let _tokenTracker = null;
 function getTokenTracker() {
@@ -71,8 +75,9 @@ const BUDGET_THRESHOLDS = {
 
 /**
  * 降级目标模型（便宜模型）
+ * 使用 DeepSeek-V3 作为降级目标，稳定且成本低
  */
-const DOWNGRADE_MODEL = 'glm-4.7';
+const DOWNGRADE_MODEL = 'deepseek-chat';
 
 /**
  * 预算策略动作类型
@@ -157,15 +162,53 @@ class BudgetManager {
   }
 
   /**
-   * 保存到磁盘
+   * 保存到磁盘（异步防抖）
+   * 多次调用会合并为一次实际写入，避免阻塞主进程
    */
   saveToDisk() {
+    // 清除之前的计时器
+    if (_saveTimer) {
+      clearTimeout(_saveTimer);
+    }
+
+    // 设置新的延迟写入
+    _saveTimer = setTimeout(() => {
+      _saveTimer = null;
+      this._doSave();
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * 实际执行保存（异步）
+   * @private
+   */
+  _doSave() {
+    try {
+      this.ensureConfigDir();
+      const content = JSON.stringify(this.budgets, null, 2);
+      // 使用异步写入，不阻塞主进程
+      fs.writeFile(getBudgetsFile(), content, (err) => {
+        if (err) {
+          logger.error('保存预算配置失败:', err);
+        } else {
+          logger.debug('保存预算配置成功');
+        }
+      });
+    } catch (error) {
+      logger.error('保存预算配置失败:', error);
+    }
+  }
+
+  /**
+   * 立即同步保存（仅用于关键操作，如应用退出前）
+   */
+  saveToDiskSync() {
     try {
       this.ensureConfigDir();
       fs.writeFileSync(getBudgetsFile(), JSON.stringify(this.budgets, null, 2));
-      logger.debug('保存预算配置成功');
+      logger.debug('同步保存预算配置成功');
     } catch (error) {
-      logger.error('保存预算配置失败:', error);
+      logger.error('同步保存预算配置失败:', error);
     }
   }
 

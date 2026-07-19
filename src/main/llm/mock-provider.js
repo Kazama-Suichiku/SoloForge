@@ -19,7 +19,24 @@ class MockProvider extends LLMProvider {
   }
 
   /**
+   * 是否已配置：mock 为最终降级占位，不参与主动探测，返回 false。
+   * @returns {boolean}
+   */
+  isConfigured() {
+    return false;
+  }
+
+  /**
+   * 健康检查：mock 永远可用（无需任何外部依赖）。
+   * @returns {Promise<{available: boolean, model?: string}>}
+   */
+  async checkHealth() {
+    return { available: true, model: 'mock' };
+  }
+
+  /**
    * 模拟对话响应
+   * 返回统一格式 { content, model, finish_reason }
    */
   async chat(messages, _options = {}) {
     const lastUser = messages.filter((m) => m.role === 'user').pop();
@@ -28,12 +45,14 @@ class MockProvider extends LLMProvider {
     return {
       content: `${MOCK_RESPONSES.chat}\n\n(用户输入摘要: ${userInput}${userInput.length >= 50 ? '...' : ''})`,
       model: 'mock',
+      finish_reason: 'stop',
       done: true,
     };
   }
 
   /**
    * 模拟补全响应
+   * 返回统一格式 { content, model, finish_reason }
    */
   async complete(prompt, _options = {}) {
     const promptPreview = String(prompt).slice(0, 50);
@@ -41,6 +60,7 @@ class MockProvider extends LLMProvider {
     return {
       content: `${MOCK_RESPONSES.complete}\n\n(Prompt: ${promptPreview}${promptPreview.length >= 50 ? '...' : ''})`,
       model: 'mock',
+      finish_reason: 'stop',
       done: true,
     };
   }

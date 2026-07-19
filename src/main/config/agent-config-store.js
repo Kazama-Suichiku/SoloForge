@@ -8,7 +8,11 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
-const { atomicWriteSync } = require('../utils/atomic-write');
+const { atomicWriteSync, atomicWrite } = require('../utils/atomic-write');
+
+// 防抖保存
+let _configSaveTimer = null;
+const CONFIG_SAVE_DEBOUNCE_MS = 1000;
 
 /**
  * 职级定义
@@ -31,6 +35,12 @@ const LEVELS = {
 const { DEPARTMENTS, departmentStore } = require('./department-store');
 
 /**
+ * 全局默认模型：所有内置 Agent 的默认模型。
+ * 以本地 GLM-5.2 为基础，可用环境变量 SOLOFORGE_DEFAULT_MODEL 覆盖。
+ */
+const DEFAULT_MODEL = process.env.SOLOFORGE_DEFAULT_MODEL || 'zai-org/GLM-5.2-FP8';
+
+/**
  * 可用的 AI 模型列表
  * multimodal: 是否支持图片输入（多模态）
  */
@@ -47,6 +57,7 @@ const AVAILABLE_MODELS = [
   { id: 'deepseek-reasoner', name: 'DeepSeek-R1', provider: 'DeepSeek', multimodal: false },
   { id: 'glm-4.7', name: 'GLM 4.7', provider: 'Zhipu', multimodal: false },
   { id: 'glm-5', name: 'GLM 5', provider: 'Zhipu', multimodal: false },
+  { id: 'zai-org/GLM-5.2-FP8', name: 'GLM 5.2 (本地)', provider: 'LocalGLM', multimodal: false },
 ];
 
 /**
@@ -103,7 +114,7 @@ const DEFAULT_AGENT_CONFIGS = {
     department: DEPARTMENTS.ADMIN.id, // 兼容字段
     description: '老板的私人秘书，负责日常事务协调',
     avatar: '👩‍💼',
-    model: 'claude-sonnet-4-5',
+    model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
   },
@@ -117,7 +128,7 @@ const DEFAULT_AGENT_CONFIGS = {
     department: DEPARTMENTS.EXECUTIVE.id, // 兼容字段
     description: '负责公司战略决策和整体运营',
     avatar: '👨‍💼',
-    model: 'claude-sonnet-4-5',
+    model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
   },
@@ -131,7 +142,7 @@ const DEFAULT_AGENT_CONFIGS = {
     department: DEPARTMENTS.TECH.id, // 兼容字段
     description: '负责技术架构和研发团队',
     avatar: '👨‍💻',
-    model: 'claude-sonnet-4-5',
+    model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
   },
@@ -145,7 +156,7 @@ const DEFAULT_AGENT_CONFIGS = {
     department: DEPARTMENTS.FINANCE.id, // 兼容字段
     description: '负责 Token 消耗分析和 Token 预算管理',
     avatar: '💰',
-    model: 'claude-sonnet-4-5',
+    model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
   },
@@ -159,7 +170,7 @@ const DEFAULT_AGENT_CONFIGS = {
     department: DEPARTMENTS.HR.id, // 兼容字段
     description: '负责人事管理、组织架构和 Agent 招聘审批',
     avatar: '👥',
-    model: 'claude-sonnet-4-5',
+    model: DEFAULT_MODEL,
     status: AGENT_STATUS.ACTIVE,
     hireDate: null,
   },
@@ -321,20 +332,56 @@ class AgentConfigStore {
   }
 
   /**
-   * 保存配置到磁盘
+   * 保存配置到磁盘（异步防抖）
    */
   saveToDisk() {
+    if (_configSaveTimer) {
+      clearTimeout(_configSaveTimer);
+    }
+    _configSaveTimer = setTimeout(() => {
+      _configSaveTimer = null;
+      this._doSave();
+    }, CONFIG_SAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * 实际执行保存（异步）
+   * @private
+   */
+  _doSave() {
     try {
       const configDir = this._getConfigDir();
       if (!fs.existsSync(configDir)) {
         fs.mkdirSync(configDir, { recursive: true });
       }
       const data = Object.fromEntries(this.configs);
-      // 使用原子写入，防止写入过程中崩溃导致文件损坏
-      atomicWriteSync(this._getConfigPath(), JSON.stringify(data, null, 2));
-      logger.info('Agent 配置已保存');
+      // 使用异步原子写入，不阻塞主进程
+      atomicWrite(this._getConfigPath(), JSON.stringify(data, null, 2))
+        .then(() => {
+          logger.info('Agent 配置已保存');
+        })
+        .catch((error) => {
+          logger.error('保存 Agent 配置失败', error);
+        });
     } catch (error) {
       logger.error('保存 Agent 配置失败', error);
+    }
+  }
+
+  /**
+   * 立即同步保存（仅用于应用退出前）
+   */
+  saveToDiskSync() {
+    try {
+      const configDir = this._getConfigDir();
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+      const data = Object.fromEntries(this.configs);
+      atomicWriteSync(this._getConfigPath(), JSON.stringify(data, null, 2));
+      logger.info('Agent 配置已同步保存');
+    } catch (error) {
+      logger.error('同步保存 Agent 配置失败', error);
     }
   }
 

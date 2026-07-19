@@ -129,6 +129,14 @@ class TaskPatrol {
     logger.info('任务巡查系统已停止');
   }
 
+  /**
+   * 是否正在运行（供 IPC 查询巡查状态使用，避免外部访问 _running 私有字段）
+   * @returns {boolean}
+   */
+  isRunning() {
+    return this._running === true;
+  }
+
   reinitialize() {
     this.stop();
     this._nudgedAt.clear();
@@ -724,11 +732,21 @@ class TaskPatrol {
     if (!this.llmManager) return [];
 
     const issues = [];
-    const providerNames = this.llmManager.getProviderNames();
+    // 仅探测“值得监控”的 provider：默认 provider + 已配置凭据的 provider。
+    // 跳过未配置的（如未安装 ollama、未填 openai key），避免刷无意义的不可用告警。
+    const providerNames = this.llmManager.getProviderNames().filter((name) => {
+      if (name === 'mock') return false; // mock 始终可用，无需探测
+      if (name === this.llmManager.defaultProviderName) return true; // 默认 provider 必须监控
+      const provider = this.llmManager.getProvider(name);
+      // provider 自报是否已配置（有该方法时以其为准）
+      if (provider && typeof provider.isConfigured === 'function') {
+        return provider.isConfigured();
+      }
+      // 无 isConfigured 方法时，仅当有 apiKey 才监控（本地服务如 ollama 无 key，不主动探测）
+      return Boolean(provider && provider.apiKey);
+    });
 
     for (const name of providerNames) {
-      if (name === 'mock') continue; // mock 始终可用
-
       try {
         const result = await this.llmManager.checkConnection(name);
         const prevStatus = this._lastLLMStatus.get(name);

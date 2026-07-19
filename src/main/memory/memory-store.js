@@ -92,10 +92,21 @@ class MemoryStore {
     try {
       const indexPath = getIndexPath();
       if (fs.existsSync(indexPath)) {
-        const data = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+        const raw = fs.readFileSync(indexPath, 'utf-8');
+        // 空文件或纯空白（如首次初始化瞬间写入中断）按空索引处理，避免 JSON.parse('') 报错
+        if (!raw || raw.trim().length === 0) {
+          logger.info('记忆索引文件为空，使用空索引');
+          return;
+        }
+        const data = JSON.parse(raw);
         if (Array.isArray(data)) {
           for (const entry of data) {
             this.index.set(entry.id, entry);
+          }
+        } else if (data && typeof data === 'object') {
+          // 兼容对象/Map 序列化格式（{id: entry} 或数字键），统一按 values 载入
+          for (const entry of Object.values(data)) {
+            if (entry && entry.id) this.index.set(entry.id, entry);
           }
         }
         logger.info('记忆索引已加载', { count: this.index.size });
@@ -121,17 +132,32 @@ class MemoryStore {
   }
 
   /**
-   * 立即将索引写入磁盘
+   * 立即将索引写入磁盘（异步）
    */
   _flushIndex() {
+    const entries = Array.from(this.index.values());
+    this._indexDebounceTimer = null;
+
+    // 使用异步写入，不阻塞主进程
+    fs.writeFile(getIndexPath(), JSON.stringify(entries, null, 2), 'utf-8', (err) => {
+      if (err) {
+        logger.error('保存记忆索引失败', err);
+      } else {
+        logger.debug('记忆索引已保存', { count: entries.length });
+      }
+    });
+  }
+
+  /**
+   * 同步刷盘（仅用于应用退出前）
+   */
+  _flushIndexSync() {
     try {
       const entries = Array.from(this.index.values());
       fs.writeFileSync(getIndexPath(), JSON.stringify(entries, null, 2), 'utf-8');
-      logger.debug('记忆索引已保存', { count: entries.length });
+      logger.debug('记忆索引已同步保存', { count: entries.length });
     } catch (error) {
-      logger.error('保存记忆索引失败', error);
-    } finally {
-      this._indexDebounceTimer = null;
+      logger.error('同步保存记忆索引失败', error);
     }
   }
 
@@ -221,30 +247,37 @@ class MemoryStore {
   }
 
   /**
-   * 立即将指定文件写入磁盘
+   * 立即将指定文件写入磁盘（异步）
    * @param {string} relativePath
    */
   _flushFile(relativePath) {
     const cache = this.fileCache.get(relativePath);
     if (!cache || !cache.dirty) return;
 
-    try {
-      const absPath = this._getAbsolutePath(relativePath);
+    const absPath = this._getAbsolutePath(relativePath);
+    const dir = path.dirname(absPath);
+    const entries = cache.entries;
+    const entryCount = entries.length;
+    cache.dirty = false;
+    this.debounceTimers.delete(relativePath);
 
-      // 确保目录存在
-      const dir = path.dirname(absPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+    // 使用异步操作，不阻塞主进程
+    fs.mkdir(dir, { recursive: true }, (mkdirErr) => {
+      if (mkdirErr && mkdirErr.code !== 'EEXIST') {
+        logger.error(`创建记忆目录失败: ${dir}`, mkdirErr);
+        cache.dirty = true;
+        return;
       }
 
-      fs.writeFileSync(absPath, JSON.stringify(cache.entries, null, 2), 'utf-8');
-      cache.dirty = false;
-      logger.debug(`记忆文件已保存: ${relativePath}`, { count: cache.entries.length });
-    } catch (error) {
-      logger.error(`保存记忆文件失败: ${relativePath}`, error);
-    } finally {
-      this.debounceTimers.delete(relativePath);
-    }
+      fs.writeFile(absPath, JSON.stringify(entries, null, 2), 'utf-8', (writeErr) => {
+        if (writeErr) {
+          logger.error(`保存记忆文件失败: ${relativePath}`, writeErr);
+          cache.dirty = true;
+        } else {
+          logger.debug(`记忆文件已保存: ${relativePath}`, { count: entryCount });
+        }
+      });
+    });
   }
 
   // ═══════════════════════════════════════════════════════════

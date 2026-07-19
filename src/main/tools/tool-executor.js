@@ -8,6 +8,125 @@ const { toolRegistry } = require('./tool-registry');
 const { PermissionChecker } = require('./permission-checker');
 const { logger } = require('../utils/logger');
 const { virtualFileStore, VIRTUALIZE_THRESHOLD, PREVIEW_LENGTH } = require('../context/virtual-file-store');
+const { limitResultSize, DEFAULT_MAX_RESULT_TOKENS } = require('./tool-result-limiter');
+
+/**
+ * 工具执行的默认超时时间（毫秒）
+ *   - 单个工具调用最多阻塞 60 秒；超时后中止并返回错误结果
+ *   - 工具可通过定义 timeoutMs 字段覆盖（如 shell 工具可能更长）
+ *   - 全局可由 ToolExecutor 构造参数 defaultTimeoutMs 覆盖
+ */
+const DEFAULT_TOOL_TIMEOUT_MS = 60 * 1000;
+
+/**
+ * 工具执行的默认最大重试次数
+ *   - 仅对可重试错误（网络/超时类）重试
+ *   - 业务错误（参数错误、权限拒绝、文件不存在等）不重试
+ */
+const DEFAULT_MAX_RETRIES = 1;
+
+/**
+ * 默认结果 token 上限
+ *   - 可由 ToolExecutor 构造参数 maxResultTokens 覆盖
+ *   - 工具可通过定义 maxResultTokens 字段进一步覆盖（更小或更大）
+ */
+const DEFAULT_MAX_RESULT_TOKENS_INNER = DEFAULT_MAX_RESULT_TOKENS;
+
+/**
+ * 判断错误是否可重试
+ *   - 网络错误（fetch failed / ETIMEDOUT / ECONNRESET / ENOTFOUND）
+ *   - 超时错误（本模块抛出的 TIMEOUT）
+ *   - 5xx 服务端错误（仅当错误对象带 status 字段时识别）
+ *   - 业务错误（参数错误、权限拒绝、文件不存在、AssertionError 等）不重试
+ *
+ * @param {Error} error
+ * @returns {boolean}
+ */
+function _isRetryableError(error) {
+  if (!error) return false;
+
+  const name = error.name || '';
+  const msg = String(error.message || '');
+  const code = error.code || '';
+
+  // 超时错误（本模块用 error.code === 'ETOOLTIMEOUT'）
+  if (code === 'ETOOLTIMEOUT' || name === 'ToolTimeoutError') return true;
+
+  // 网络层错误
+  const networkCodes = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'];
+  if (networkCodes.includes(code)) return true;
+
+  // fetch 失败（node 原生 fetch / undici 抛出 TypeError: fetch failed）
+  if (name === 'TypeError' && /fetch failed|network|socket hang up/i.test(msg)) return true;
+
+  // HTTP 5xx（如果错误带 status 字段）
+  if (typeof error.status === 'number' && error.status >= 500 && error.status < 600) return true;
+
+  // undici/body timeouts
+  if (/TIMED OUT|timeout|aborted/i.test(msg) && !/argument|parameter|required|missing|invalid/i.test(msg)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * 带超时的工具执行包装
+ *
+ * 策略：
+ * 1) 如果 tool.execute 返回 Promise，用 Promise.race 与超时 Promise 竞争
+ * 2) 超时后尝试用 AbortController 中止（如果工具接受 signal 或 context.signal）
+ * 3) 超时后抛出带 code='ETOOLTIMEOUT' 的错误，由上层 retry 逻辑或错误处理接管
+ *
+ * @param {Function} executeFn - tool.execute 函数
+ * @param {Array} invokeArgs - 调用参数 [args, context]
+ * @param {number} timeoutMs - 超时毫秒
+ * @returns {Promise<*>}
+ */
+function _executeWithTimeout(executeFn, invokeArgs, timeoutMs) {
+  if (!timeoutMs || timeoutMs <= 0) {
+    // 无超时：直接执行
+    return Promise.resolve().then(() => executeFn(...invokeArgs));
+  }
+
+  const controller = new AbortController();
+  // 把 signal 注入到 context（第二个参数），工具可选择响应
+  const [args, context] = invokeArgs;
+  const contextWithSignal = {
+    ...(context || {}),
+    signal: controller.signal,
+    abortController: controller,
+  };
+  const effectiveArgs = [args, contextWithSignal];
+
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      // 触发 AbortController，让支持 signal 的工具能尽快中止
+      try { controller.abort(); } catch { /* ignore */ }
+      const err = new Error(`工具执行超时 (${timeoutMs}ms)`);
+      err.code = 'ETOOLTIMEOUT';
+      err.name = 'ToolTimeoutError';
+      err.timeoutMs = timeoutMs;
+      reject(err);
+    }, timeoutMs);
+  });
+
+  const execPromise = Promise.resolve()
+    .then(() => executeFn(...effectiveArgs))
+    .then((result) => {
+      // 工具正常完成，清除超时定时器
+      if (timer) clearTimeout(timer);
+      return result;
+    })
+    .catch((err) => {
+      // 工具异常完成，也要清除超时定时器
+      if (timer) clearTimeout(timer);
+      throw err;
+    });
+
+  return Promise.race([execPromise, timeoutPromise]);
+}
 
 /**
  * 工具名别名映射表
@@ -279,11 +398,23 @@ class ToolExecutor {
    * @param {Object} options
    * @param {Object} options.userPermissions - 用户权限配置
    * @param {Function} [options.onConfirmRequired] - 需要用户确认时的回调
+   * @param {number} [options.defaultTimeoutMs=60000] - 默认单次工具调用超时（毫秒）
+   * @param {number} [options.maxRetries=1] - 可重试错误的最大重试次数
+   * @param {number} [options.maxResultTokens=8000] - 结果 token 硬上限
+   * @param {Object<string, number>} [options.toolTimeouts] - 按工具名覆盖超时
+   *   例如 { shell: 300000 } 让 shell 工具最多跑 5 分钟
    */
   constructor(options = {}) {
     this.permissionChecker = new PermissionChecker(options.userPermissions || {});
     this.onConfirmRequired = options.onConfirmRequired || null;
     this.pendingConfirmations = new Map();
+
+    // 超时/重试/结果大小配置（统一管理，便于单测覆盖）
+    this.defaultTimeoutMs = options.defaultTimeoutMs || DEFAULT_TOOL_TIMEOUT_MS;
+    this.maxRetries = options.maxRetries != null ? options.maxRetries : DEFAULT_MAX_RETRIES;
+    this.maxResultTokens = options.maxResultTokens || DEFAULT_MAX_RESULT_TOKENS_INNER;
+    /** @type {Object<string, number>} 按工具名覆盖的超时表 */
+    this.toolTimeouts = options.toolTimeouts || {};
   }
 
   /**
@@ -408,8 +539,51 @@ class ToolExecutor {
       } else {
         logger.info(`执行工具: ${resolvedName}`, { argKeys, agent: context.agentId });
       }
-      const result = await tool.execute(normalizedArgs, context);
+      // P2-2：超时保护 + 结果 token 级硬上限
+      const timeoutMs = tool.timeoutMs || this.defaultTimeoutMs || DEFAULT_TOOL_TIMEOUT_MS;
+      let result;
+      try {
+        result = await _executeWithTimeout(tool.execute.bind(tool), [normalizedArgs, context], timeoutMs);
+      } catch (timeoutErr) {
+        if (timeoutErr.isTimeout) {
+          logger.warn(`工具执行超时: ${resolvedName} (${timeoutMs}ms)`, { agent: context.agentId });
+          const hint = this._buildParamHint(tool);
+          return {
+            success: false,
+            error: `工具执行超时（${timeoutMs}ms），已中止。请重试或简化请求。\n\n${hint}`,
+            displayError: `工具执行超时（${timeoutMs}ms）`,
+            timeout: true,
+          };
+        }
+        throw timeoutErr; // 非超时错误，走外层 catch
+      }
       logger.info(`工具执行完成: ${resolvedName}`, { resultLength: JSON.stringify(result).length });
+
+      // P2-2：结果大小 token 级硬上限，防止单次工具结果撑爆上下文
+      if (result && typeof result === 'object' && !result.__truncated) {
+        const limited = limitResultSize(result, {
+          maxTokens: tool.maxResultTokens || DEFAULT_MAX_RESULT_TOKENS,
+          toolName: resolvedName,
+        });
+        if (limited.truncated) {
+          logger.warn(`工具结果被截断: ${resolvedName}`, {
+            originalTokens: limited.originalTokens,
+            finalTokens: limited.finalTokens,
+            agent: context.agentId,
+          });
+          // 用截断后的值替换 result（保持对象结构，仅 content/输出字段被截断）
+          // limitResultSize 返回 { truncated, value, ... }，value 是截断后的字符串
+          if (typeof result === 'object' && !Array.isArray(result)) {
+            // 优先写 result 字段（工具通用约定），回退到把 value 赋给一个明确字段
+            result.result = limited.value;
+            result.__truncated = true;
+            result.__truncationInfo = {
+              originalTokens: limited.originalTokens,
+              finalTokens: limited.finalTokens,
+            };
+          }
+        }
+      }
 
       // 如果工具自身返回了错误，附加参数提示帮助 LLM 纠正
       if (result && (result.error || result.success === false)) {

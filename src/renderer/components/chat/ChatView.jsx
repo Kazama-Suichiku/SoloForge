@@ -4,7 +4,7 @@
  * @module components/chat/ChatView
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import ConversationList from './ConversationList';
 import MessageList from './MessageList';
 import ChatInput from './ChatInput';
@@ -13,6 +13,7 @@ import TodoPanel from './TodoPanel';
 import ThemeToggle from '../ThemeToggle';
 import { useChatStore } from '../../store/chat-store';
 import { useAuthStore } from '../../store/auth-store';
+import { useAgentStore } from '../../store/agent-store';
 
 /**
  * 聊天主视图
@@ -30,6 +31,24 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
   const updateMessage = useChatStore((s) => s.updateMessage);
   const currentCompany = useAuthStore((s) => s.currentCompany);
   const switchCompany = useAuthStore((s) => s.switchCompany);
+
+  // 只提取当前对话的 type 和 participants，避免订阅整个 conversations Map
+  const currentConv = useChatStore((s) => s.conversations.get(s.currentConversationId));
+  const currentConvType = currentConv?.type;
+  const currentConvParticipants = currentConv?.participants;
+
+  // 只提取当前私聊对话中 Agent 的 status
+  const targetAgentId = useMemo(() => {
+    if (currentConvType !== 'private') return null;
+    return currentConvParticipants?.find((p) => p !== 'user') || null;
+  }, [currentConvType, currentConvParticipants]);
+
+  const targetAgentStatus = useAgentStore((s) =>
+    targetAgentId ? s.agents.get(targetAgentId)?.status : null
+  );
+
+  // 检查当前对话的 Agent 是否正在工作
+  const isAgentWorking = targetAgentStatus === 'working';
 
   // 获取巡查状态
   useEffect(() => {
@@ -217,7 +236,12 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
           onToggle={() => setTodoCollapsed((v) => !v)}
         />
         <MessageList />
-        <ChatInput onSend={handleSend} onSilenceGroup={onSilenceGroup} />
+        <ChatInput 
+          onSend={handleSend} 
+          onSilenceGroup={onSilenceGroup}
+          disabled={isAgentWorking}
+          placeholder={isAgentWorking ? '等待 Agent 响应中...' : '输入消息...'}
+        />
       </main>
 
       {/* 新建对话弹窗 */}

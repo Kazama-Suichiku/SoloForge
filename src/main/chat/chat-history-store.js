@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
-const { atomicWriteSync } = require('../utils/atomic-write');
+const { atomicWriteSync, atomicWrite } = require('../utils/atomic-write');
 
 function getConfigDir() {
   return dataPath.getBasePath();
@@ -90,27 +90,29 @@ class ChatHistoryStore {
   }
 
   /**
-   * 立即将待写入数据刷盘
+   * 立即将待写入数据刷盘（异步，不阻塞主进程）
    */
   _flushToDisk() {
     if (!this._pendingData) return;
 
-    try {
-      this._ensureDir();
-      const content = JSON.stringify(this._pendingData, null, 2);
-      // 使用原子写入，防止写入过程中崩溃导致文件损坏
-      atomicWriteSync(getHistoryFile(), content);
+    const dataToWrite = this._pendingData;
+    this._pendingData = null;
+    this._debounceTimer = null;
 
-      const convCount = this._pendingData.state
-        ? Object.keys(this._pendingData.state.conversations || {}).length
-        : 0;
-      logger.debug('chat-history-store: 写入成功', { conversations: convCount, size: content.length });
-    } catch (error) {
-      logger.error('chat-history-store: 写入失败', error);
-    } finally {
-      this._pendingData = null;
-      this._debounceTimer = null;
-    }
+    this._ensureDir();
+    const content = JSON.stringify(dataToWrite, null, 2);
+
+    // 使用异步原子写入，不阻塞主进程
+    atomicWrite(getHistoryFile(), content)
+      .then(() => {
+        const convCount = dataToWrite.state
+          ? Object.keys(dataToWrite.state.conversations || {}).length
+          : 0;
+        logger.debug('chat-history-store: 写入成功', { conversations: convCount, size: content.length });
+      })
+      .catch((error) => {
+        logger.error('chat-history-store: 写入失败', error);
+      });
   }
 
   /**

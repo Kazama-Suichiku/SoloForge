@@ -12,6 +12,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import * as streamBuffer from './useStreamBuffer';
 
 /**
  * @typedef {'private' | 'group' | 'department'} ConversationType
@@ -532,6 +533,17 @@ export const useChatStore = create(
        * 更新消息（同时同步更新 lastMessage 快照）
        */
       updateMessage: (messageId, updates) => {
+        // P2-7：流式完成时自动消费 buffer。
+        // 如果该消息有未消费的流式 buffer（说明流式刚结束），且本次 updates 没显式指定 content，
+        // 则用 buffer 内容作为 content（匹配原 onComplete 的 [role]: 前缀清理逻辑由调用方负责）。
+        if (streamBuffer.hasBuffer(messageId) && updates.content === undefined) {
+          const buf = streamBuffer.consume(messageId);
+          if (buf) updates = { ...updates, content: buf };
+        } else if (streamBuffer.hasBuffer(messageId)) {
+          // updates 显式带了 content，buffer 不再需要，清掉避免残留
+          streamBuffer.clearBuffer(messageId);
+        }
+
         set((state) => {
           const nextMsgs = new Map(state.messagesByConversation);
           for (const [convId, msgs] of nextMsgs) {
@@ -588,30 +600,12 @@ export const useChatStore = create(
       },
 
       /**
-       * 追加消息内容（流式输出）
+       * 追加消息内容（流式输出）— P2-7：buffer 移出 store
+       * 流式 chunk 只累积在外部 streamBuffer，不触发 store set，
+       * 避免 16ms 全量重渲染。完成时由 updateMessage 一次性 consume 写入。
        */
       appendMessageContent: (messageId, chunk) => {
-        set((state) => {
-          const nextMsgs = new Map(state.messagesByConversation);
-          for (const [convId, msgs] of nextMsgs) {
-            const idx = msgs.findIndex((m) => m.id === messageId);
-            if (idx !== -1) {
-              const updatedMsgs = [...msgs];
-              const msg = updatedMsgs[idx];
-              updatedMsgs[idx] = { ...msg, content: msg.content + chunk };
-              nextMsgs.set(convId, updatedMsgs);
-
-              const nextConvs = new Map(state.conversations);
-              const conv = nextConvs.get(convId);
-              if (conv && conv.lastMessage?.id === messageId) {
-                nextConvs.set(convId, { ...conv, lastMessage: updatedMsgs[idx] });
-                return { messagesByConversation: nextMsgs, conversations: nextConvs };
-              }
-              return { messagesByConversation: nextMsgs };
-            }
-          }
-          return state;
-        });
+        streamBuffer.appendChunk(messageId, chunk);
       },
 
       /**
