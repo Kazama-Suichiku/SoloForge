@@ -12,7 +12,7 @@
  * @module hooks/useChatAgent
  */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useChatStore } from '../store/chat-store';
 import { useAgentStore } from '../store/agent-store';
 
@@ -44,6 +44,106 @@ export function useChatAgent() {
 
   // 群聊中断控制（Phase 3-B：主要用于 silenceGroup，群聊触发已移主进程 GroupQueue）
   const groupAbortRef = useRef(false);
+
+  // ── P0 流式 watchdog（审计维度 13）──────────────────────────────
+  // 问题：发起流式后若 Agent 卡死（既不推 chunk 也不 complete），前端会无限 loading。
+  // 方案：为每条发起的流式消息挂一个 90s watchdog：
+  //   - 每收到一个 chunk（onStreamTick）重置该消息的定时器 → 正常流式不会误触发；
+  //   - 90s 内无任何 chunk 且未 complete → 判定卡死，清理 loading + 显示"响应超时，请重试"。
+  // 注意：只在真正卡死时触发，不中断正常流式（正常流式每 chunk 都会重置定时器）。
+  const STREAM_WATCHDOG_MS = 90_000;
+  // watchdog 状态表：messageId -> { timer, agentId }
+  const watchdogsRef = useRef(new Map());
+
+  /** 清除指定消息的 watchdog（流式完成 / 卸载时调用） */
+  const clearWatchdog = useCallback((messageId) => {
+    if (!messageId) return;
+    const map = watchdogsRef.current;
+    const w = map.get(messageId);
+    if (w) {
+      if (w.timer) clearTimeout(w.timer);
+      map.delete(messageId);
+    }
+  }, []);
+
+  /** 启动一条消息的 watchdog（发起流式成功后调用） */
+  const startWatchdog = useCallback((messageId, agentId) => {
+    if (!messageId) return;
+    // 先清掉可能存在的旧定时器（重发场景）
+    clearWatchdog(messageId);
+    const timer = setTimeout(() => {
+      // 卡死处理：清理 loading 状态 + 提示超时
+      console.warn(`[watchdog] 流式消息 ${messageId} 超过 ${STREAM_WATCHDOG_MS}ms 无 chunk，判定卡死`);
+      watchdogsRef.current.delete(messageId);
+      // 1. 把消息标记为错误（若已有内容则保留并补一条提示，避免覆盖已渲染内容）
+      const allMsgs = useChatStore.getState().messagesByConversation;
+      let hadContent = false;
+      for (const [, msgs] of allMsgs) {
+        const m = msgs.find((x) => x.id === messageId);
+        if (m) { hadContent = !!m.content; break; }
+      }
+      if (hadContent) {
+        // 已有内容：不覆盖，只更新状态为 sent（视为部分响应已送达）
+        updateMessage(messageId, { status: 'sent' });
+      } else {
+        // 完全无内容：显示超时提示
+        updateMessage(messageId, {
+          content: '响应超时，请重试。',
+          status: 'error',
+        });
+      }
+      // 2. 释放 Agent 工作状态
+      if (agentId) setAgentIdle(agentId);
+      // 3. 通知主进程中止该 Agent 的任务（尽力而为，避免后端继续空转）
+      try {
+        window.electronAPI?.abortAgentTask?.(agentId);
+      } catch (e) {
+        console.warn('[watchdog] abortAgentTask 失败:', e);
+      }
+    }, STREAM_WATCHDOG_MS);
+    watchdogsRef.current.set(messageId, { timer, agentId });
+  }, [clearWatchdog, updateMessage, setAgentIdle]);
+
+  /** 收到 chunk 时重置 watchdog 定时器（防卡死，不中断正常流式） */
+  const onStreamTick = useCallback((messageId) => {
+    const w = watchdogsRef.current.get(messageId);
+    if (!w) return; // 没挂 watchdog（非本 hook 发起 / 已完成），忽略
+    // 重置定时器：clearTimeout + 重新 setTimeout
+    if (w.timer) clearTimeout(w.timer);
+    w.timer = setTimeout(() => {
+      console.warn(`[watchdog] 流式消息 ${messageId} 重置后仍超时，判定卡死`);
+      watchdogsRef.current.delete(messageId);
+      const allMsgs = useChatStore.getState().messagesByConversation;
+      let hadContent = false;
+      for (const [, msgs] of allMsgs) {
+        const m = msgs.find((x) => x.id === messageId);
+        if (m) { hadContent = !!m.content; break; }
+      }
+      if (hadContent) {
+        updateMessage(messageId, { status: 'sent' });
+      } else {
+        updateMessage(messageId, { content: '响应超时，请重试。', status: 'error' });
+      }
+      if (w.agentId) setAgentIdle(w.agentId);
+      try { window.electronAPI?.abortAgentTask?.(w.agentId); } catch {}
+    }, STREAM_WATCHDOG_MS);
+  }, [updateMessage, setAgentIdle]);
+
+  /** 流式完成：清除 watchdog */
+  const onStreamComplete = useCallback((messageId) => {
+    clearWatchdog(messageId);
+  }, [clearWatchdog]);
+
+  // 卸载时清理所有 watchdog 定时器，避免内存泄漏与卸载后 setState
+  useEffect(() => {
+    const map = watchdogsRef.current;
+    return () => {
+      for (const { timer } of map.values()) {
+        if (timer) clearTimeout(timer);
+      }
+      map.clear();
+    };
+  }, []);
 
   /**
    * 模拟 Agent 响应（开发测试用）
@@ -136,6 +236,10 @@ export function useChatAgent() {
               status: 'error',
             });
             setAgentIdle(agentId);
+          } else {
+            // P0：流式发起成功，挂 watchdog 防卡死
+            // 每收到 chunk 会重置定时器；90s 无任何 chunk 则判定卡死并清理 loading。
+            startWatchdog(agentMsgId, agentId);
           }
           // 注意：不再在这里等待完成，setAgentIdle 由 onComplete 回调处理
           return; // 提前返回，让 onComplete 处理后续
@@ -176,7 +280,7 @@ export function useChatAgent() {
         setAgentIdle(agentId);
       }
     },
-    [sendMessage, updateMessage, setAgentWorking, setAgentIdle, simulateAgentResponse]
+    [sendMessage, updateMessage, setAgentWorking, setAgentIdle, simulateAgentResponse, startWatchdog]
   );
 
   /**
@@ -256,8 +360,11 @@ export function useChatAgent() {
 
   // ── 订阅主进程 IPC 事件（所有 useEffect 已迁移至 useAgentIpcEvents） ──
   // Phase 3-B：群聊连锁触发移到主进程 GroupQueue，不再传 handleGroupChat / 冷却回调
+  // P0：传入 onStreamTick / onStreamComplete 给流式 watchdog 使用。
   useAgentIpcEvents({
     setAgentIdle,
+    onStreamTick,
+    onStreamComplete,
   });
 
   /**

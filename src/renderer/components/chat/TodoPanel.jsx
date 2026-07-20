@@ -32,14 +32,14 @@ const STATUS_CONFIG = {
   in_progress: {
     icon: '◉',
     label: '进行中',
-    className: 'text-[var(--color-primary)]',
-    dotClass: 'bg-[var(--color-primary)]',
+    className: 'text-accent',
+    dotClass: 'bg-accent',
   },
   done: {
     icon: '✓',
     label: '已完成',
-    className: 'text-green-500',
-    dotClass: 'bg-green-500',
+    className: 'text-success',
+    dotClass: 'bg-success',
   },
 };
 
@@ -55,9 +55,9 @@ function TodoItem({ todo }) {
       {/* 状态指示器：emil-dot-enter scale+opacity 入场（仅 done 状态的 check 图标） */}
       <span className={`shrink-0 mt-0.5 text-xs font-bold ${config.className}`}>
         {todo.status === 'done' ? (
-          <CheckCircleIcon className="w-3.5 h-3.5 text-green-500 emil-dot-enter" />
+          <CheckCircleIcon className="w-3.5 h-3.5 text-success emil-dot-enter" />
         ) : todo.status === 'in_progress' ? (
-          <ClockIcon className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+          <ClockIcon className="w-3.5 h-3.5 text-accent" />
         ) : (
           <span className="inline-block w-3.5 h-3.5 rounded-full border border-text-secondary/40" />
         )}
@@ -121,7 +121,7 @@ function AgentTodoGroup({ agentId, todos, agentName, defaultOpen = true }) {
         {/* 进度统计 */}
         <div className="flex items-center gap-1.5 ml-auto shrink-0">
           {inProgress > 0 && (
-            <span className="text-[10px] text-[var(--color-primary)] font-medium">
+            <span className="text-[10px] text-accent font-medium">
               {inProgress} 进行中
             </span>
           )}
@@ -136,7 +136,7 @@ function AgentTodoGroup({ agentId, todos, agentName, defaultOpen = true }) {
         <div className="px-3 pb-1.5">
           <div className="h-1 bg-[var(--border-color)] rounded-full overflow-hidden">
             <div
-              className="h-full bg-[var(--color-primary)] rounded-full transition-all duration-500"
+              className="h-full bg-accent rounded-full transition-transform duration-normal ease-out-quart"
               style={{ width: `${progress}%` }}
             />
           </div>
@@ -231,7 +231,7 @@ export default function TodoPanel({ collapsed, onToggle }) {
         className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[var(--border-color)] bg-bg-elevated hover:bg-[var(--bg-hover)] transition-colors w-full"
         title="展开待办事项"
       >
-        <ListBulletIcon className="w-4 h-4 text-[var(--color-primary)]" />
+        <ListBulletIcon className="w-4 h-4 text-accent" />
         <span className="text-[11px] font-medium text-text-primary">
           待办事项
         </span>
@@ -239,7 +239,7 @@ export default function TodoPanel({ collapsed, onToggle }) {
           {totalDone}/{totalTodos}
         </span>
         {totalInProgress > 0 && (
-          <span className="text-[10px] text-[var(--color-primary)] ml-auto">
+          <span className="text-[10px] text-accent ml-auto">
             {totalInProgress} 进行中
           </span>
         )}
@@ -254,7 +254,7 @@ export default function TodoPanel({ collapsed, onToggle }) {
       {/* 标题栏 */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
         <div className="flex items-center gap-2">
-          <ListBulletIcon className="w-4 h-4 text-[var(--color-primary)]" />
+          <ListBulletIcon className="w-4 h-4 text-accent" />
           <span className="text-[12px] font-semibold text-text-primary">待办事项</span>
           <span className="text-[10px] text-text-secondary">
             {totalDone}/{totalTodos} 完成

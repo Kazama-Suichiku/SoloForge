@@ -146,6 +146,7 @@ function HideButton({ onClick, title = '从列表中移除（保留记录）' })
     <button
       type="button"
       onClick={(e) => { e.stopPropagation(); onClick(); }}
+      aria-label="隐藏会话"
       className="opacity-0 group-hover:opacity-100 p-1 rounded-md transition-[color,background-color,border-color,transform] shrink-0 emil-ghost-hover emil-pressable"
       style={{ color: 'var(--text-tertiary, #8a8f98)' }}
       onMouseEnter={(e) => {
@@ -183,7 +184,7 @@ const ContactItem = memo(function ContactItem({ agent, conversation, actualLastM
     : '';
 
   return (
-    <div className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
+    <div role="listitem" className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
       <MemoSelectionLayer isActive={isActive} />
       <button
         type="button"
@@ -269,7 +270,7 @@ const DepartmentItem = memo(function DepartmentItem({ conversation, actualLastMs
     : '';
 
   return (
-    <div className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
+    <div role="listitem" className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
       <MemoSelectionLayer isActive={isActive} />
       <button
         type="button"
@@ -351,7 +352,7 @@ const GroupItem = memo(function GroupItem({ conversation, actualLastMsg, isActiv
     : '';
 
   return (
-    <div className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
+    <div role="listitem" className="group relative flex items-center emil-conv-item" style={{ height: ITEM_HEIGHT, '--emil-i': index }}>
       <MemoSelectionLayer isActive={isActive} />
       <button
         type="button"
@@ -436,8 +437,12 @@ const MemoSectionLabel = memo(SectionLabel);
 
 /**
  * 联系人列表主组件
+ * @param {Object} [props]
+ * @param {() => void} [props.onNewChat] - 新建群聊回调
+ * @param {React.RefObject<HTMLInputElement>} [props.searchInputRef] - 外部传入的搜索框 ref，
+ *   供 ChatView 实现全局快捷键 Cmd/Ctrl+K 聚焦搜索框。可选。
  */
-function ConversationList({ onNewChat }) {
+function ConversationList({ onNewChat, searchInputRef }) {
   const agentsMap = useAgentStore((s) => s.agents);
   const conversations = useChatStore((s) => s.conversations);
   const messagesByConversation = useChatStore((s) => s.messagesByConversation);
@@ -630,6 +635,8 @@ function ConversationList({ onNewChat }) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="搜索联系人..."
+            aria-label="搜索会话"
+            ref={searchInputRef}
             className="w-full text-[12px] focus:outline-none transition-colors"
             style={{
               borderRadius: 'var(--radius-md, 6px)',
@@ -677,7 +684,7 @@ function ConversationList({ onNewChat }) {
             )}
           </div>
         ) : (
-          <div className="space-y-px">
+          <div className="space-y-px" role="list">
             {/* 搜索时的提示 */}
             {isSearching && (
               <div

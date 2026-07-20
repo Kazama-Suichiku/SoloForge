@@ -37,6 +37,8 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
   const [showNewChat, setShowNewChat] = useState(false);
   const [todoCollapsed, setTodoCollapsed] = useState(false);
   const [patrolEnabled, setPatrolEnabled] = useState(true);
+  // 全局快捷键：聚焦搜索框（Cmd/Ctrl+K）的 ref，传给 ConversationList 的搜索 input
+  const searchInputRef = useRef(null);
   const currentConversationId = useChatStore((s) => s.currentConversationId);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const updateMessage = useChatStore((s) => s.updateMessage);
@@ -85,6 +87,48 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
       }
     } catch { /* ignore */ }
   }, [patrolEnabled]);
+
+  // ─────────────────────────────────────────────────────────
+  // 全局快捷键：
+  //   Cmd/Ctrl + N → 新建会话（打开 NewChatDialog）
+  //   Cmd/Ctrl + K → 聚焦会话搜索框
+  //   Esc          → 关闭打开的弹窗（NewChatDialog）
+  // 说明：Electron 菜单加速键可能优先拦截 Cmd+N/Cmd+K，此处作为应用内后备。
+  //   输入法组合状态（isComposing）不触发，避免中文输入误触。
+  // ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const handleGlobalKeyDown = (e) => {
+      const mod = e.metaKey || e.ctrlKey; // Mac 用 Cmd，Win/Linux 用 Ctrl
+      // 输入法组合中不响应全局快捷键
+      if (e.nativeEvent?.isComposing || e.isComposing) return;
+
+      // Cmd/Ctrl + N → 新建会话
+      if (mod && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault();
+        setShowNewChat(true);
+        return;
+      }
+      // Cmd/Ctrl + K → 聚焦搜索框
+      if (mod && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        const input = searchInputRef.current;
+        if (input && typeof input.focus === 'function') {
+          input.focus();
+          // 选中已有内容，便于直接覆盖输入
+          if (typeof input.select === 'function') input.select();
+        }
+        return;
+      }
+      // Esc → 关闭弹窗（仅当有弹窗打开时，避免与其它 Esc 处理冲突）
+      if (e.key === 'Escape' && showNewChat) {
+        e.preventDefault();
+        setShowNewChat(false);
+        return;
+      }
+    };
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [showNewChat]);
 
   // 可拖拽侧栏宽度
   const [sidebarWidth, setSidebarWidth] = useState(288); // 默认 w-72 = 288px
@@ -420,7 +464,10 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
 
         {/* 对话列表 */}
         <div className="flex-1 overflow-hidden">
-          <ConversationList onNewChat={() => setShowNewChat(true)} />
+          <ConversationList
+            onNewChat={() => setShowNewChat(true)}
+            searchInputRef={searchInputRef}
+          />
         </div>
       </aside>
 
@@ -514,7 +561,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
           collapsed={todoCollapsed}
           onToggle={() => setTodoCollapsed((v) => !v)}
         />
-        <MessageList />
+        <MessageList onNewChat={() => setShowNewChat(true)} />
         <ChatInput
           onSend={handleSend}
           onSilenceGroup={onSilenceGroup}

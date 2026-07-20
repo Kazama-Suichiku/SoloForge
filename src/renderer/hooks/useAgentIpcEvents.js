@@ -19,9 +19,15 @@ import { useChatStore } from '../store/chat-store';
  *
  * @param {object} handlers - 由 useChatAgent 传入的事件处理回调
  * @param {(agentId: string) => void} [handlers.setAgentIdle] - 设置 Agent 空闲（来自 agent-store）
+ * @param {(messageId: string, chunk: object) => void} [handlers.onStreamTick] - P0 watchdog：
+ *        每收到一个流式 chunk 调用，用于重置该消息的 watchdog 定时器（防卡死）。
+ * @param {(messageId: string) => void} [handlers.onStreamComplete] - P0 watchdog：
+ *        流式完成（成功/失败）时调用，用于清除该消息的 watchdog。
  */
 export function useAgentIpcEvents({
   setAgentIdle,
+  onStreamTick,
+  onStreamComplete,
 } = {}) {
   // ── 从 chat-store 读取本 hook 需要的 action ──────────────────────
   const appendMessageContent = useChatStore((s) => s.appendMessageContent);
@@ -40,6 +46,10 @@ export function useAgentIpcEvents({
     if (!window.soloforge?.chat?.onStream) return;
 
     const unsubscribe = window.soloforge.chat.onStream((chunk) => {
+      // P0 watchdog：每收到一个 chunk 重置该消息的超时定时器
+      if (chunk?.messageId) {
+        try { onStreamTick?.(chunk.messageId, chunk); } catch { /* hook 未注入或已卸载，忽略 */ }
+      }
       // 文本内容（包括 <!--tool-group:N--> 标记）
       if (chunk.messageId && chunk.content) {
         appendMessageContent(chunk.messageId, chunk.content);
@@ -63,7 +73,7 @@ export function useAgentIpcEvents({
     return () => {
       unsubscribe?.();
     };
-  }, [appendMessageContent, addToolCalls, updateToolCall]);
+  }, [appendMessageContent, addToolCalls, updateToolCall, onStreamTick]);
 
   // ── 2. 监听流式完成事件（处理 Agent 状态和消息最终状态） ────────
   useEffect(() => {
@@ -73,6 +83,9 @@ export function useAgentIpcEvents({
       const { messageId, success, content, error } = result;
       console.log('[onComplete] 收到完成事件:', { messageId, success, error: error?.slice?.(0, 100) });
       if (!messageId) return;
+
+      // P0 watchdog：流式完成，清除该消息的 watchdog 定时器
+      try { onStreamComplete?.(messageId); } catch { /* hook 未注入或已卸载，忽略 */ }
 
       // 查找消息所属的 Agent
       const allMsgs = useChatStore.getState().messagesByConversation;
@@ -145,7 +158,7 @@ export function useAgentIpcEvents({
     return () => {
       unsubscribe?.();
     };
-  }, [setAgentIdle, updateMessage]);
+  }, [setAgentIdle, updateMessage, onStreamComplete]);
 
   // ── 3. 监听 Agent 主动推送消息（审批通知、工作汇报等） ──────────
   useEffect(() => {

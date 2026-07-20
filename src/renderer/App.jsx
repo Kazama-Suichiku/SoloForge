@@ -45,7 +45,7 @@ class ErrorBoundary extends Component {
           </p>
           <button
             onClick={() => this.setState({ hasError: false, error: null })}
-            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+            className="btn-primary px-4 py-2"
           >
             重试
           </button>
@@ -121,7 +121,7 @@ export default function App() {
     content = (
       <div className="flex items-center justify-center h-screen bg-bg-base text-text-secondary">
         <div className="flex flex-col items-center gap-3 animate-fade-in">
-          <div className="w-10 h-10 border-3 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" />
+          <div className="w-10 h-10 border-2 border-accent border-t-transparent rounded-full animate-spin" />
           <p className="text-sm">正在检查登录状态...</p>
         </div>
       </div>
@@ -134,7 +134,7 @@ export default function App() {
     content = (
       <div className="flex items-center justify-center h-screen bg-bg-base text-text-secondary">
         <div className="flex flex-col items-center gap-3 animate-fade-in">
-          <div className="w-10 h-10 border-3 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" />
+          <div className="w-10 h-10 border-2 border-accent border-t-transparent rounded-full animate-spin" />
           <p className="text-sm">加载中...</p>
         </div>
       </div>

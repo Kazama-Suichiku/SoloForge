@@ -211,11 +211,26 @@
     color: var(--accent-active);
   }
 
-  /* 焦点环：accent 色，细 */
+  /* 焦点环：accent 色，2px，offset 2px（键盘导航清晰可见） */
   :focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    outline-offset: 2px;
     border-radius: var(--radius-sm);
+  }
+
+  /* 鼠标点击不显示 outline（只保留键盘导航的 focus 环）。
+     :focus-visible 由 UA 决定显示；非 :focus-visible 时隐藏，避免鼠标点击残留。 */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+/* ============ prefers-reduced-motion：focus 环无过渡 ============
+   焦点环本身无 transition，但此处显式声明，避免任何全局 transition 影响。
+   保持可访问性：键盘焦点环是信息性指示，不应被 reduced-motion 移除。 */
+@media (prefers-reduced-motion: reduce) {
+  :focus-visible {
+    transition: none;
   }
 }
 

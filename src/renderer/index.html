@@ -3,7 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:8888 ws://localhost:8888; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:8888; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws://localhost:8888 http://localhost:8888; img-src 'self' sf-local: data:; media-src 'self' sf-local: blob:">
+  <!--
+    CSP 说明（审计维度 14）：
+    - style-src 'unsafe-inline'：mermaid strict 模式输出内联 <style>/style 属性；KaTeX 本地 CSS（self）+ 内联样式，必须保留。
+    - script-src 'unsafe-eval'：仅 dev 下 Vite 需要（评估后可在 prod 构建移除）。mermaid strict 不需要 eval，KaTeX 不需要 eval。
+    - object-src 'none' / base-uri 'none' / form-action 'self'：硬化，禁止插件/基址劫持/外部表单提交。
+    - connect-src ws://localhost:8888：dev HMR + 后端 IPC over WebSocket。
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://localhost:8888 ws://localhost:8888; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:8888; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' sf-local: data:; media-src 'self' sf-local: blob:; connect-src 'self' ws://localhost:8888 http://localhost:8888; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;590&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">

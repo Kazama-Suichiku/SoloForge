@@ -366,6 +366,7 @@ export default function ChatInput({
               <button
                 type="button"
                 onClick={() => removeAttachment(att.id)}
+                aria-label={`移除附件 ${att.filename}`}
                 className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                 style={{ background: 'rgba(0, 0, 0, 0.6)' }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(0, 0, 0, 0.8)'; }}
@@ -441,6 +442,7 @@ export default function ChatInput({
             type="button"
             onClick={handleSelectImages}
             disabled={disabled || !currentConversationId}
+            aria-label="附件"
             className="shrink-0 w-9 h-9 mb-0.5 flex items-center justify-center transition-colors disabled:cursor-not-allowed"
             style={ghostButtonStyle}
             onMouseEnter={(e) => {
@@ -470,6 +472,7 @@ export default function ChatInput({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
+            aria-label="输入消息"
             disabled={disabled || !currentConversationId}
             rows={1}
             className="w-full resize-none px-4 py-3 text-sm placeholder:text-text-secondary focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
@@ -544,6 +547,7 @@ export default function ChatInput({
           <button
             type="button"
             onClick={handleSilence}
+            aria-label="肃静群聊"
             className="shrink-0 h-11 px-3 flex items-center justify-center gap-1.5 transition-all text-sm font-bold active:scale-95"
             style={{
               borderRadius: 'var(--radius-md)',
@@ -576,6 +580,7 @@ export default function ChatInput({
           type="button"
           onClick={toggleRecording}
           disabled={disabled || !currentConversationId || isTranscribing}
+          aria-label={isRecording ? '停止录音' : '语音输入'}
           className={`shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable disabled:opacity-40 disabled:cursor-not-allowed${isRecording ? ' emil-record-pulse' : ''}`}
           style={isRecording ? recordActiveStyle : ghostButtonStyle}
           onMouseEnter={(e) => {
@@ -606,6 +611,7 @@ export default function ChatInput({
           type="button"
           onClick={handleSend}
           disabled={!canSend}
+          aria-label="发送"
           className="shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable active:scale-[0.97]"
           style={canSend ? sendButtonStyle : sendButtonDisabledStyle}
           onMouseEnter={(e) => {

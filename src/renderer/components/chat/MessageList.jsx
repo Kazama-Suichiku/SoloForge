@@ -1,7 +1,9 @@
 /**
- * SoloForge - 消息流组件
+ * 消息流组件
  * 显示当前对话的消息列表，支持 Markdown、清屏、右键删除、多选批量删除
  * @module components/chat/MessageList
+ * @param {Object} [props]
+ * @param {() => void} [props.onNewChat] - 新建对话回调（无选中对话的空状态 CTA）
  */
 
 import { useEffect, useRef, useMemo, useCallback, useState } from 'react';
@@ -224,7 +226,7 @@ function SelectionBar({ selectedCount, onDeleteSelected, onSelectAll, onCancelSe
 // 消息列表主组件
 // ─────────────────────────────────────────────────────────
 
-export default function MessageList() {
+export default function MessageList({ onNewChat }) {
   const currentConversationId = useChatStore((s) => s.currentConversationId);
   const messagesByConversation = useChatStore((s) => s.messagesByConversation);
   const conversations = useChatStore((s) => s.conversations);
@@ -425,10 +427,43 @@ export default function MessageList() {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <div className="shrink-0 h-8 drag-region" />
-        <div className="flex flex-col items-center justify-center flex-1 text-text-secondary">
-          <span className="text-6xl mb-4">💬</span>
-          <p className="text-lg font-medium">选择一位同事开始聊天</p>
-          <p className="text-sm mt-1">在左侧联系人列表中选择</p>
+        <div
+          className="flex flex-col items-center justify-center flex-1 px-6 text-center"
+          role="status"
+        >
+          <div
+            className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mb-5"
+            style={{
+              background: 'var(--bg-surface)',
+              border: '1px solid var(--border-default)',
+              boxShadow: 'var(--shadow-ambient)',
+            }}
+            aria-hidden="true"
+          >
+            💬
+          </div>
+          <p className="text-lg font-medium" style={{ color: 'var(--text-primary)' }}>
+            选择一位同事开始聊天
+          </p>
+          <p className="text-sm mt-1.5 mb-5" style={{ color: 'var(--text-tertiary)' }}>
+            在左侧联系人列表中选择，或新建对话
+          </p>
+          {onNewChat && (
+            <button
+              type="button"
+              onClick={onNewChat}
+              className="btn-primary px-4 py-2 text-sm"
+              aria-label="新建对话"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M12 4v16m8-8H4" />
+              </svg>
+              新建对话
+            </button>
+          )}
+          <p className="text-xs mt-6" style={{ color: 'var(--text-quaternary)' }}>
+            快捷键：⌘N 新建对话 · ⌘K 搜索
+          </p>
         </div>
       </div>
     );
@@ -497,19 +532,43 @@ export default function MessageList() {
       )}
 
       {/* 消息区域 */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-6 py-4 min-h-0 relative scroll-fade-top scroll-fade-bottom">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        role="log"
+        aria-live="polite"
+        aria-label="消息列表"
+        className="flex-1 overflow-auto px-6 py-4 min-h-0 relative scroll-fade-top scroll-fade-bottom"
+      >
         {visibleMessages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-text-secondary animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-bg-surface flex items-center justify-center text-3xl mb-4">
+          <div
+            className="flex flex-col items-center justify-center h-full text-center animate-fade-in"
+            role="status"
+          >
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mb-4"
+              style={{
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-default)',
+                boxShadow: 'var(--shadow-ambient)',
+              }}
+              aria-hidden="true"
+            >
               {conversation?.type === 'group' ? '👥' : '💬'}
             </div>
-            <p className="text-base font-medium text-text-primary mb-1">
+            <p className="text-base font-medium mb-1" style={{ color: 'var(--text-primary)' }}>
               {conversation?.type === 'group' ? '群组对话' : '开始新对话'}
             </p>
-            <p className="text-sm text-text-tertiary">
+            <p className="text-sm" style={{ color: 'var(--text-tertiary)' }}>
               {conversation?.type === 'group'
                 ? '在下方输入消息，所有成员都能看到'
                 : '发送消息开始与 Agent 对话'}
+            </p>
+            <p
+              className="mt-4 text-sm font-medium"
+              style={{ color: 'var(--accent)' }}
+            >
+              ↓ 在下方输入框开始
             </p>
           </div>
         ) : (
