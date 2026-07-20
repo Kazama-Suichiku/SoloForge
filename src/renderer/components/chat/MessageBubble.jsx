@@ -286,7 +286,7 @@ function VoiceMessagePlayer({ attachment, isUser }) {
             return (
               <div
                 key={i}
-                className="w-[3px] rounded-full transition-all duration-150"
+                className="w-[3px] rounded-full transition-transform duration-150"
                 style={{
                   height: `${6 + Math.sin(i * 0.8) * 6 + Math.random() * 4}px`,
                   background: barColor,
@@ -312,7 +312,7 @@ function VoiceMessagePlayer({ attachment, isUser }) {
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); setShowTranscription(!showTranscription); }}
-            className="text-[11px] transition-colors hover:opacity-80"
+            className="text-xs transition-colors hover:opacity-80"
             style={{ color: 'var(--text-quaternary)' }}
           >
             {showTranscription ? '收起文字' : '查看文字'}
@@ -614,7 +614,7 @@ function MessageBubbleImpl({ message, isSelectMode, isSelected, isExiting, onTog
                   e.stopPropagation();
                   onImageClick?.(`sf-local://${att.path}`);
                 }}
-                className="block overflow-hidden transition-all cursor-pointer"
+                className="block overflow-hidden transition-[box-shadow] cursor-pointer"
                 style={{
                   borderRadius: 'var(--radius-md)',
                   border: '1px solid var(--border-default)',

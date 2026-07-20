@@ -74,7 +74,7 @@ export default function ProjectsPanel({ projects }) {
                   <div className="flex h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}>
                     {proj.tasksDone > 0 && (
                       <div
-                        className="transition-all duration-normal ease-out-quart"
+                        className="transition-[width] duration-normal ease-out-quart"
                         style={{
                           width: `${(proj.tasksDone / proj.taskCount) * 100}%`,
                           backgroundColor: 'var(--color-success)',
@@ -83,7 +83,7 @@ export default function ProjectsPanel({ projects }) {
                     )}
                     {proj.tasksInProgress > 0 && (
                       <div
-                        className="transition-all duration-normal ease-out-quart"
+                        className="transition-[width] duration-normal ease-out-quart"
                         style={{
                           width: `${(proj.tasksInProgress / proj.taskCount) * 100}%`,
                           backgroundColor: 'var(--accent)',
@@ -92,7 +92,7 @@ export default function ProjectsPanel({ projects }) {
                     )}
                     {proj.tasksBlocked > 0 && (
                       <div
-                        className="transition-all duration-normal ease-out-quart"
+                        className="transition-[width] duration-normal ease-out-quart"
                         style={{
                           width: `${(proj.tasksBlocked / proj.taskCount) * 100}%`,
                           backgroundColor: 'var(--color-danger)',

@@ -12,7 +12,7 @@
  * @module hooks/useChatAgent
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../store/chat-store';
 import { useAgentStore } from '../store/agent-store';
 
@@ -41,6 +41,28 @@ export function useChatAgent() {
 
   const setAgentWorking = useAgentStore((s) => s.setAgentWorking);
   const setAgentIdle = useAgentStore((s) => s.setAgentIdle);
+
+  // ── P1：IPC loading 状态（审计维度 1）──────────────────────────────
+  // 问题：关键 IPC 调用（sendMessage / submitGroupMessage / silenceGroup）无 loading 状态，
+  // UI 无法显示 spinner 或禁用按钮，用户点击多次会重复发起。
+  // 方案：用 Map<action, boolean> 记录每个 action 的 loading 状态，
+  // 键格式 `${action}:${conversationId}`（同会话多个 action 互不影响）。
+  // setLoad 包装 setState，确保新旧 Map 引用变化触发重渲染。
+  const [loadingMap, setLoadingMap] = useState(new Map());
+
+  const setLoad = useCallback((key, isLoading) => {
+    setLoadingMap((prev) => {
+      // 幂等：状态相同则不产生新引用，避免无谓重渲染
+      if (prev.get(key) === isLoading) return prev;
+      const next = new Map(prev);
+      if (isLoading) next.set(key, true);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
+
+  /** 查询某 action 的 loading 状态（供 UI 判断 spinner / disabled） */
+  const isLoading = useCallback((key) => loadingMap.get(key) === true, [loadingMap]);
 
   // 群聊中断控制（Phase 3-B：主要用于 silenceGroup，群聊触发已移主进程 GroupQueue）
   const groupAbortRef = useRef(false);
@@ -204,6 +226,9 @@ export function useChatAgent() {
     async (conversationId, agentId, content, history, attachments) => {
       // 设置 Agent 为工作中
       setAgentWorking(agentId, '正在思考...');
+      // P1：标记本会话 sendMessage loading（UI 可据此显示 spinner / 禁用发送按钮）
+      const loadKey = `sendMessage:${conversationId}`;
+      setLoad(loadKey, true);
 
       // 先添加一条空的 Agent 消息（用于流式填充）
       const agentMsgId = sendMessage({
@@ -278,9 +303,13 @@ export function useChatAgent() {
         });
       } finally {
         setAgentIdle(agentId);
+        // P1：释放 loading（无论成功失败，IPC 调用已结束）
+        // 注意：流式调用提前 return，真正的完成由 onComplete 清 watchdog + loading，
+        // 但 IPC startResult 已 await 完成，这里也兜底清 loading 避免泄漏。
+        setLoad(loadKey, false);
       }
     },
-    [sendMessage, updateMessage, setAgentWorking, setAgentIdle, simulateAgentResponse, startWatchdog]
+    [sendMessage, updateMessage, setAgentWorking, setAgentIdle, simulateAgentResponse, startWatchdog, setLoad]
   );
 
   /**
@@ -305,6 +334,10 @@ export function useChatAgent() {
       // 从用户消息中提取被 @ 的 Agent（支持 @ID 和 @人名）
       const mentions = extractMentions(userContent, agentIds, nameToId);
 
+      // P1：标记群聊提交 loading（UI 可据此显示 spinner / 禁用发送按钮）
+      const loadKey = `groupSubmit:${conversationId}`;
+      setLoad(loadKey, true);
+
       // 把消息提交到主进程 GroupQueue（由主进程排队触发被 @ 的人）
       if (window.soloforge?.chat?.submitGroupMessage) {
         try {
@@ -319,12 +352,15 @@ export function useChatAgent() {
           }
         } catch (err) {
           console.error('群聊消息提交到主进程异常:', err);
+        } finally {
+          setLoad(loadKey, false);
         }
       } else {
         console.warn('submitGroupMessage API 不可用，群聊消息未提交到主进程');
+        setLoad(loadKey, false);
       }
     },
-    []
+    [setLoad]
   );
 
   /**
@@ -374,50 +410,64 @@ export function useChatAgent() {
    */
   const silenceGroup = useCallback(
     (conversationId) => {
-      // 1. 设置前端中断标记（保留以兼容任何残留的串行逻辑）
-      groupAbortRef.current = true;
+      // P1：标记肃静 loading（UI 可据此显示 spinner / 禁用肃静按钮）
+      const loadKey = `silence:${conversationId}`;
+      setLoad(loadKey, true);
 
-      // 2. 通知主进程 GroupQueue 肃静（Phase 3-B：清空待执行项 + 标记中止）
-      if (window.soloforge?.chat?.abortGroupQueue) {
-        try {
-          window.soloforge.chat.abortGroupQueue(conversationId);
-        } catch (e) {
-          console.warn(`主进程 GroupQueue 肃静失败:`, e);
-        }
-      }
+      try {
+        // 1. 设置前端中断标记（保留以兼容任何残留的串行逻辑）
+        groupAbortRef.current = true;
 
-      // 3. 获取群聊参与者，逐个中止后端任务
-      const conversation = useChatStore.getState().conversations.get(conversationId);
-      if (conversation) {
-        const agentIds = conversation.participants.filter((p) => p !== 'user');
-        for (const agentId of agentIds) {
+        // 2. 通知主进程 GroupQueue 肃静（Phase 3-B：清空待执行项 + 标记中止）
+        if (window.soloforge?.chat?.abortGroupQueue) {
           try {
-            window.electronAPI?.abortAgentTask?.(agentId);
+            window.soloforge.chat.abortGroupQueue(conversationId);
           } catch (e) {
-            console.warn(`中止 Agent ${agentId} 任务失败:`, e);
+            console.warn(`主进程 GroupQueue 肃静失败:`, e);
           }
-          // 重置 Agent 状态为空闲
-          setAgentIdle(agentId);
         }
+
+        // 3. 获取群聊参与者，逐个中止后端任务
+        const conversation = useChatStore.getState().conversations.get(conversationId);
+        if (conversation) {
+          const agentIds = conversation.participants.filter((p) => p !== 'user');
+          for (const agentId of agentIds) {
+            try {
+              window.electronAPI?.abortAgentTask?.(agentId);
+            } catch (e) {
+              console.warn(`中止 Agent ${agentId} 任务失败:`, e);
+            }
+            // 重置 Agent 状态为空闲
+            setAgentIdle(agentId);
+          }
+        }
+
+        // 4. 添加系统提示消息到群聊
+        sendMessage({
+          conversationId,
+          senderId: 'user',
+          senderType: 'user',
+          content: '肃静！全体停止发言。',
+          metadata: { system: true, silence: true },
+        });
+
+        console.log('群聊已肃静:', conversationId);
+      } finally {
+        // 肃静是同步操作（IPC 调用非 await），但加载状态在事件循环下一帧清掉，
+        // 给用户短暂的「正在肃静」视觉反馈。
+        setLoad(loadKey, false);
       }
-
-      // 4. 添加系统提示消息到群聊
-      sendMessage({
-        conversationId,
-        senderId: 'user',
-        senderType: 'user',
-        content: '肃静！全体停止发言。',
-        metadata: { system: true, silence: true },
-      });
-
-      console.log('群聊已肃静:', conversationId);
     },
-    [sendMessage, setAgentIdle]
+    [sendMessage, setAgentIdle, setLoad]
   );
 
   return {
     sendToAgent,
     silenceGroup,
+    // P1：IPC loading 状态（供 UI 显示 spinner / 禁用按钮）
+    // isLoading(key) 查询单个 action；loadingMap 可整体订阅做复杂判断。
+    isLoading,
+    loadingMap,
   };
 }
 

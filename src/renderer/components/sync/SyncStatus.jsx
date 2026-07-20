@@ -141,7 +141,7 @@ export default function SyncStatus({ compact = false, className = '', panelAlign
         onClick={togglePanel}
         className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs
                    hover:bg-bg-hover transition-colors
-                   focus:outline-none focus:ring-2 focus:ring-accent"
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 focus-visible:ring-offset-bg-base"
         aria-label={`云同步：${label}（点击${panelOpen ? '关闭' : '展开'}面板）`}
         aria-expanded={panelOpen}
       >

@@ -8,6 +8,7 @@
 
 import { useEffect } from 'react';
 import { useChatStore } from '../store/chat-store';
+import { notifyIfBackground } from '../utils/notifications';
 
 /**
  * 订阅主进程推送的 Agent 相关 IPC 事件。
@@ -181,6 +182,19 @@ export function useAgentIpcEvents({
         content,
         metadata: { proactive: true },
       });
+
+      // P1：桌面通知 — 仅在窗口失焦且非当前活跃会话时触发
+      const currentConvId = useChatStore.getState().currentConversationId;
+      if (currentConvId !== conversationId) {
+        notifyIfBackground({
+          title: agentName || 'SoloForge',
+          body: content.length > 50 ? `${content.slice(0, 50)}...` : content,
+          onClick: () => {
+            // 点击通知切到对应会话
+            try { useChatStore.getState().selectConversation(conversationId); } catch { /* ignore */ }
+          },
+        }).catch(() => { /* 通知失败不打断业务流程 */ });
+      }
     });
 
     return () => {
@@ -320,6 +334,20 @@ export function useAgentIpcEvents({
           mentions: mentions || [],
         },
       });
+
+      // P1：桌面通知 — 仅在窗口失焦且非当前活跃群聊时触发
+      // 标题=发送者，内容=消息前 50 字（按任务规范）
+      const currentConvId = useChatStore.getState().currentConversationId;
+      if (currentConvId !== groupId) {
+        notifyIfBackground({
+          title: senderName || '群聊消息',
+          body: content.length > 50 ? `${content.slice(0, 50)}...` : content,
+          onClick: () => {
+            // 点击通知切到对应群聊
+            try { useChatStore.getState().selectConversation(groupId); } catch { /* ignore */ }
+          },
+        }).catch(() => { /* 通知失败不打断业务流程 */ });
+      }
 
       // Phase 3-B：连锁触发由主进程 GroupQueue 负责，渲染进程不再做。
     });

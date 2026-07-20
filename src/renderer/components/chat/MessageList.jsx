@@ -230,6 +230,9 @@ export default function MessageList({ onNewChat }) {
   const currentConversationId = useChatStore((s) => s.currentConversationId);
   const messagesByConversation = useChatStore((s) => s.messagesByConversation);
   const conversations = useChatStore((s) => s.conversations);
+  // P1 数据持久化：滚动位置保存/恢复
+  const scrollPositions = useChatStore((s) => s.scrollPositions);
+  const setScrollPosition = useChatStore((s) => s.setScrollPosition);
   const clearConversationDisplay = useChatStore((s) => s.clearConversationDisplay);
   const deleteMessages = useChatStore((s) => s.deleteMessages);
   const getAgent = useAgentStore((s) => s.getAgent);
@@ -239,8 +242,10 @@ export default function MessageList({ onNewChat }) {
   const isNearBottomRef = useRef(true);
   // 控制"滚动到底部"按钮显示（基于 isNearBottomRef 同步状态，绑定 emil-scroll-btn 的 data-show）
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  // P1：滚动位置保存防抖 timer（200ms），避免拖动滚动条时高频写 store
+  const scrollSaveTimerRef = useRef(null);
 
-  // 追踪滚动位置：仅在用户接近底部时自动滚动
+  // 追踪滚动位置：仅在用户接近底部时自动滚动；同时（防抖 200ms）保存滚动位置
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -248,7 +253,17 @@ export default function MessageList({ onNewChat }) {
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     isNearBottomRef.current = near;
     setShowScrollBtn(!near);
-  }, []);
+
+    // P1 数据持久化：防抖 200ms 写入滚动位置
+    if (currentConversationId) {
+      const top = el.scrollTop;
+      if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
+      scrollSaveTimerRef.current = setTimeout(() => {
+        scrollSaveTimerRef.current = null;
+        setScrollPosition(currentConversationId, top);
+      }, 200);
+    }
+  }, [currentConversationId, setScrollPosition]);
 
   // 点击"滚动到底部"按钮：滚到底 + 隐藏按钮
   const handleScrollToBottom = useCallback(() => {
@@ -275,12 +290,64 @@ export default function MessageList({ onNewChat }) {
   // 右键菜单
   const [contextMenu, setContextMenu] = useState(null); // { x, y, messageId }
 
-  // 切换对话时退出多选
+  // 切换对话时：退出多选 + 刷新未落盘的滚动位置 + 准备恢复该会话的滚动位置
   useEffect(() => {
     setIsSelectMode(false);
     setSelectedIds(new Set());
     setContextMenu(null);
+
+    // P1 数据持久化：离开当前会话前，若还有未落盘的滚动位置防抖，立即刷一次再切走
+    if (scrollSaveTimerRef.current) {
+      clearTimeout(scrollSaveTimerRef.current);
+      scrollSaveTimerRef.current = null;
+      const el = scrollRef.current;
+      // 此时 scrollRef 仍指向旧会话的滚动容器（DOM 尚未切换）
+      if (el && currentConversationId) {
+        setScrollPosition(currentConversationId, el.scrollTop);
+      }
+    }
+
+    // P1 数据持久化：切到新会话时，先假定"不在底部"，避免下面的
+    // "自动滚动到底部"effect（依赖 isNearBottomRef）在恢复前抢先滚到底。
+    // 真正的 isNearBottom 由恢复 effect 根据保存的位置重算。
+    isNearBottomRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentConversationId]);
+
+  // P1 数据持久化：切换会话后恢复滚动位置。
+  // 仅依赖 currentConversationId（切会话时触发一次），用 rAF 等 DOM 渲染新会话消息后再设 scrollTop。
+  // 用 ref 标记"本次切换已处理"，避免重复恢复。
+  const restoredConvRef = useRef(null);
+  useEffect(() => {
+    if (!currentConversationId) {
+      restoredConvRef.current = null;
+      return;
+    }
+    // 同一会话不重复恢复（仅切换时触发）
+    if (restoredConvRef.current === currentConversationId) return;
+    restoredConvRef.current = currentConversationId;
+
+    const convId = currentConversationId;
+    const saved = scrollPositions.get(convId);
+    if (saved == null) {
+      // 无保存位置 → 视为接近底部，走自动滚到底部逻辑
+      isNearBottomRef.current = true;
+      return;
+    }
+
+    // 用 rAF + 一次微任务延迟，确保新会话的消息已渲染到 DOM
+    const raf = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTop = saved;
+      const threshold = 120;
+      const near = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+      isNearBottomRef.current = near;
+      setShowScrollBtn(!near);
+    });
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentConversationId, scrollPositions]);
 
   // 当前对话
   const conversation = useMemo(() => {
@@ -417,6 +484,11 @@ export default function MessageList({ onNewChat }) {
       const timers = removingTimersRef.current || {};
       Object.values(timers).forEach((t) => clearTimeout(t));
       removingTimersRef.current = {};
+      // P1 数据持久化：清理滚动位置防抖定时器，避免组件卸载后写 store
+      if (scrollSaveTimerRef.current) {
+        clearTimeout(scrollSaveTimerRef.current);
+        scrollSaveTimerRef.current = null;
+      }
     };
   }, []);
 

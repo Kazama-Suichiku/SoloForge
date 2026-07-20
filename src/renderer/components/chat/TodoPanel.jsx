@@ -66,7 +66,7 @@ function TodoItem({ todo }) {
       {/* 内容：完成态用 opacity 过渡（配合 line-through） */}
       <div className="min-w-0 flex-1">
         <span
-          className="text-[12px] leading-snug"
+          className="text-xs leading-snug"
           style={{
             color: todo.status === 'done' ? 'var(--text-secondary)' : 'var(--text-primary)',
             opacity: todo.status === 'done' ? 0.6 : 1,
@@ -77,7 +77,7 @@ function TodoItem({ todo }) {
           {todo.title}
         </span>
         {todo.note && (
-          <p className="text-[10px] text-text-secondary/70 mt-0.5 leading-tight">
+          <p className="text-2xs text-text-secondary/70 mt-0.5 leading-tight">
             {todo.note}
           </p>
         )}
@@ -114,18 +114,18 @@ function AgentTodoGroup({ agentId, todos, agentName, defaultOpen = true }) {
           <ChevronRightIcon className="w-3.5 h-3.5 text-text-secondary shrink-0" />
         )}
 
-        <span className="text-[12px] font-medium text-text-primary truncate">
+        <span className="text-xs font-medium text-text-primary truncate">
           {agentName}
         </span>
 
         {/* 进度统计 */}
         <div className="flex items-center gap-1.5 ml-auto shrink-0">
           {inProgress > 0 && (
-            <span className="text-[10px] text-accent font-medium">
+            <span className="text-2xs text-accent font-medium">
               {inProgress} 进行中
             </span>
           )}
-          <span className="text-[10px] text-text-secondary">
+          <span className="text-2xs text-text-secondary">
             {done}/{total}
           </span>
         </div>
@@ -232,14 +232,14 @@ export default function TodoPanel({ collapsed, onToggle }) {
         title="展开待办事项"
       >
         <ListBulletIcon className="w-4 h-4 text-accent" />
-        <span className="text-[11px] font-medium text-text-primary">
+        <span className="text-xs font-medium text-text-primary">
           待办事项
         </span>
-        <span className="text-[10px] text-text-secondary ml-1">
+        <span className="text-2xs text-text-secondary ml-1">
           {totalDone}/{totalTodos}
         </span>
         {totalInProgress > 0 && (
-          <span className="text-[10px] text-accent ml-auto">
+          <span className="text-2xs text-accent ml-auto">
             {totalInProgress} 进行中
           </span>
         )}
@@ -255,8 +255,8 @@ export default function TodoPanel({ collapsed, onToggle }) {
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-color)]">
         <div className="flex items-center gap-2">
           <ListBulletIcon className="w-4 h-4 text-accent" />
-          <span className="text-[12px] font-semibold text-text-primary">待办事项</span>
-          <span className="text-[10px] text-text-secondary">
+          <span className="text-xs font-semibold text-text-primary">待办事项</span>
+          <span className="text-2xs text-text-secondary">
             {totalDone}/{totalTodos} 完成
           </span>
         </div>

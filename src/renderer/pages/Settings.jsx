@@ -63,7 +63,7 @@ function PermissionSwitch({ label, description, checked, onChange, disabled }) {
         className={`
           relative inline-flex h-[31px] w-[51px] flex-shrink-0 cursor-pointer rounded-full
           border border-transparent
-          focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-bg-base
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg-base
           ${checked ? 'bg-accent' : 'bg-border-strong'}
           ${disabled ? 'opacity-40 cursor-not-allowed' : ''}
         `}

@@ -123,6 +123,9 @@ const ipcFileStorage = {
             Array.isArray(data.state.hiddenConversations) ? data.state.hiddenConversations : []
           );
         }
+        if (data.state.draftMap && !(data.state.draftMap instanceof Map)) {
+          data.state.draftMap = new Map(Object.entries(data.state.draftMap));
+        }
       }
       return data;
     } catch (e) {
@@ -171,6 +174,12 @@ export const useChatStore = create(
 
       /** @type {Set<string>} 隐藏的对话 ID（Agent ID），不显示在侧栏但保留记录 */
       hiddenConversations: new Set(),
+
+      /** @type {Map<string, string>} conversationId -> 草稿文本（P1 数据持久化，随 IPC 落盘防刷新丢失） */
+      draftMap: new Map(),
+
+      /** @type {Map<string, number>} conversationId -> 滚动位置 scrollTop（P1，会话内切换恢复，不落盘） */
+      scrollPositions: new Map(),
 
       /** @type {boolean} */
       _hasHydrated: false,
@@ -770,6 +779,56 @@ export const useChatStore = create(
           hiddenConversations: new Set(),
         });
       },
+
+      // ─────────────────────────────────────────────────────────
+      // 草稿 & 滚动位置（P1 数据持久化）
+      // ─────────────────────────────────────────────────────────
+
+      /**
+       * 保存对话草稿（用户输入时持续写入，经 partialize + IPC 落盘防刷新丢失）
+       * @param {string} conversationId
+       * @param {string} content - 空字符串时等价于清除
+       */
+      setDraft: (conversationId, content) => {
+        if (!conversationId) return;
+        set((state) => {
+          const next = new Map(state.draftMap);
+          if (content) {
+            next.set(conversationId, content);
+          } else {
+            next.delete(conversationId);
+          }
+          return { draftMap: next };
+        });
+      },
+
+      /**
+       * 清除对话草稿（发送消息后调用）
+       * @param {string} conversationId
+       */
+      clearDraft: (conversationId) => {
+        if (!conversationId) return;
+        set((state) => {
+          if (!state.draftMap.has(conversationId)) return state;
+          const next = new Map(state.draftMap);
+          next.delete(conversationId);
+          return { draftMap: next };
+        });
+      },
+
+      /**
+       * 保存对话滚动位置（调用方需自行防抖）
+       * @param {string} conversationId
+       * @param {number} scrollTop
+       */
+      setScrollPosition: (conversationId, scrollTop) => {
+        if (!conversationId) return;
+        set((state) => {
+          const next = new Map(state.scrollPositions);
+          next.set(conversationId, scrollTop);
+          return { scrollPositions: next };
+        });
+      },
     }),
     {
       name: 'soloforge-chat-history',
@@ -778,6 +837,7 @@ export const useChatStore = create(
         conversations: state.conversations,
         messagesByConversation: state.messagesByConversation,
         hiddenConversations: state.hiddenConversations,
+        draftMap: state.draftMap,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);

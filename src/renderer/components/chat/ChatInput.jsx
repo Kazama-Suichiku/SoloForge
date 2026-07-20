@@ -48,6 +48,9 @@ export default function ChatInput({
   const textareaRef = useRef(null);
   const currentConversationId = useChatStore((s) => s.currentConversationId);
   const conversations = useChatStore((s) => s.conversations);
+  const draftMap = useChatStore((s) => s.draftMap);
+  const setDraft = useChatStore((s) => s.setDraft);
+  const clearDraft = useChatStore((s) => s.clearDraft);
   const agentsMap = useAgentStore((s) => s.agents);
 
   // 获取当前对话中的 Agent 列表
@@ -111,12 +114,14 @@ export default function ChatInput({
     }
   }, [content]);
 
-  // 切换对话时清空输入
+  // 切换对话时恢复草稿（P1 数据持久化）：从 draftMap 读取该会话的草稿，
+  // 切走时草稿已由 handleContentChange 持续写入 draftMap，故无需在此保存。
   useEffect(() => {
-    setContent('');
+    const draft = currentConversationId ? draftMap.get(currentConversationId) ?? '' : '';
+    setContent(draft);
     setShowMentionMenu(false);
     setAttachments([]);
-  }, [currentConversationId, setAttachments]);
+  }, [currentConversationId, setAttachments, draftMap]);
 
   // 附件变化后自动聚焦输入框（确保粘贴/拖拽/选择图片后仍可输入文字）
   // 使用 useEffect 保证在 React DOM 更新完毕后执行，比 setTimeout 更可靠
@@ -157,6 +162,10 @@ export default function ChatInput({
     const value = e.target.value;
     const cursorPos = e.target.selectionStart;
     setContent(value);
+    // P1 数据持久化：实时写入草稿（切换会话时自动恢复）
+    if (currentConversationId) {
+      setDraft(currentConversationId, value);
+    }
 
     const { active, filter } = detectMention(value, cursorPos);
     if (active) {
@@ -167,7 +176,7 @@ export default function ChatInput({
       setShowMentionMenu(false);
       setMentionFilter('');
     }
-  }, []);
+  }, [currentConversationId, setDraft]);
 
   // 插入 @mention（使用 mention-helper 纯函数构建新文本 + 光标位置）
   const insertMention = useCallback((agent) => {
@@ -180,6 +189,8 @@ export default function ChatInput({
 
     const { text: newText, newCursorPos } = result;
     setContent(newText);
+    // P1 数据持久化：mention 插入后同步草稿（setContent 不会触发 handleContentChange）
+    if (currentConversationId) setDraft(currentConversationId, newText);
     setShowMentionMenu(false);
     setMentionFilter('');
 
@@ -188,7 +199,7 @@ export default function ChatInput({
       textarea.focus();
       textarea.setSelectionRange(newCursorPos, newCursorPos);
     }, 0);
-  }, [content]);
+  }, [content, currentConversationId, setDraft]);
 
   const handleSend = useCallback(() => {
     const trimmed = content.trim();
@@ -198,12 +209,14 @@ export default function ChatInput({
     onSend(trimmed, hasAttachments ? attachments : undefined);
     setContent('');
     setAttachments([]);
+    // P1 数据持久化：发送后清除该会话草稿
+    if (currentConversationId) clearDraft(currentConversationId);
 
     // 重置高度
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [content, attachments, disabled, onSend, setAttachments]);
+  }, [content, attachments, disabled, onSend, setAttachments, currentConversationId, clearDraft]);
 
   const handleKeyDown = useCallback(
     (e) => {
@@ -377,7 +390,7 @@ export default function ChatInput({
                 </svg>
               </button>
               <div
-                className="absolute bottom-0 inset-x-0 px-1 py-0.5 text-[10px] text-white truncate"
+                className="absolute bottom-0 inset-x-0 px-1 py-0.5 text-2xs text-white truncate"
                 style={{ background: 'rgba(0, 0, 0, 0.4)' }}
               >
                 {att.filename}
@@ -475,7 +488,7 @@ export default function ChatInput({
             aria-label="输入消息"
             disabled={disabled || !currentConversationId}
             rows={1}
-            className="w-full resize-none px-4 py-3 text-sm placeholder:text-text-secondary focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full resize-none px-4 py-3 text-sm placeholder:text-text-secondary focus:outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
               ...inputBaseStyle,
               minHeight: '44px',
@@ -548,7 +561,7 @@ export default function ChatInput({
             type="button"
             onClick={handleSilence}
             aria-label="肃静群聊"
-            className="shrink-0 h-11 px-3 flex items-center justify-center gap-1.5 transition-all text-sm font-bold active:scale-95"
+            className="shrink-0 h-11 px-3 flex items-center justify-center gap-1.5 transition-[color,background-color,border-color,transform] text-sm font-bold active:scale-95"
             style={{
               borderRadius: 'var(--radius-md)',
               border: '1.5px solid rgba(239, 68, 68, 0.5)',

@@ -84,7 +84,7 @@ export default function TaskProgress({ taskId }) {
         style={{ backgroundColor: 'var(--border-default)' }}
       >
         <div
-          className="h-full rounded-full transition-all duration-300"
+          className="h-full rounded-full transition-[width] duration-300"
           style={{ width: `${task.progress}%`, backgroundColor: 'var(--accent)' }}
           role="progressbar"
           aria-valuenow={task.progress}

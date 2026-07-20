@@ -52,6 +52,16 @@ export default {
         mono: ['ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'Monaco',
           'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
       },
+      // Type Scale：对齐 globals.css --text-* token，替代任意 text-[Npx]。
+      // 覆盖 Tailwind 默认 xs=12 / sm=14 / base=16 / lg=18，收紧密度对齐 Linear/Apple HIG。
+      // 2xs=10px 仅供非文本徽章/计数器（最低可读，不用于正文）。
+      fontSize: {
+        '2xs': ['var(--text-2xs)', { lineHeight: '1.2', letterSpacing: '0.01em' }],
+        xs: ['var(--text-xs)', { lineHeight: '1.25', letterSpacing: '0.01em' }],
+        sm: ['var(--text-sm)', { lineHeight: '1.4' }],
+        base: ['var(--text-base)', { lineHeight: '1.5' }],
+        lg: ['var(--text-lg)', { lineHeight: '1.5' }],
+      },
       fontWeight: {
         // 三档：400 阅读 / 510 UI 强调 / 590 标题
         normal: 400,

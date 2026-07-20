@@ -130,14 +130,19 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
     return () => document.removeEventListener('keydown', handleGlobalKeyDown);
   }, [showNewChat]);
 
-  // 可拖拽侧栏宽度
-  const [sidebarWidth, setSidebarWidth] = useState(288); // 默认 w-72 = 288px
+  // 可拖拽侧栏宽度（P1 数据持久化：宽度存 localStorage，启动时恢复）
+  const SIDEBAR_WIDTH_STORAGE_KEY = 'soloforge_sidebar_width';
+  const DEFAULT_SIDEBAR_WIDTH = 288;
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
+    const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+    return Number.isFinite(stored) && stored >= 1 ? stored : DEFAULT_SIDEBAR_WIDTH;
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isDragging = useRef(false);
   const startX = useRef(0);
-  const startWidth = useRef(288);
+  const startWidth = useRef(DEFAULT_SIDEBAR_WIDTH);
 
-  const DEFAULT_SIDEBAR_WIDTH = 288;
   const COLLAPSED_WIDTH = 0;
   // 拖拽边界：低于此值 snap 回 200，高于此值 snap 到 500
   const MIN_WIDTH = 200;
@@ -251,6 +256,10 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
         asideEl.style.transition = 'width 320ms cubic-bezier(0.34, 1.56, 0.64, 1)';
       }
       setSidebarWidth(targetWidth);
+      // P1 数据持久化：拖拽释放后持久化侧栏宽度
+      try {
+        localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(targetWidth));
+      } catch (e) { /* localStorage 不可用时静默忽略 */ }
       // 动画结束后清除临时 transition，恢复 .emil-sidebar-collapse 默认
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       const cleanup = () => {
@@ -271,6 +280,10 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
   const handleDragDoubleClick = useCallback(() => {
     setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
     setSidebarCollapsed(false);
+    // P1 数据持久化：同步持久化默认宽度
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(DEFAULT_SIDEBAR_WIDTH));
+    } catch (e) { /* localStorage 不可用时静默忽略 */ }
   }, []);
 
   // 折叠/展开侧边栏
@@ -362,7 +375,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
             </button>
             <div className="min-w-0">
               <h1
-                className="text-[13px] truncate"
+                className="text-sm truncate"
                 style={{
                   color: 'var(--text-primary, #f7f8f8)',
                   fontWeight: 590,
@@ -375,11 +388,11 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
                 <button
                   type="button"
                   onClick={switchCompany}
-                  className="block text-[11px] truncate max-w-full text-left emil-ghost-hover"
+                  className="block text-xs truncate max-w-full text-left emil-ghost-hover"
                   style={{ color: 'var(--text-tertiary, #8a8f98)' }}
                   title="点击切换公司"
                 >
-                  🏢 {currentCompany.name}
+                  {currentCompany.name}
                 </button>
               )}
             </div>
@@ -435,7 +448,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
           style={{ borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))' }}
         >
           <span
-            className="text-[12px] select-none"
+            className="text-xs select-none"
             style={{ color: 'var(--text-tertiary, #8a8f98)' }}
           >
             任务巡查
@@ -445,7 +458,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
             role="switch"
             aria-checked={patrolEnabled}
             onClick={handlePatrolToggle}
-            className="relative inline-flex h-[31px] w-[51px] shrink-0 cursor-pointer rounded-full emil-pressable emil-toggle-track focus:outline-none"
+            className="relative inline-flex h-[31px] w-[51px] shrink-0 cursor-pointer rounded-full emil-pressable emil-toggle-track focus:outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
             style={{
               background: patrolEnabled
                 ? 'var(--accent, #5e6ad2)'
@@ -507,7 +520,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
                   title={agentStatusLabel}
                 />
                 <span
-                  className="text-[13px] truncate"
+                  className="text-sm truncate"
                   style={{
                     color: 'var(--text-primary, #f7f8f8)',
                     fontWeight: 510,
@@ -517,7 +530,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
                   {targetAgentName}
                 </span>
                 <span
-                  className="text-[12px] shrink-0"
+                  className="text-xs shrink-0"
                   style={{ color: 'var(--text-tertiary, #8a8f98)' }}
                 >
                   · {agentStatusLabel}
@@ -536,7 +549,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
                   #
                 </span>
                 <span
-                  className="text-[13px] truncate"
+                  className="text-sm truncate"
                   style={{
                     color: 'var(--text-primary, #f7f8f8)',
                     fontWeight: 510,
@@ -548,7 +561,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
               </>
             ) : (
               <span
-                className="text-[13px]"
+                className="text-sm"
                 style={{ color: 'var(--text-tertiary, #8a8f98)' }}
               >
                 选择一个对话开始

@@ -49,13 +49,13 @@ const AgentSelectItem = memo(function AgentSelectItem({ agent, isSelected, onTog
       <AgentAvatar avatar={agent.avatar} fallback="🤖" size="sm" />
       <div className="flex-1 min-w-0">
         <p
-          className="text-[13px] font-medium truncate"
+          className="text-sm font-medium truncate"
           style={{ color: 'var(--text-primary, #f7f8f8)' }}
         >
           {agent.name}
         </p>
         <p
-          className="text-[11px] truncate"
+          className="text-xs truncate"
           style={{ color: 'var(--text-tertiary, #8a8f98)' }}
         >
           {agent.title || agent.description || ''}
@@ -182,7 +182,7 @@ function NewChatDialog({ isOpen, onClose }) {
         {/* Agent 列表 */}
         <div className="px-3 py-3 max-h-80 overflow-auto">
           <p
-            className="text-[12px] mb-2 px-2"
+            className="text-xs mb-2 px-2"
             style={{ color: 'var(--text-tertiary, #8a8f98)' }}
           >
             选择要加入群聊的成员
@@ -190,7 +190,7 @@ function NewChatDialog({ isOpen, onClose }) {
           <div className="space-y-0.5">
             {agents.length === 0 ? (
               <p
-                className="text-[12px] py-4 text-center"
+                className="text-xs py-4 text-center"
                 style={{ color: 'var(--text-tertiary, #8a8f98)' }}
               >
                 暂无可用 Agent
@@ -220,7 +220,7 @@ function NewChatDialog({ isOpen, onClose }) {
                 value={groupName}
                 onChange={(e) => setGroupName(e.target.value)}
                 placeholder="群聊名称（可选）"
-                className="w-full text-[13px] focus:outline-none transition-colors"
+                className="w-full text-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 transition-colors"
                 style={{
                   borderRadius: 'var(--radius-md, 6px)',
                   border: '1px solid var(--border-default, rgba(255,255,255,0.08))',
@@ -238,7 +238,7 @@ function NewChatDialog({ isOpen, onClose }) {
               <button
                 type="button"
                 onClick={handleCreate}
-                className="w-full text-[13px] font-medium text-white transition-colors"
+                className="w-full text-sm font-medium text-white transition-colors"
                 style={{
                   borderRadius: 'var(--radius-md, 6px)',
                   padding: '10px 0',

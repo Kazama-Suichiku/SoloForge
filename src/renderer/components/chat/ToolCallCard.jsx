@@ -310,7 +310,7 @@ function ToolCallCard({ toolCall }) {
       {/* 参数摘要 */}
       {argsSummary && (
         <div className="px-3 pb-2 -mt-0.5">
-          <span className="text-text-secondary font-mono text-[11px] break-all line-clamp-1">
+          <span className="text-text-secondary font-mono text-xs break-all line-clamp-1">
             {argsSummary}
           </span>
         </div>
@@ -323,7 +323,7 @@ function ToolCallCard({ toolCall }) {
           <>
             {/* 结果摘要（始终显示） */}
             <div className="border-t border-border-default">
-              <div className="px-3 py-2 text-[11px] leading-relaxed text-text-secondary whitespace-pre-wrap break-words select-text">
+              <div className="px-3 py-2 text-xs leading-relaxed text-text-secondary whitespace-pre-wrap break-words select-text">
                 {summary}
               </div>
             </div>
@@ -337,14 +337,14 @@ function ToolCallCard({ toolCall }) {
                 >
                   {/* emil-arrow：rotate 90deg 入场，data-open 控制方向 */}
                   <ChevronRightIcon className="w-3 h-3 emil-arrow" data-open={expanded ? 'true' : 'false'} />
-                  <span className="text-[10px]">{expanded ? '收起详情' : '展开详情'}</span>
+                  <span className="text-2xs">{expanded ? '收起详情' : '展开详情'}</span>
                 </button>
 
                 {/* emil-collapse：max-height + opacity 过渡（data-open 控制展开） */}
                 <div className="emil-collapse" data-open={expanded ? 'true' : 'false'}>
                   <div className="border-t border-border-default">
                     <div className="max-h-[200px] overflow-auto">
-                      <pre className="px-3 py-2 text-[11px] leading-relaxed text-text-secondary font-mono whitespace-pre-wrap break-all select-text">
+                      <pre className="px-3 py-2 text-xs leading-relaxed text-text-secondary font-mono whitespace-pre-wrap break-all select-text">
                         {detail}
                       </pre>
                     </div>
@@ -366,7 +366,7 @@ function ToolCallCard({ toolCall }) {
         return (
           <>
             <div className="border-t border-[var(--color-danger)]/20" />
-            <div className="px-3 py-1.5 text-[var(--color-danger)] text-[11px] break-all line-clamp-3">
+            <div className="px-3 py-1.5 text-[var(--color-danger)] text-xs break-all line-clamp-3">
               {cleanError || '执行失败'}
             </div>
           </>

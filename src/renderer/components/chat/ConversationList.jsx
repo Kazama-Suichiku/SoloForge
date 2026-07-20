@@ -121,7 +121,7 @@ function UnreadBadge({ count }) {
   if (!count || count <= 0) return null;
   return (
     <span
-      className="shrink-0 text-[10px] font-medium rounded-full flex items-center justify-center"
+      className="shrink-0 text-2xs font-medium rounded-full flex items-center justify-center"
       style={{
         minWidth: '16px',
         height: '16px',
@@ -209,21 +209,21 @@ const ContactItem = memo(function ContactItem({ agent, conversation, actualLastM
         <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <span
-              className="block text-[13px] font-medium truncate"
+              className="block text-sm font-medium truncate"
               style={{ color: 'var(--text-primary, #f7f8f8)' }}
             >
               {agent.name}
             </span>
             {excerpt ? (
               <span
-                className="block text-[11px] truncate"
+                className="block text-xs truncate"
                 style={{ color: 'var(--text-tertiary, #8a8f98)' }}
               >
                 {excerpt}
               </span>
             ) : (
               <span
-                className="block text-[11px] truncate"
+                className="block text-xs truncate"
                 style={{ color: 'var(--text-quaternary, #62666d)' }}
               >
                 {agent.title || '暂无消息'}
@@ -233,7 +233,7 @@ const ContactItem = memo(function ContactItem({ agent, conversation, actualLastM
           <div className="flex items-center gap-1.5 shrink-0">
             {lastMessage && (
               <span
-                className="text-[10px]"
+                className="text-2xs"
                 style={{ color: 'var(--text-quaternary, #62666d)' }}
               >
                 {formatTime(lastMessage.timestamp)}
@@ -292,7 +292,7 @@ const DepartmentItem = memo(function DepartmentItem({ conversation, actualLastMs
         <div className="relative shrink-0">
           <AgentAvatar avatar={null} fallback="🏢" size="sm" />
           <span
-            className="absolute -top-1 -right-1 text-[8px] px-1 rounded-full leading-tight"
+            className="absolute -top-1 -right-1 text-2xs px-1 rounded-full leading-tight"
             style={{
               background: 'rgba(94,106,210,0.18)',
               color: 'var(--accent, #5e6ad2)',
@@ -308,13 +308,13 @@ const DepartmentItem = memo(function DepartmentItem({ conversation, actualLastMs
         <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <span
-              className="block text-[13px] font-medium truncate"
+              className="block text-sm font-medium truncate"
               style={{ color: 'var(--text-primary, #f7f8f8)' }}
             >
               {conversation.name}
             </span>
             <span
-              className="block text-[11px] truncate"
+              className="block text-xs truncate"
               style={{ color: excerpt ? 'var(--text-tertiary, #8a8f98)' : 'var(--text-quaternary, #62666d)' }}
             >
               {excerpt || '团队工作群'}
@@ -323,7 +323,7 @@ const DepartmentItem = memo(function DepartmentItem({ conversation, actualLastMs
           <div className="flex items-center gap-1.5 shrink-0">
             {lastMessage && (
               <span
-                className="text-[10px]"
+                className="text-2xs"
                 style={{ color: 'var(--text-quaternary, #62666d)' }}
               >
                 {formatTime(lastMessage.timestamp)}
@@ -374,13 +374,13 @@ const GroupItem = memo(function GroupItem({ conversation, actualLastMsg, isActiv
         <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <span
-              className="block text-[13px] font-medium truncate"
+              className="block text-sm font-medium truncate"
               style={{ color: 'var(--text-primary, #f7f8f8)' }}
             >
               {conversation.name}
             </span>
             <span
-              className="block text-[11px] truncate"
+              className="block text-xs truncate"
               style={{ color: excerpt ? 'var(--text-tertiary, #8a8f98)' : 'var(--text-quaternary, #62666d)' }}
             >
               {excerpt || '暂无消息'}
@@ -389,7 +389,7 @@ const GroupItem = memo(function GroupItem({ conversation, actualLastMsg, isActiv
           <div className="flex items-center gap-1.5 shrink-0">
             {lastMessage && (
               <span
-                className="text-[10px]"
+                className="text-2xs"
                 style={{ color: 'var(--text-quaternary, #62666d)' }}
               >
                 {formatTime(lastMessage.timestamp)}
@@ -420,7 +420,7 @@ function SectionLabel({ label, isFirst = false }) {
       style={{ height: '24px', marginTop: isFirst ? '2px' : '6px' }}
     >
       <span
-        className="text-[10px] font-medium uppercase tracking-[0.02em]"
+        className="text-2xs font-medium uppercase tracking-[0.02em]"
         style={{ color: 'var(--text-quaternary, #62666d)' }}
       >
         {label}
@@ -593,7 +593,7 @@ function ConversationList({ onNewChat, searchInputRef }) {
         }}
       >
         <h2
-          className="text-[12px] font-medium"
+          className="text-xs font-medium"
           style={{ color: 'var(--text-tertiary, #8a8f98)' }}
         >
           消息
@@ -637,7 +637,7 @@ function ConversationList({ onNewChat, searchInputRef }) {
             placeholder="搜索联系人..."
             aria-label="搜索会话"
             ref={searchInputRef}
-            className="w-full text-[12px] focus:outline-none transition-colors"
+            className="w-full text-xs focus:outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 transition-colors"
             style={{
               borderRadius: 'var(--radius-md, 6px)',
               border: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
@@ -676,9 +676,9 @@ function ConversationList({ onNewChat, searchInputRef }) {
             className="flex flex-col items-center justify-center"
             style={{ height: '128px', color: 'var(--text-tertiary, #8a8f98)' }}
           >
-            <p className="text-[12px]">{isSearching ? '没有匹配的联系人' : '暂无联系人'}</p>
+            <p className="text-xs">{isSearching ? '没有匹配的联系人' : '暂无联系人'}</p>
             {isSearching && (
-              <p className="text-[11px] mt-1" style={{ color: 'var(--text-quaternary, #62666d)' }}>
+              <p className="text-xs mt-1" style={{ color: 'var(--text-quaternary, #62666d)' }}>
                 尝试搜索名字或 ID
               </p>
             )}
@@ -688,7 +688,7 @@ function ConversationList({ onNewChat, searchInputRef }) {
             {/* 搜索时的提示 */}
             {isSearching && (
               <div
-                className="text-[11px] px-3 py-1.5"
+                className="text-xs px-3 py-1.5"
                 style={{ color: 'var(--text-quaternary, #62666d)' }}
               >
                 搜索结果（点击可恢复到列表）
