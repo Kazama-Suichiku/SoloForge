@@ -34,6 +34,8 @@ const { sqliteStore } = require('./sqlite-store');
 // 阶段 1-B：embedding 服务 + 向量索引
 const embeddingService = require('./embedding-service');
 const vectorIndex = require('./vector-index');
+// 阶段 3-A：标签共现图
+const { tagCooccurrence } = require('./tag-cooccurrence');
 
 // ─── JSON 遗留目录/文件路径（仅迁移用）─────────────────────────
 function getMemoryDir() {
@@ -223,6 +225,10 @@ class MemoryStore {
    */
   add(memoryEntry) {
     this._load();
+    // 阶段 3-B：溯源下钻 —— 规范化 source_episode_id
+    // 优先级：显式 sourceEpisodeId > source.episodeId > source.conversationId
+    // 写到 entry.sourceEpisodeId，sqlite-store._entryToRow 会读取并入库。
+    this._normalizeEpisodeId(memoryEntry);
     const result = sqliteStore.add(memoryEntry);
     if (result.success) {
       this._syncIndexForEntry(memoryEntry);
@@ -230,8 +236,30 @@ class MemoryStore {
       // 阶段 1-B：异步生成 embedding 并写入 SQLite + 向量索引
       // 不阻塞 add() 主流程；embedding 失败则降级（后续靠 FTS5 检索）
       this._triggerEmbedding(memoryEntry);
+      // 阶段 3-A：标签共现图 —— 写入成功后更新 tag_pairs 共现计数
+      // 失败静默降级（共现图缺失不影响记忆存储/检索）
+      tagCooccurrence.updateOnAdd(memoryEntry.tags);
     }
     return result;
+  }
+
+  /**
+   * 规范化记忆条目的 source_episode_id（阶段 3-B）
+   * 若 entry 已有显式 sourceEpisodeId 则保留；否则从 source.episodeId /
+   * source.conversationId 回填。就地修改 entry，不返回值。
+   * @param {Object} entry
+   * @private
+   */
+  _normalizeEpisodeId(entry) {
+    if (!entry || entry.sourceEpisodeId) return;
+    const src = entry.source;
+    if (src && typeof src === 'object') {
+      if (src.episodeId) {
+        entry.sourceEpisodeId = String(src.episodeId);
+      } else if (src.conversationId) {
+        entry.sourceEpisodeId = String(src.conversationId);
+      }
+    }
   }
 
   /**
@@ -245,12 +273,16 @@ class MemoryStore {
     let count = 0;
 
     for (const entry of memoryEntries) {
+      // 阶段 3-B：批量写入也规范化 source_episode_id
+      this._normalizeEpisodeId(entry);
       const result = sqliteStore.add(entry);
       if (result.success) {
         count++;
         this._syncIndexForEntry(entry);
         // 阶段 1-B：批量写入也异步触发 embedding
         this._triggerEmbedding(entry);
+        // 阶段 3-A：批量写入也更新标签共现统计
+        tagCooccurrence.updateOnAdd(entry.tags);
       } else {
         errors.push(`${entry.id || 'unknown'}: ${result.error}`);
       }
@@ -542,6 +574,47 @@ class MemoryStore {
   searchFTS(query, opts = {}) {
     this._load();
     return sqliteStore.searchFTS(query, opts);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 溯源下钻（阶段 3-B）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 读取一条记忆的 source_episode_id（指向原始通信事件 id）。
+   * 调用方可据此 commEventStore.getEventById(episodeId) 下钻到原始通信。
+   * @param {string} memoryId
+   * @returns {string|null}
+   */
+  getEpisodeId(memoryId) {
+    this._load();
+    return sqliteStore.getEpisodeId(memoryId);
+  }
+
+  /**
+   * 按 source_episode_id 反查所有记忆（同一原始通信事件派生的记忆）。
+   * @param {string} episodeId
+   * @returns {Object[]} 完整 MemoryEntry 数组（按 created_at 倒序）
+   */
+  getMemoriesByEpisodeId(episodeId) {
+    this._load();
+    return sqliteStore.getMemoriesByEpisodeId(episodeId);
+  }
+
+  /**
+   * 事后补链/修正一条记忆的 source_episode_id。
+   * @param {string} memoryId
+   * @param {string|null} episodeId
+   * @returns {{ success: boolean, error?: string }}
+   */
+  setEpisodeId(memoryId, episodeId) {
+    this._load();
+    const result = sqliteStore.setEpisodeId(memoryId, episodeId);
+    if (result.success) {
+      // 同步内存索引中的 sourceEpisodeId（IndexEntry 不含此字段，跳过；
+      // 但下次 get() 会读到最新值，retriever 下钻不受影响）
+    }
+    return result;
   }
 
   // ═══════════════════════════════════════════════════════════

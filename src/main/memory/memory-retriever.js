@@ -25,6 +25,8 @@
 const { logger } = require('../utils/logger');
 const { memoryStore } = require('./memory-store');
 const { memoryDecay } = require('./memory-decay');
+// 阶段 3-A：标签共现图（路径C tag 扩展召回）
+const { tagCooccurrence } = require('./tag-cooccurrence');
 const {
   MEMORY_CONFIG,
   MEMORY_TYPE_LABELS,
@@ -212,13 +214,15 @@ class MemoryRetriever {
 
     // 空查询且无 type 约束 → 回退到最近记忆（保持原行为）
     if (!query && !type) {
-      return memoryStore.getRecent(limit, agentId ? { agentId } : {});
+      const recent = memoryStore.getRecent(limit, agentId ? { agentId } : {});
+      return this._withEpisodeId(recent);
     }
     if (!query && type) {
       // 有 type 但无 query：无法走三路召回，返回该类型最近记忆
       const all = memoryStore.query({ type, agentId, includeArchived: false });
       all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      return all.slice(0, limit);
+      const sliced = all.slice(0, limit);
+      return this._withEpisodeId(sliced);
     }
 
     // ─── 路径 A：向量语义召回 ─────────────────────────────────
@@ -270,17 +274,59 @@ class MemoryRetriever {
       logger.debug('FTS 召回路径跳过（降级）', { reason: e.message });
     }
 
-    // ─── 路径 C：tag 精确匹配召回 ────────────────────────────
+    // ─── 路径 C：tag 精确匹配召回 + 共现扩展（阶段 3-A）─────────
+    // 1. 用 query 提取的核心 keywords 精确匹配 memory_tags
+    // 2. 通过标签共现图扩展关联 tags（top-4），再 searchByTags 拉回更多记忆
+    // 3. 合并两批结果（按 id 去重，核心命中优先）
     let tagResults = [];
     if (keywords.length > 0) {
       try {
+        // C-1：核心 tag 精确召回
         // searchByTags 不支持 limit 参数，slice 截取
-        const rows = memoryStore.searchByTags(keywords, { includeArchived: false });
-        if (Array.isArray(rows)) {
-          tagResults = rows
+        const coreRows = memoryStore.searchByTags(keywords, { includeArchived: false });
+        const seenIds = new Set();
+        if (Array.isArray(coreRows)) {
+          tagResults = coreRows
             .slice(0, RECALL_K)
             .map((r) => ({ id: r.id, score: 0.5, source: 'tag' }))
-            .filter((r) => r.id);
+            .filter((r) => {
+              if (!r.id || seenIds.has(r.id)) return false;
+              seenIds.add(r.id);
+              return true;
+            });
+        }
+
+        // C-2：标签共现图扩展召回
+        // 从核心 keywords 通过共现矩阵拉回关联 tags（top maxExpand），
+        // 对扩展 tags 再做一次 searchByTags，合并新结果。
+        // 失败静默降级：共现图缺失/为空时退化为纯核心 tag 召回。
+        try {
+          const expandedTags = tagCooccurrence.expandTags(keywords, 4);
+          if (Array.isArray(expandedTags) && expandedTags.length > 0) {
+            // 合并核心 + 扩展去重后查询，避免重复走 DB
+            const allQueryTags = [...new Set([...keywords, ...expandedTags])];
+            const expandedRows = memoryStore.searchByTags(allQueryTags, {
+              includeArchived: false,
+            });
+            if (Array.isArray(expandedRows)) {
+              for (const r of expandedRows.slice(0, RECALL_K)) {
+                if (!r.id || seenIds.has(r.id)) continue;
+                seenIds.add(r.id);
+                // 扩展召回的条目给略低的初始分，区分核心/共现命中
+                tagResults.push({ id: r.id, score: 0.35, source: 'tag-expanded' });
+              }
+            }
+            logger.debug('标签共现扩展召回', {
+              coreTags: keywords,
+              expandedTags,
+              expandedHits: tagResults.length - coreRows.length,
+            });
+          }
+        } catch (expandErr) {
+          // 共现扩展失败不影响核心 tag 召回
+          logger.debug('标签共现扩展失败（降级为核心 tag 召回）', {
+            reason: expandErr.message,
+          });
         }
       } catch (e) {
         logger.debug('tag 召回路径跳过（降级）', { reason: e.message });
@@ -354,6 +400,17 @@ class MemoryRetriever {
       const entry = memoryStore.get(item.id);
       if (!entry) continue;
       entry.score = item.finalScore;
+      // 阶段 3-B：溯源下钻 —— 在检索结果里显式附带 source_episode_id
+      // 调用方拿到后可直接 commEventStore.getEventById(sourceEpisodeId) 下钻原始通信。
+      // entry 来自 sqlite-store._rowToEntry，已含 sourceEpisodeId；此处兜底补一次
+      // （兼容 JSON 迁移期旧数据 / 非门户路径返回的条目）。
+      if (!('sourceEpisodeId' in entry)) {
+        try {
+          entry.sourceEpisodeId = memoryStore.getEpisodeId(item.id) || null;
+        } catch (_e) {
+          entry.sourceEpisodeId = null;
+        }
+      }
       result.push(entry);
     }
 
@@ -378,6 +435,36 @@ class MemoryRetriever {
     });
 
     return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 溯源下钻辅助（阶段 3-B）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 给一组记忆条目（完整 MemoryEntry 或轻量 IndexEntry）附带 source_episode_id。
+   *
+   * 主召回路径（recall 三路融合）的 entry 来自 memoryStore.get()，已含
+   * sourceEpisodeId（sqlite-store._rowToEntry 还原）；但回退路径（getRecent /
+   * query）返回的是 IndexEntry，不含该字段。本方法统一兜底：对缺失
+   * sourceEpisodeId 的条目，按 id 调 memoryStore.getEpisodeId() 补上，
+   * 让调用方无论走哪条路径都能拿到 episode_id 下钻原始通信。
+   *
+   * @param {Object[]} entries
+   * @returns {Object[]} 原数组（就地补字段后返回，便于链式）
+   * @private
+   */
+  _withEpisodeId(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return entries;
+    for (const entry of entries) {
+      if (!entry || 'sourceEpisodeId' in entry) continue;
+      try {
+        entry.sourceEpisodeId = memoryStore.getEpisodeId(entry.id) || null;
+      } catch (_e) {
+        entry.sourceEpisodeId = null;
+      }
+    }
+    return entries;
   }
 
   // ═══════════════════════════════════════════════════════════

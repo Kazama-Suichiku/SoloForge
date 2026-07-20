@@ -37,6 +37,9 @@ const { dataPath } = require('../account/data-path');
 const FTS_TOKENIZER = "trigram";
 
 // 表结构 DDL（幂等：IF NOT EXISTS）
+// 阶段 3-B：memories 表新增 source_episode_id 列，用于溯源下钻到原始通信事件。
+//   - 新库：CREATE TABLE 已包含该列
+//   - 旧库：_open() 后通过 _migrateColumns() 幂等 ALTER TABLE ADD COLUMN
 const DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -55,12 +58,15 @@ const DDL_STATEMENTS = [
     source_json TEXT,
     embedding BLOB,
     embedding_model TEXT,
-    updated_at INTEGER
+    updated_at INTEGER,
+    source_episode_id TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_type ON memories(type)`,
   `CREATE INDEX IF NOT EXISTS idx_scope ON memories(scope)`,
   `CREATE INDEX IF NOT EXISTS idx_agent ON memories(agent_id)`,
   `CREATE INDEX IF NOT EXISTS idx_archived ON memories(archived)`,
+  // 阶段 3-B：溯源下钻索引 —— 按 episode_id 反查记忆
+  `CREATE INDEX IF NOT EXISTS idx_source_episode ON memories(source_episode_id)`,
 
   `CREATE TABLE IF NOT EXISTS memory_tags (
     memory_id TEXT,
@@ -100,6 +106,20 @@ const DDL_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_folding_status ON folding_entries(summary_status)`,
   `CREATE INDEX IF NOT EXISTS idx_folding_last_used ON folding_entries(last_used)`,
+
+  // 阶段三A：标签共现图（tag co-occurrence）
+  // 每条记忆写入时，对其 tags 两两组合 (tag_a, tag_b) 计数 ++，
+  // 检索时用共现矩阵从核心 tags 拉回关联 tags 扩展召回。
+  // 约定 tag_a < tag_b（字典序）保证无向边唯一，避免 (a,b)/(b,a) 重复。
+  // PRIMARY KEY(tag_a, tag_b) 天然为 tag_a 建索引；
+  // 另建 idx_tag_pairs_b 加速 WHERE tag_b = ? 查询（getTagPairs 用 OR 查两侧）。
+  `CREATE TABLE IF NOT EXISTS tag_pairs (
+    tag_a TEXT,
+    tag_b TEXT,
+    count INTEGER,
+    PRIMARY KEY (tag_a, tag_b)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_tag_pairs_b ON tag_pairs(tag_b)`,
 ];
 
 /**
@@ -160,10 +180,35 @@ class SqliteMemoryStore {
       this.db.exec(ddl);
     }
 
+    // 阶段 3-B：旧库迁移 —— 幂等 ALTER TABLE ADD COLUMN source_episode_id
+    this._migrateColumns();
+
     // 预编译语句
     this._prepareStatements();
 
     logger.info('SQLite 记忆库已打开', { path: dbPath });
+  }
+
+  /**
+   * 旧库列迁移（阶段 3-B）
+   * 对已存在的 memories 表幂等补列 source_episode_id。
+   * better-sqlite3 同步执行 ALTER TABLE；若列已存在则捕获错误并忽略。
+   * @private
+   */
+  _migrateColumns() {
+    if (!this.db) return;
+    // 检查 memories 表是否已有 source_episode_id 列
+    try {
+      const cols = this.db.prepare(`PRAGMA table_info(memories)`).all();
+      const hasCol = cols.some((c) => c.name === 'source_episode_id');
+      if (!hasCol) {
+        this.db.exec(`ALTER TABLE memories ADD COLUMN source_episode_id TEXT`);
+        logger.info('memories 表已补列 source_episode_id（旧库迁移）');
+      }
+    } catch (error) {
+      // 列已存在或表不存在，忽略
+      logger.debug('source_episode_id 列迁移检查', { error: error.message });
+    }
   }
 
   /**
@@ -176,11 +221,13 @@ class SqliteMemoryStore {
         INSERT INTO memories (
           id, type, scope, agent_id, content, summary, tags_json,
           importance, access_count, created_at, last_accessed_at,
-          archived, superseded_by, source_json, embedding, embedding_model, updated_at
+          archived, superseded_by, source_json, embedding, embedding_model, updated_at,
+          source_episode_id
         ) VALUES (
           @id, @type, @scope, @agent_id, @content, @summary, @tags_json,
           @importance, @access_count, @created_at, @last_accessed_at,
-          @archived, @superseded_by, @source_json, @embedding, @embedding_model, @updated_at
+          @archived, @superseded_by, @source_json, @embedding, @embedding_model, @updated_at,
+          @source_episode_id
         )
       `),
       insertTag: db.prepare(`INSERT INTO memory_tags (memory_id, tag) VALUES (?, ?)`),
@@ -214,6 +261,28 @@ class SqliteMemoryStore {
       ),
       touchFoldingEntry: db.prepare(
         `UPDATE folding_entries SET last_used = @last_used WHERE content_hash = @content_hash`
+      ),
+      // 阶段 3-B：溯源下钻 —— 按 id 读 source_episode_id，按 episode_id 反查记忆
+      getEpisodeId: db.prepare(`SELECT source_episode_id FROM memories WHERE id = ?`),
+      getMemoriesByEpisodeId: db.prepare(
+        `SELECT * FROM memories WHERE source_episode_id = ? ORDER BY created_at DESC`
+      ),
+      updateEpisodeId: db.prepare(
+        `UPDATE memories SET source_episode_id = @source_episode_id, updated_at = @updated_at WHERE id = @id`
+      ),
+      // 阶段 3-A：标签共现图 —— upsert 一对共现标签（约定 tag_a < tag_b）
+      // INSERT 新行 count=1；已存在则 count+1（ON CONFLICT … DO UPDATE）。
+      upsertTagPair: db.prepare(`
+        INSERT INTO tag_pairs (tag_a, tag_b, count) VALUES (@tag_a, @tag_b, 1)
+        ON CONFLICT(tag_a, tag_b) DO UPDATE SET count = count + 1
+      `),
+      // 阶段 3-A：查某 tag 的所有共现对（两侧都查：tag_a=? OR tag_b=?）
+      // 返回 otherTag + count，调用方据此聚合关联 tag。
+      getTagPairsByA: db.prepare(
+        `SELECT tag_b AS otherTag, count FROM tag_pairs WHERE tag_a = ?`
+      ),
+      getTagPairsByB: db.prepare(
+        `SELECT tag_a AS otherTag, count FROM tag_pairs WHERE tag_b = ?`
       ),
     };
   }
@@ -272,6 +341,8 @@ class SqliteMemoryStore {
       embedding: row.embedding || null,
       embeddingModel: row.embedding_model || null,
       updatedAt: row.updated_at || row.created_at,
+      // 阶段 3-B：溯源下钻 —— 指向原始通信事件 id（comm_events.id）
+      sourceEpisodeId: row.source_episode_id || null,
     };
   }
 
@@ -299,6 +370,12 @@ class SqliteMemoryStore {
       embedding: entry.embedding || null,
       embedding_model: entry.embeddingModel || null,
       updated_at: entry.updatedAt ?? entry.createdAt ?? Date.now(),
+      // 阶段 3-B：溯源下钻 —— 显式字段优先，回退到 source.episodeId / source.conversationId
+      source_episode_id:
+        entry.sourceEpisodeId ??
+        entry.source?.episodeId ??
+        entry.source?.conversationId ??
+        null,
     };
   }
 
@@ -485,6 +562,7 @@ class SqliteMemoryStore {
           embedding: 'embedding',
           embeddingModel: 'embedding_model',
           updatedAt: 'updated_at',
+          sourceEpisodeId: 'source_episode_id',
         };
 
         const sets = [];
@@ -688,6 +766,121 @@ class SqliteMemoryStore {
     } catch (error) {
       logger.warn('读取单条 embedding 失败', { id, error: error.message });
       return { embedding: null, embeddingModel: null };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 溯源下钻（阶段 3-B）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 读取一条记忆的 source_episode_id（指向原始通信事件 id）。
+   * 用于从记忆下钻到原始通信：memory → sourceEpisodeId → commEventStore.getEventById
+   * @param {string} memoryId
+   * @returns {string|null} episode id；记忆不存在或未设置时返回 null
+   */
+  getEpisodeId(memoryId) {
+    if (!this._opened) this._open();
+    if (!memoryId) return null;
+    try {
+      const row = this._stmts.getEpisodeId.get(memoryId);
+      if (!row) return null;
+      return row.source_episode_id || null;
+    } catch (error) {
+      logger.warn('getEpisodeId 查询失败', { id: memoryId, error: error.message });
+      return null;
+    }
+  }
+
+  /**
+   * 按 source_episode_id 反查所有记忆（同一原始通信事件派生的记忆）。
+   * 用于「同一会话/事件生成了哪些记忆」的聚合查询。
+   * @param {string} episodeId
+   * @returns {Object[]} 完整 MemoryEntry 数组（按 created_at 倒序）
+   */
+  getMemoriesByEpisodeId(episodeId) {
+    if (!this._opened) this._open();
+    if (!episodeId) return [];
+    try {
+      const rows = this._stmts.getMemoriesByEpisodeId.all(episodeId);
+      return rows.map((r) => this._rowToEntry(r));
+    } catch (error) {
+      logger.warn('getMemoriesByEpisodeId 查询失败', { episodeId, error: error.message });
+      return [];
+    }
+  }
+
+  /**
+   * 更新一条记忆的 source_episode_id（用于事后补链或修正）。
+   * @param {string} memoryId
+   * @param {string|null} episodeId
+   * @returns {{ success: boolean, error?: string }}
+   */
+  setEpisodeId(memoryId, episodeId) {
+    if (!this._opened) this._open();
+    if (!memoryId) return { success: false, error: '缺少 memoryId' };
+    try {
+      this._stmts.updateEpisodeId.run({
+        id: memoryId,
+        source_episode_id: episodeId ?? null,
+        updated_at: Date.now(),
+      });
+      return { success: true };
+    } catch (error) {
+      logger.warn('setEpisodeId 更新失败', { id: memoryId, error: error.message });
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 标签共现图（阶段 3-A）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 增量更新一对共现标签的计数。
+   * 约定调用方保证 tag_a < tag_b（字典序），使无向边唯一；
+   * tag-cooccurrence.updateOnAdd 已做该归一化。这里不强制校验，直接 upsert：
+   * 新行 count=1，已存在则 count+1（ON CONFLICT … DO UPDATE，预编译语句实现）。
+   *
+   * @param {string} tagA
+   * @param {string} tagB
+   * @returns {{ success: boolean, error?: string }}
+   */
+  upsertTagPair(tagA, tagB) {
+    if (!this._opened) this._open();
+    if (!tagA || !tagB) return { success: false, error: '缺少 tag' };
+    try {
+      this._stmts.upsertTagPair.run({ tag_a: String(tagA), tag_b: String(tagB) });
+      return { success: true };
+    } catch (error) {
+      logger.debug('upsertTagPair 失败', { tagA, tagB, error: error.message });
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 查询某 tag 的所有共现对，返回关联 tag + 共现次数。
+   * tag_pairs 中 tag 可能出现在 tag_a 或 tag_b 任一侧（因 tag_a < tag_b 归一），
+   * 故两侧分别查询后合并。返回 { otherTag, count } 数组。
+   *
+   * @param {string} tag
+   * @returns {Array<{otherTag: string, count: number}>}
+   */
+  getTagPairs(tag) {
+    if (!this._opened) this._open();
+    if (!tag) return [];
+    try {
+      const t = String(tag);
+      const asA = this._stmts.getTagPairsByA.all(t);
+      const asB = this._stmts.getTagPairsByB.all(t);
+      // 合并两侧；同一边不会同时出现在两侧（tag_a<tag_b），无需去重
+      return [...asA, ...asB].map((r) => ({
+        otherTag: r.otherTag,
+        count: r.count || 0,
+      }));
+    } catch (error) {
+      logger.debug('getTagPairs 查询失败', { tag, error: error.message });
+      return [];
     }
   }
 

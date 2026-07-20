@@ -19,7 +19,8 @@
  *   - getEventsForAgent(agentId) SELECT WHERE from_agent=? OR to_agent=?
  *   - getEventsBetween(a, b)     SELECT 双向 from/to
  *   - getGroupEvents(groupId)    SELECT WHERE group_id=?
- *   - getAll() / clear()         调试/测试用
+ *   - getEventById(id)            SELECT WHERE id=? （阶段 3-B 溯源下钻）
+ *   - getAll() / clear()          调试/测试用
  *   - loadFromDisk()             打开/建表 + JSON→SQLite 数据迁移
  *   - saveToDisk() / saveToDiskSync()  no-op（仅 WAL checkpoint）
  *   - reinitialize()             公司切换时关闭当前库并从新路径重新打开
@@ -488,6 +489,28 @@ class CommunicationEventStore {
     } catch (error) {
       logger.warn('getEventsBetween 查询失败', { agentA, agentB, error: error.message });
       return [];
+    }
+  }
+
+  /**
+   * 按 id 查单条通信事件（阶段 3-B 溯源下钻）。
+   *
+   * 用途：记忆条目存了 source_episode_id 指向原始通信事件 id，
+   * 调用方拿到 episode_id 后用本方法取回原始通信内容/回复/traceId，
+   * 实现 memory → comm_event 的可追溯链路。
+   *
+   * @param {string} id 通信事件 id（comm_events.id，形如 'evt-<ts>-<rand>'）
+   * @returns {CommEvent|null} 事件对象；不存在时返回 null
+   */
+  getEventById(id) {
+    if (!id) return null;
+    if (!this._opened) this._open();
+    try {
+      const row = this._stmts.getById.get(id);
+      return this._rowToEvent(row);
+    } catch (error) {
+      logger.warn('getEventById 查询失败', { id, error: error.message });
+      return null;
     }
   }
 

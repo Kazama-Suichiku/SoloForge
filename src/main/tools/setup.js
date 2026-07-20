@@ -20,6 +20,7 @@ const { registerWebFetchTool } = require('./web-fetch-tool');
 const { registerReportTools } = require('./report-tool');
 const { registerHistoryTools } = require('./history-tool');
 const { registerMemoryTools } = require('./memory-tools');
+const { registerMemoryAdvancedTools } = require('./memory-advanced-tools');
 const { registerTodoTools } = require('./todo-tools');
 const { registerContextTools } = require('./context-tools');
 const { registerPermissionTools } = require('./permission-tools');
@@ -51,6 +52,7 @@ function setupTools() {
   registerOrgChartTools();
   registerPMTools();
   registerMemoryTools();
+  registerMemoryAdvancedTools();
   registerTodoTools();
   registerContextTools();
   registerPermissionTools();
