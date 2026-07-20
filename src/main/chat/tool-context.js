@@ -103,8 +103,19 @@ function getToolsForAgent(chatManager, agentId) {
  * 支持两种模式：
  *   1. Token 预算模式（传 model + contextualMessage）—— 动态裁剪
  *   2. 固定条数模式（不传 model）—— 向后兼容
+ *
+ * Codex 方案：优先调用 historyManager.getRollingSummaryHistory（滚动摘要），
+ * 把超预算的旧消息压缩成摘要而非丢弃。
+ *   - 如果 historyManager 没有 getRollingSummaryHistory 方法，或返回 fallback:true
+ *     （LLM 不可用 / 摘要失败），则降级到 getOptimizedHistory（简单截断）。
+ *   - 此函数是 async（因为滚动摘要可能需要调 LLM 生成摘要）。
+ *
+ * @param {Array} fullHistory
+ * @param {string} conversationId
+ * @param {Object} budgetParams - { model, systemPrompt, contextualMessage }
+ * @returns {Promise<{paginatedHistory: Array, historyInfo: string, hasMoreHistory: boolean, totalMessages: number, shownMessages: number}>}
  */
-function getPaginatedHistory(fullHistory, conversationId, budgetParams) {
+async function getPaginatedHistory(fullHistory, conversationId, budgetParams) {
   setConversationHistory(conversationId, fullHistory);
 
   let tokenBudget;
@@ -124,6 +135,39 @@ function getPaginatedHistory(fullHistory, conversationId, budgetParams) {
     });
   }
 
+  // 优先尝试滚动摘要方案（Codex）
+  if (typeof historyManager.getRollingSummaryHistory === 'function' && tokenBudget != null && tokenBudget > 0) {
+    try {
+      const rollingResult = await historyManager.getRollingSummaryHistory(fullHistory, conversationId, {
+        tokenBudget,
+        recentCount: PAGE_SIZE,
+      });
+
+      // 如果滚动摘要成功（没标记 fallback），直接返回
+      if (!rollingResult.fallback) {
+        return {
+          paginatedHistory: rollingResult.messages,
+          historyInfo: rollingResult.historyInfo || '',
+          hasMoreHistory: rollingResult.hasMoreHistory,
+          totalMessages: rollingResult.totalMessages,
+          shownMessages: rollingResult.shownMessages,
+        };
+      }
+
+      // fallback:true（LLM 不可用或摘要失败）→ 降级到 getOptimizedHistory
+      logger.debug('getPaginatedHistory: 滚动摘要 fallback 到 getOptimizedHistory', {
+        conversationId,
+      });
+    } catch (err) {
+      // 滚动摘要异常：降级到 getOptimizedHistory，绝不崩
+      logger.warn('getPaginatedHistory: 滚动摘要异常，降级到 getOptimizedHistory', {
+        conversationId,
+        error: err?.message,
+      });
+    }
+  }
+
+  // 降级路径：原有的简单截断（getOptimizedHistory）
   const optimized = historyManager.getOptimizedHistory(
     fullHistory,
     conversationId,

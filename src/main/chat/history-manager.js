@@ -1,11 +1,20 @@
 /**
  * SoloForge - 历史消息管理器
  * 实现消息分页、摘要缓存，优化 KV Cache 利用率
+ *
+ * Codex 方案的滚动摘要（Rolling Summary）：
+ *   上下文结构 = [滚动摘要] + [最近 N 条完整消息] + [当前用户消息]
+ *   - 当 token 超预算时，不丢弃旧消息，而是压缩成摘要
+ *   - 摘要本身也会累积；摘要过长时再压缩成更精炼的摘要
+ *   - 最近 recentCount 条消息始终完整保留
+ *   - 每次 getRollingSummaryHistory 自动检查 token 预算，超了就压缩
+ *   - LLM 不可用或摘要失败时，自动 fallback 到 getOptimizedHistory（简单截断）
+ *
  * @module chat/history-manager
  */
 
 const { logger } = require('../utils/logger');
-const { estimateTokens } = require('../llm/token-estimator');
+const { estimateTokens, estimateMessages } = require('../llm/token-estimator');
 
 /**
  * 每页消息数量
@@ -17,6 +26,26 @@ const PAGE_SIZE = 50;
  * 摘要缓存过期时间（毫秒）
  */
 const SUMMARY_CACHE_TTL = 30 * 60 * 1000; // 30 分钟
+
+/**
+ * 滚动摘要：单次压缩一批消息时，最多取多少条来生成摘要
+ */
+const SUMMARY_BATCH_SIZE = 10;
+
+/**
+ * 滚动摘要：摘要本身的最大 token 数，超过则触发二次压缩
+ */
+const MAX_SUMMARY_TOKENS = 1500;
+
+/**
+ * 滚动摘要：每条消息内容取多少字符参与摘要（截断超长消息，控制 LLM 输入）
+ */
+const SUMMARY_MSG_CHAR_LIMIT = 800;
+
+/**
+ * 摘要生成用的模型（快速、便宜）；与 memory-summarizer 保持一致
+ */
+const SUMMARIZER_MODEL = 'claude-haiku-4-5';
 
 /**
  * @typedef {Object} HistoryPage
@@ -55,6 +84,32 @@ class HistoryManager {
      * @type {Map<string, number>}
      */
     this.accessTime = new Map();
+
+    /**
+     * LLM Manager（用于生成滚动摘要），由 chatManager.setLLMManager 注入
+     * @type {import('../llm/llm-manager').LLMManager|null}
+     */
+    this.llmManager = null;
+
+    /**
+     * 滚动摘要缓存（Codex 方案）
+     * key: conversationId
+     * value: { summary: string, lastSummarizedIndex: number, timestamp: number }
+     *   - summary: 当前累积的滚动摘要文本（可能已经过二次压缩）
+     *   - lastSummarizedIndex: fullHistory 中已经被摘要覆盖的最大索引（下一批从这开始）
+     *   - timestamp: 最后更新时间，用于 TTL 过期判断
+     * @type {Map<string, { summary: string, lastSummarizedIndex: number, timestamp: number }>}
+     */
+    this.rollingSummaryCache = new Map();
+  }
+
+  /**
+   * 设置 LLM Manager（用于滚动摘要生成）
+   * 由 chatManager.setLLMManager 调用注入
+   * @param {import('../llm/llm-manager').LLMManager} llmManager
+   */
+  setLLMManager(llmManager) {
+    this.llmManager = llmManager;
   }
 
   /**
@@ -184,6 +239,360 @@ class HistoryManager {
       totalMessages: fullHistory.length,
       shownMessages: recentMessages.length,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 滚动摘要（Codex 方案）
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * 获取滚动摘要历史（Codex 方案）
+   *
+   * 上下文结构 = [滚动摘要] + [最近 recentCount 条完整消息] + [当前用户消息]
+   * - 没超预算：直接返回全部
+   * - 超预算：保留最近 recentCount 条，其余压缩成滚动摘要
+   * - 摘要累积：已有旧摘要 + 新摘要合并；摘要过长再压缩
+   * - LLM 不可用 / 摘要失败：返回 summary=null（由调用方 fallback 到 getOptimizedHistory）
+   *
+   * @param {Array<{role: string, content: string}>} fullHistory - 完整历史
+   * @param {string} conversationId - 对话 ID
+   * @param {Object} options
+   * @param {number} [options.tokenBudget] - 历史消息的 token 预算
+   * @param {number} [options.recentCount=PAGE_SIZE] - 始终完整保留的最近消息条数
+   * @returns {Promise<{messages: Array, summary: string|null, hasMoreHistory: boolean, historyInfo: string, totalMessages: number, shownMessages: number}>}
+   */
+  async getRollingSummaryHistory(fullHistory, conversationId, options = {}) {
+    const { tokenBudget, recentCount = PAGE_SIZE } = options;
+
+    // 空历史
+    if (!fullHistory || fullHistory.length === 0) {
+      return {
+        messages: [],
+        summary: null,
+        hasMoreHistory: false,
+        historyInfo: '',
+        totalMessages: 0,
+        shownMessages: 0,
+      };
+    }
+
+    // 没传 token 预算或预算非正：无法判断是否超限，直接返回全部（不压缩）
+    if (tokenBudget == null || tokenBudget <= 0) {
+      return {
+        messages: fullHistory,
+        summary: this.getRollingSummary(conversationId),
+        hasMoreHistory: false,
+        historyInfo: '',
+        totalMessages: fullHistory.length,
+        shownMessages: fullHistory.length,
+      };
+    }
+
+    // 1. 计算当前 token（用 estimateMessages 更准：含 role 开销）
+    const totalTokens = estimateMessages(fullHistory);
+
+    // 2. 没超预算：直接返回全部（仍带上已有的滚动摘要，如果有的话）
+    if (totalTokens <= tokenBudget) {
+      const existingSummary = this.getRollingSummary(conversationId);
+      return {
+        messages: fullHistory,
+        summary: existingSummary,
+        hasMoreHistory: false,
+        historyInfo: existingSummary ? this._formatHistoryInfo(existingSummary, fullHistory.length, fullHistory.length) : '',
+        totalMessages: fullHistory.length,
+        shownMessages: fullHistory.length,
+      };
+    }
+
+    // 3. 超预算：保留最近 recentCount 条，其余待压缩
+    const recentMessages = fullHistory.slice(-recentCount);
+    const oldMessages = fullHistory.slice(0, fullHistory.length - recentMessages.length);
+
+    // 4. 读取已有滚动摘要 + 已摘要索引
+    let rollingSummary = this.getRollingSummary(conversationId);
+    const lastSummarizedIndex = this.getLastSummarizedIndex(conversationId);
+
+    // 5. 找出 oldMessages 中尚未被摘要覆盖的部分
+    //    lastSummarizedIndex 是相对 fullHistory 的绝对索引；oldMessages 从 0 开始，
+    //    所以 oldMessages 中未摘要的是 [max(0, lastSummarizedIndex - 0) ... ]
+    //    但因为 recentCount 变化或历史增长，需保证 newToSummarize 不与 recentMessages 重叠。
+    const startIdx = Math.max(0, lastSummarizedIndex);
+    const newToSummarize = oldMessages.slice(startIdx);
+
+    // 6. 有新消息需要摘要才调 LLM（避免无谓调用）
+    if (newToSummarize.length > 0) {
+      // 前置检查：LLM 不可用时，直接走 fallback，避免无谓循环
+      if (!this.llmManager) {
+        logger.debug('滚动摘要：LLM 不可用，fallback 到简单截断', { conversationId });
+        return {
+          messages: recentMessages,
+          summary: null,
+          hasMoreHistory: true,
+          historyInfo: '',
+          totalMessages: fullHistory.length,
+          shownMessages: recentMessages.length,
+          fallback: true,
+        };
+      }
+
+      try {
+        // 6.1 分批生成摘要（每批 SUMMARY_BATCH_SIZE 条），逐批累积，控制单次 LLM 输入大小
+        let accumulated = rollingSummary;
+        for (let i = 0; i < newToSummarize.length; i += SUMMARY_BATCH_SIZE) {
+          const batch = newToSummarize.slice(i, i + SUMMARY_BATCH_SIZE);
+          const batchSummary = await this._generateSummary(batch, accumulated);
+          if (batchSummary) {
+            accumulated = await this._mergeSummaries(accumulated, batchSummary);
+          }
+        }
+
+        // 6.2 全部批次完成，写入缓存
+        if (accumulated) {
+          rollingSummary = accumulated;
+          // 新的 lastSummarizedIndex = oldMessages.length（相对 fullHistory，recentMessages 之前的全部已摘要）
+          this.cacheRollingSummary(conversationId, rollingSummary, oldMessages.length);
+        } else {
+          // LLM 调用了但全部返回 null（摘要失败）：走 fallback
+          logger.warn('滚动摘要：摘要生成全部失败，fallback 到简单截断', { conversationId });
+          return {
+            messages: recentMessages,
+            summary: null,
+            hasMoreHistory: true,
+            historyInfo: '',
+            totalMessages: fullHistory.length,
+            shownMessages: recentMessages.length,
+            fallback: true,
+          };
+        }
+      } catch (err) {
+        // 摘要失败：不崩，返回 summary=null，让调用方 fallback 到 getOptimizedHistory
+        logger.warn('滚动摘要生成失败，将 fallback 到简单截断', {
+          conversationId,
+          error: err?.message,
+        });
+        return {
+          messages: recentMessages,
+          summary: null,
+          hasMoreHistory: true,
+          historyInfo: '',
+          totalMessages: fullHistory.length,
+          shownMessages: recentMessages.length,
+          fallback: true, // 标记：调用方应改用 getOptimizedHistory
+        };
+      }
+    }
+
+    // 7. 返回：摘要 + 最近消息
+    const historyInfo = rollingSummary
+      ? this._formatHistoryInfo(rollingSummary, fullHistory.length, recentMessages.length)
+      : '';
+
+    return {
+      messages: recentMessages,
+      summary: rollingSummary,
+      hasMoreHistory: false, // 不再提示"还有N条"，因为旧内容已摘要
+      historyInfo,
+      totalMessages: fullHistory.length,
+      shownMessages: recentMessages.length,
+    };
+  }
+
+  /**
+   * 格式化滚动摘要为 historyInfo 文本（注入到 contextualMessage 前方）
+   * @param {string} summary
+   * @param {number} totalMessages
+   * @param {number} shownMessages
+   * @returns {string}
+   */
+  _formatHistoryInfo(summary, totalMessages, shownMessages) {
+    if (!summary) return '';
+    const omitted = Math.max(0, totalMessages - shownMessages);
+    return `[更早的 ${omitted} 条对话已压缩为摘要]\n${summary}\n\n[以上是历史摘要，以下是最近 ${shownMessages} 条消息]`;
+  }
+
+  /**
+   * 读取对话的滚动摘要（纯文本）
+   * @param {string} conversationId
+   * @returns {string|null}
+   */
+  getRollingSummary(conversationId) {
+    const entry = this.rollingSummaryCache.get(conversationId);
+    if (!entry) return null;
+    // TTL 过期则视为无摘要（避免用过期摘要）
+    if (Date.now() - entry.timestamp > SUMMARY_CACHE_TTL) {
+      this.rollingSummaryCache.delete(conversationId);
+      return null;
+    }
+    return entry.summary;
+  }
+
+  /**
+   * 读取对话的"已摘要到第几条"索引
+   * @param {string} conversationId
+   * @returns {number}
+   */
+  getLastSummarizedIndex(conversationId) {
+    const entry = this.rollingSummaryCache.get(conversationId);
+    if (!entry) return 0;
+    if (Date.now() - entry.timestamp > SUMMARY_CACHE_TTL) {
+      this.rollingSummaryCache.delete(conversationId);
+      return 0;
+    }
+    return entry.lastSummarizedIndex || 0;
+  }
+
+  /**
+   * 缓存滚动摘要
+   * @param {string} conversationId
+   * @param {string} summary
+   * @param {number} lastSummarizedIndex - fullHistory 中已被摘要覆盖的最大索引
+   */
+  cacheRollingSummary(conversationId, summary, lastSummarizedIndex) {
+    this.rollingSummaryCache.set(conversationId, {
+      summary,
+      lastSummarizedIndex,
+      timestamp: Date.now(),
+    });
+    logger.debug('滚动摘要已缓存', {
+      conversationId,
+      lastSummarizedIndex,
+      summaryTokens: estimateTokens(summary),
+    });
+  }
+
+  /**
+   * 调 LLM 把一批消息压缩成摘要
+   * 如果有 existingSummary，告诉 LLM "在已有摘要基础上补充新信息"
+   * @param {Array<{role: string, content: string}>} messages - 待摘要的消息批次
+   * @param {string|null} existingSummary - 已有的滚动摘要（增量补充）
+   * @returns {Promise<string|null>}
+   */
+  async _generateSummary(messages, existingSummary) {
+    if (!this.llmManager) return null;
+    if (!messages || messages.length === 0) return existingSummary || null;
+
+    try {
+      // 格式化待摘要消息（截断超长内容，控制 LLM 输入）
+      const conversationText = messages
+        .map((m) => {
+          const role = m.role === 'user' ? '用户' : 'Agent';
+          const content =
+            typeof m.content === 'string' && m.content.length > SUMMARY_MSG_CHAR_LIMIT
+              ? m.content.slice(0, SUMMARY_MSG_CHAR_LIMIT) + '...'
+              : m.content || '';
+          return `${role}: ${content}`;
+        })
+        .join('\n\n');
+
+      let prompt;
+      if (existingSummary) {
+        // 增量摘要：在已有摘要基础上补充新信息
+        prompt =
+          `以下是已有的一段对话摘要，以及新产生的一批对话。请在已有摘要的基础上，整合新对话的关键信息，生成更新后的摘要。\n\n` +
+          `要求：\n` +
+          `1. 保留已有摘要中的关键信息（决策、结论、待办、人物、关键数据）\n` +
+          `2. 补充新对话中出现的新信息\n` +
+          `3. 去除重复内容，保持简洁\n` +
+          `4. 使用要点列表格式，长度控制在 150-400 字\n` +
+          `5. 只返回摘要文本，不要添加其他说明\n\n` +
+          `【已有摘要】\n${existingSummary}\n\n` +
+          `【新对话】\n${conversationText}`;
+      } else {
+        // 首次摘要
+        prompt =
+          `请为以下对话生成一个简洁的摘要。\n\n` +
+          `要求：\n` +
+          `1. 摘要应包含对话的主要话题、关键结论、决策和待办事项\n` +
+          `2. 保留涉及的人物、关键数据、文件路径等技术细节\n` +
+          `3. 长度控制在 100-300 字之间\n` +
+          `4. 使用要点列表格式\n` +
+          `5. 只返回摘要文本，不要添加其他说明\n\n` +
+          `对话内容：\n${conversationText}`;
+      }
+
+      const result = await this._callLLM(prompt);
+      return result;
+    } catch (err) {
+      logger.warn('滚动摘要 _generateSummary 失败', { error: err?.message });
+      return null;
+    }
+  }
+
+  /**
+   * 合并旧摘要 + 新摘要
+   * 如果合并后太长（超过 MAX_SUMMARY_TOKENS），再压缩一次
+   * @param {string|null} oldSummary
+   * @param {string|null} newSummary
+   * @returns {Promise<string|null>}
+   */
+  async _mergeSummaries(oldSummary, newSummary) {
+    // 两者都空
+    if (!oldSummary && !newSummary) return null;
+    // 只有一方：直接返回那一方
+    if (!oldSummary) return newSummary;
+    if (!newSummary) return oldSummary;
+
+    // 简单拼接
+    const merged = `${oldSummary}\n\n${newSummary}`;
+    const mergedTokens = estimateTokens(merged);
+
+    // 没超限：直接用拼接结果
+    if (mergedTokens <= MAX_SUMMARY_TOKENS) {
+      return merged;
+    }
+
+    // 超限：再压缩一次
+    return await this._compressSummary(merged);
+  }
+
+  /**
+   * 把过长的摘要再压缩成更精炼的摘要
+   * @param {string} summary
+   * @returns {Promise<string|null>}
+   */
+  async _compressSummary(summary) {
+    if (!this.llmManager) return summary; // LLM 不可用就保留原样
+    if (!summary) return summary;
+
+    try {
+      const prompt =
+        `以下是一段过长的对话摘要，请把它压缩成更精炼的版本。\n\n` +
+        `要求：\n` +
+        `1. 保留所有关键信息（决策、结论、待办、人物、关键数据、文件路径）\n` +
+        `2. 去除重复和次要细节\n` +
+        `3. 长度控制在 200-400 字以内\n` +
+        `4. 使用要点列表格式\n` +
+        `5. 只返回摘要文本，不要添加其他说明\n\n` +
+        `待压缩的摘要：\n${summary}`;
+
+      const compressed = await this._callLLM(prompt);
+      return compressed || summary; // 压缩失败则保留原样
+    } catch (err) {
+      logger.warn('摘要二次压缩失败，保留原摘要', { error: err?.message });
+      return summary;
+    }
+  }
+
+  /**
+   * 调用 LLM（参考 memory-summarizer._callLLM）
+   * @param {string} prompt
+   * @returns {Promise<string|null>}
+   */
+  async _callLLM(prompt) {
+    if (!this.llmManager) return null;
+
+    try {
+      const messages = [{ role: 'user', content: prompt }];
+      const result = await this.llmManager.chat(messages, {
+        model: SUMMARIZER_MODEL,
+        temperature: 0.2,
+        maxTokens: 1000,
+      });
+      return typeof result === 'string' ? result : result?.content || null;
+    } catch (err) {
+      logger.warn('history-manager LLM 调用失败', { error: err?.message });
+      return null;
+    }
   }
 
   /**
@@ -370,18 +779,20 @@ class HistoryManager {
   getStats() {
     return {
       cachedSummaries: this.summaryCache.size,
+      rollingSummaries: this.rollingSummaryCache.size,
       pageSize: PAGE_SIZE,
     };
   }
 
   /**
    * 重新初始化（公司切换时调用）
-   * 清空所有缓存
+   * 清空所有缓存（含滚动摘要缓存）
    */
   reinitialize() {
     this.summaryCache.clear();
     this.accessTime.clear();
-    logger.debug('HistoryManager: 缓存已清空');
+    this.rollingSummaryCache.clear();
+    logger.debug('HistoryManager: 缓存已清空（含滚动摘要）');
   }
 
   /**
@@ -396,7 +807,9 @@ class HistoryManager {
         this.accessTime.delete(key);
       }
     }
-    logger.debug('HistoryManager: 已清理对话缓存', { conversationId });
+    // 清理滚动摘要缓存
+    this.rollingSummaryCache.delete(conversationId);
+    logger.debug('HistoryManager: 已清理对话缓存（含滚动摘要）', { conversationId });
   }
 }
 
@@ -407,4 +820,6 @@ module.exports = {
   HistoryManager,
   historyManager,
   PAGE_SIZE,
+  SUMMARY_BATCH_SIZE,
+  MAX_SUMMARY_TOKENS,
 };

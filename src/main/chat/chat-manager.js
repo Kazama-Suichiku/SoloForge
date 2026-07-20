@@ -52,6 +52,7 @@ const {
   cleanHistoryForLLM,
   getRecentCommunicationContext,
 } = require('./tool-context');
+const { historyManager } = require('./history-manager');
 
 // 延迟加载记忆系统，避免循环依赖
 let _memoryManager = null;
@@ -149,6 +150,10 @@ class ChatManager {
     this.llmManager = llmManager;
     for (const agent of this.agents.values()) {
       agent.setLLMManager(llmManager);
+    }
+    // 注入到 historyManager，用于滚动摘要（Codex 方案）生成摘要
+    if (historyManager && typeof historyManager.setLLMManager === 'function') {
+      historyManager.setLLMManager(llmManager);
     }
   }
 
@@ -326,8 +331,8 @@ class ChatManager {
     return getToolsForAgent(this, agentId);
   }
 
-  getPaginatedHistory(fullHistory, conversationId, budgetParams) {
-    return getPaginatedHistory(fullHistory, conversationId, budgetParams);
+  async getPaginatedHistory(fullHistory, conversationId, budgetParams) {
+    return await getPaginatedHistory(fullHistory, conversationId, budgetParams);
   }
 
   _getTurnReminder() {
@@ -418,7 +423,7 @@ class ChatManager {
         }
 
         const { paginatedHistory, historyInfo, hasMoreHistory, totalMessages, shownMessages } =
-          this.getPaginatedHistory(history, conversationId, {
+          await this.getPaginatedHistory(history, conversationId, {
             model: agent.model,
             systemPrompt: agent.systemPrompt,
             contextualMessage,
@@ -655,7 +660,7 @@ class ChatManager {
           logger.debug('暂存区注入失败（不影响对话）:', scratchpadError.message);
         }
 
-        const { paginatedHistory, historyInfo } = this.getPaginatedHistory(history, conversationId, {
+        const { paginatedHistory, historyInfo } = await this.getPaginatedHistory(history, conversationId, {
           model: agent.model,
           systemPrompt: agent.systemPrompt,
           contextualMessage,
