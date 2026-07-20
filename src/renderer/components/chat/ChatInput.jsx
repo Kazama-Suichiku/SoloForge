@@ -576,7 +576,7 @@ export default function ChatInput({
           type="button"
           onClick={toggleRecording}
           disabled={disabled || !currentConversationId || isTranscribing}
-          className={`shrink-0 w-11 h-11 flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed${isRecording ? ' emil-record-pulse' : ''}`}
+          className={`shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable disabled:opacity-40 disabled:cursor-not-allowed${isRecording ? ' emil-record-pulse' : ''}`}
           style={isRecording ? recordActiveStyle : ghostButtonStyle}
           onMouseEnter={(e) => {
             if (isRecording || disabled || !currentConversationId || isTranscribing) return;
@@ -601,12 +601,12 @@ export default function ChatInput({
           </svg>
         </button>
 
-        {/* 发送按钮：accent 实色 + 白色图标 + 6px 圆角；emil-pressable 按压迫反馈 */}
+        {/* 发送按钮：accent 实色 + 白色图标 + 6px 圆角；emil-pressable 按压迫反馈（:active scale 0.97） */}
         <button
           type="button"
           onClick={handleSend}
           disabled={!canSend}
-          className="shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable"
+          className="shrink-0 w-11 h-11 flex items-center justify-center transition-colors emil-pressable active:scale-[0.97]"
           style={canSend ? sendButtonStyle : sendButtonDisabledStyle}
           onMouseEnter={(e) => {
             if (!canSend) return;

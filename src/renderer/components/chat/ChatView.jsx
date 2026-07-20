@@ -95,33 +95,133 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
 
   const DEFAULT_SIDEBAR_WIDTH = 288;
   const COLLAPSED_WIDTH = 0;
+  // 拖拽边界：低于此值 snap 回 200，高于此值 snap 到 500
+  const MIN_WIDTH = 200;
+  const MAX_WIDTH = 500;
+
+  // aside 引用（用于释放时设临时 transition）—— 提前声明避免 TDZ
+  const asideRef = useRef(null);
+
+  // P1-10：橡皮筋渐进阻力函数。
+  // 在 [min,max] 区间内 1:1 跟随；超出区间后阻力按 1/d 增长，越拉越难（非硬停）。
+  // dim 为阻力系数，Apple §9 推荐约 0.55。
+  const rubberband = useCallback((value, min, max, dim = 0.55) => {
+    if (value < min) {
+      const overflow = min - value;
+      return min - (overflow * dim) / (overflow * 0.001 + 1);
+    }
+    if (value > max) {
+      const overflow = value - max;
+      return max + (overflow * dim) / (overflow * 0.001 + 1);
+    }
+    return value;
+  }, []);
+
+  // P0-7：指针速度历史（最近几次 pointermove），用于释放时计算初速度
+  const moveHistoryRef = useRef([]);
+  // 释放时的过渡控制：transition 期间用 ref 避免重复触发
+  const animFrameRef = useRef(null);
 
   const handleDragStart = useCallback((e) => {
     if (sidebarCollapsed) return;
     isDragging.current = true;
     startX.current = e.clientX;
     startWidth.current = sidebarWidth;
+    moveHistoryRef.current = [{ x: e.clientX, t: performance.now() }];
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
 
     const handleDragMove = (moveE) => {
       if (!isDragging.current) return;
       const delta = moveE.clientX - startX.current;
-      const newWidth = Math.max(200, Math.min(500, startWidth.current + delta));
-      setSidebarWidth(newWidth);
+      // P1-10：用橡皮筋替代硬 clamp —— 区间内 1:1，越界渐进阻力
+      const target = rubberband(startWidth.current + delta, MIN_WIDTH, MAX_WIDTH);
+      setSidebarWidth(target);
+      // 记录速度历史（保留最近 5 个采样，用于平滑速度估计）
+      const now = performance.now();
+      moveHistoryRef.current.push({ x: moveE.clientX, t: now });
+      if (moveHistoryRef.current.length > 5) moveHistoryRef.current.shift();
     };
 
+    // P0-7：释放时计算速度，用速度投影选 snap 目标，再用弹性曲线动画过去。
     const handleDragEnd = () => {
       isDragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       document.removeEventListener('mousemove', handleDragMove);
       document.removeEventListener('mouseup', handleDragEnd);
+
+      // 取最近 ~100ms 的速度采样，计算 px/ms 速度
+      const hist = moveHistoryRef.current;
+      let velocity = 0; // px/ms
+      if (hist.length >= 2) {
+        const first = hist[0];
+        const last = hist[hist.length - 1];
+        const dt = last.t - first.t;
+        if (dt > 0) velocity = (last.x - first.x) / dt;
+      }
+      moveHistoryRef.current = [];
+
+      // 当前显示宽度（含橡皮筋 overshoot 的值）
+      const current = startWidth.current + 0; // 注：此处用 state 会有闭包旧值，改用 latest 估计
+      // 用一个近似的动量投影：project(v) = current + (v/1000) * d / (1-d), d≈0.998
+      // 这里 current 用最后一次 setSidebarWidth 后的值无法直接读，改用 velocity 推方向 + current 落点
+      // 简化：按速度方向决定 snap 目标
+      // 计算 current：从 hist 推最后一次 delta
+      let lastWidth = startWidth.current;
+      if (hist.length >= 2) {
+        const f = hist[0];
+        const l = hist[hist.length - 1];
+        const totalDelta = l.x - f.x;
+        lastWidth = rubberband(startWidth.current + totalDelta, MIN_WIDTH, MAX_WIDTH);
+      } else {
+        lastWidth = current;
+      }
+
+      // 速度阈值（px/ms）：>0.3 视为快速 flick
+      const FLICK_THRESHOLD = 0.3;
+      let targetWidth;
+      if (Math.abs(velocity) > FLICK_THRESHOLD) {
+        // 快速 flick：向速度方向 snap 到极值
+        targetWidth = velocity > 0 ? MAX_WIDTH : MIN_WIDTH;
+      } else {
+        // 慢速释放：snap 到最近的边界（200 或 500），若离默认 288 很近则 snap 到默认
+        const distToMin = Math.abs(lastWidth - MIN_WIDTH);
+        const distToMax = Math.abs(lastWidth - MAX_WIDTH);
+        const distToDefault = Math.abs(lastWidth - DEFAULT_SIDEBAR_WIDTH);
+        // 若离默认宽度很近（<30px），优先 snap 到默认
+        if (distToDefault < 30 && distToDefault < distToMin && distToDefault < distToMax) {
+          targetWidth = DEFAULT_SIDEBAR_WIDTH;
+        } else {
+          targetWidth = distToMin < distToMax ? MIN_WIDTH : MAX_WIDTH;
+        }
+      }
+
+      // 用弹性曲线动画到目标宽度（iOS drawer curve，damping 感）
+      // 用 requestAnimationFrame + 指数缓动模拟 spring 近似；或直接用 CSS transition。
+      // 这里用 CSS transition（react 状态驱动 width，由 .emil-sidebar-collapse 的 width transition 承担）。
+      // 但 .emil-sidebar-collapse 的曲线是 drawer 静态曲线，为释放加一个临时的弹性 transition：
+      const asideEl = asideRef.current;
+      if (asideEl) {
+        // 释放弹簧：cubic-bezier(0.34, 1.56, 0.64, 1) 带 overshoot（damping~0.8 动量感）
+        asideEl.style.transition = 'width 320ms cubic-bezier(0.34, 1.56, 0.64, 1)';
+      }
+      setSidebarWidth(targetWidth);
+      // 动画结束后清除临时 transition，恢复 .emil-sidebar-collapse 默认
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      const cleanup = () => {
+        if (asideEl) asideEl.style.transition = '';
+        animFrameRef.current = null;
+      };
+      animFrameRef.current = requestAnimationFrame(() => {
+        // 一帧后已开始 transition，~340ms 后清理
+        setTimeout(cleanup, 340);
+      });
     };
 
     document.addEventListener('mousemove', handleDragMove);
     document.addEventListener('mouseup', handleDragEnd);
-  }, [sidebarWidth, sidebarCollapsed]);
+  }, [sidebarWidth, sidebarCollapsed, rubberband]);
 
   // 双击恢复默认宽度
   const handleDragDoubleClick = useCallback(() => {
@@ -182,10 +282,13 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
     >
       {/* ========== 左侧栏 - 对话列表（可拖拽调整宽度 / 可折叠） ========== */}
       <aside
+        ref={asideRef}
         className="shrink-0 flex flex-col overflow-hidden emil-sidebar-collapse glass-heavy"
         style={{
           width: sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth,
           borderRight: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+          // P2-12：拖拽时提示合成层
+          willChange: isDragging.current ? 'width' : 'auto',
         }}
       >
         {/* macOS 标题栏占位（可拖拽区域） */}
@@ -298,7 +401,7 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
             role="switch"
             aria-checked={patrolEnabled}
             onClick={handlePatrolToggle}
-            className="relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full emil-pressable emil-toggle-track focus:outline-none"
+            className="relative inline-flex h-[31px] w-[51px] shrink-0 cursor-pointer rounded-full emil-pressable emil-toggle-track focus:outline-none"
             style={{
               background: patrolEnabled
                 ? 'var(--accent, #5e6ad2)'
@@ -306,9 +409,9 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
             }}
           >
             <span
-              className="pointer-events-none inline-block h-3 w-3 rounded-full bg-white emil-toggle-thumb"
+              className="pointer-events-none inline-block h-[27px] w-[27px] rounded-full bg-white emil-toggle-thumb"
               style={{
-                transform: patrolEnabled ? 'translateX(14px)' : 'translateX(2px)',
+                transform: patrolEnabled ? 'translateX(20px)' : 'translateX(2px)',
                 marginTop: '2px',
               }}
             />
@@ -341,7 +444,10 @@ export default function ChatView({ onSendMessage, onSilenceGroup, onOpenSettings
         <div
           className="shrink-0 flex items-center justify-between px-4 h-11 drag-region glass-medium"
           style={{
-            borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
+            // P1-1：硬边框→底部内阴影渐隐（替代 borderBottom 硬线）。
+            // 保留 glass-medium 的顶部高光（rgba 0.18），叠加底部极淡内阴影作分隔。
+            boxShadow:
+              'inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(255,255,255,0.04)',
           }}
         >
           <div className="flex items-center gap-2 min-w-0">

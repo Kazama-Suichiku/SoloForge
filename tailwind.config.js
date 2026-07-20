@@ -40,11 +40,16 @@ export default {
         md: 'var(--radius-md)',
         lg: 'var(--radius-lg)',
         xl: 'var(--radius-xl)',
+        // Apple 连续圆角梯度 20px 档（大容器/模态）。
+        // 注意：'2xl' 以数字开头，对象字面量中必须加引号（sucrase 解析器要求），
+        // 否则会被当作非法标识符；sm/md/lg/xl 是纯字母故无需引号。
+        '2xl': 'var(--radius-2xl)',
       },
       fontFamily: {
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'PingFang SC',
+        // 系统字体优先（Apple §15：-apple-system = SF Pro on macOS）
+        sans: ['-apple-system', 'BlinkMacSystemFont', 'Inter', 'Segoe UI', 'PingFang SC',
           'Hiragino Sans GB', 'Microsoft YaHei', 'sans-serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'Monaco',
+        mono: ['ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'Monaco',
           'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
       },
       fontWeight: {
@@ -59,6 +64,9 @@ export default {
       },
       boxShadow: {
         elevated: 'var(--shadow-elevated)',
+        // Apple §12 R3：阴影分 ambient（柔和扩散）+ directional（聚焦偏移）
+        ambient: 'var(--shadow-ambient)',
+        directional: 'var(--shadow-directional)',
         dialog: 'var(--shadow-dialog)',
       },
       transitionTimingFunction: {

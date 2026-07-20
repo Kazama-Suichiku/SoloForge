@@ -146,7 +146,7 @@ function HideButton({ onClick, title = '从列表中移除（保留记录）' })
     <button
       type="button"
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      className="opacity-0 group-hover:opacity-100 p-1 rounded-md transition-all shrink-0 emil-ghost-hover emil-pressable"
+      className="opacity-0 group-hover:opacity-100 p-1 rounded-md transition-[color,background-color,border-color,transform] shrink-0 emil-ghost-hover emil-pressable"
       style={{ color: 'var(--text-tertiary, #8a8f98)' }}
       onMouseEnter={(e) => {
         e.currentTarget.style.background = 'rgba(248,113,113,0.12)';
@@ -419,7 +419,7 @@ function SectionLabel({ label, isFirst = false }) {
       style={{ height: '24px', marginTop: isFirst ? '2px' : '6px' }}
     >
       <span
-        className="text-[10px] font-medium uppercase tracking-wider"
+        className="text-[10px] font-medium uppercase tracking-[0.02em]"
         style={{ color: 'var(--text-quaternary, #62666d)' }}
       >
         {label}

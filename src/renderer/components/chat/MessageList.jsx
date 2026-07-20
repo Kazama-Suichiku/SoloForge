@@ -12,6 +12,20 @@ import AgentAvatar from '../AgentAvatar';
 // MessageBubble（含 VoiceMessagePlayer / AgentMessageContent）已拆分到独立文件，用 memo 包裹
 import MessageBubble from './MessageBubble';
 
+/** 退场动画时长（ms）—— 与 .emil-msg-exit transition 一致 */
+const MSG_EXIT_DURATION = 180;
+
+/** 退场动画类：透明度 + 轻微 scale + 下沉；与 .emil-msg-enter 对称逆向路径。
+    prefers-reduced-motion 已由 globals.css 全局降级（transform:none，保留 opacity）。 */
+const MSG_EXIT_STYLE = `
+.emil-msg-exit {
+  opacity: 0 !important;
+  transform: scale(0.97) translateY(2px) !important;
+  transition: opacity ${MSG_EXIT_DURATION}ms cubic-bezier(0.23, 1, 0.32, 1),
+              transform ${MSG_EXIT_DURATION}ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+`;
+
 /**
  * P2-7：流式消息包装层。
  * 订阅外部 streamBuffer（按 messageId），流式期间只有正在流式的那条消息重渲染，
@@ -19,7 +33,7 @@ import MessageBubble from './MessageBubble';
  * 流式完成时 chat-store 的 updateMessage 会 consume buffer 写入最终 content，
  * 之后 buffer 为 ''，此包装层退化为透传。
  */
-function StreamingBubble({ message, isSelectMode, isSelected, onToggleSelect, onContextMenu, onImageClick }) {
+function StreamingBubble({ message, isSelectMode, isSelected, onToggleSelect, onContextMenu, onImageClick, isExiting }) {
   const buf = useStreamingContent(message.id);
   // 有 buffer 时把 buffer 拼到 content 后面（模拟原流式累积效果）
   const mergedMessage = useMemo(
@@ -31,6 +45,7 @@ function StreamingBubble({ message, isSelectMode, isSelected, onToggleSelect, on
       message={mergedMessage}
       isSelectMode={isSelectMode}
       isSelected={isSelected}
+      isExiting={isExiting}
       onToggleSelect={onToggleSelect}
       onContextMenu={onContextMenu}
       onImageClick={onImageClick}
@@ -106,24 +121,35 @@ function ContextMenu({ x, y, onDelete, onToggleSelect, onClose, isSelectMode }) 
 
 function ImageLightbox({ src, onClose }) {
   const lightboxRef = useRef(null);
+  const [isExiting, setIsExiting] = useState(false);
+
+  // 真正关闭（退场动画结束后调用）
+  const startClose = useCallback(() => {
+    setIsExiting(true);
+    // 200ms 后真正卸载，与 .lightbox-exit transition 一致
+    setTimeout(() => {
+      setIsExiting(false);
+      onClose();
+    }, 200);
+  }, [onClose]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') startClose();
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [startClose]);
 
   return (
     <div
       ref={lightboxRef}
-      className="fixed inset-0 z-[9999] bg-[rgba(0,0,0,0.8)] flex items-center justify-center animate-fade-in"
-      onClick={onClose}
+      className={`fixed inset-0 z-[9999] bg-[rgba(0,0,0,0.8)] flex items-center justify-center animate-fade-in${isExiting ? ' lightbox-exit' : ''}`}
+      onClick={startClose}
     >
       <button
         type="button"
-        onClick={onClose}
+        onClick={startClose}
         className="absolute top-4 right-4 w-10 h-10 rounded-full bg-[var(--text-primary)]/10 hover:bg-[var(--text-primary)]/20 text-[var(--text-primary)] flex items-center justify-center transition-colors"
       >
         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -133,9 +159,23 @@ function ImageLightbox({ src, onClose }) {
       <img
         src={src}
         alt="放大预览"
-        className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+        className={`max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl${isExiting ? ' lightbox-img-exit' : ''}`}
         onClick={(e) => e.stopPropagation()}
       />
+      {/* 灯箱退场动画：遮罩 opacity 1→0 + 图片 scale 1→0.97（对称逆向路径）
+          prefers-reduced-motion 已由 globals.css 全局降级 */}
+      <style>{`
+        .lightbox-exit {
+          opacity: 0 !important;
+          transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+        }
+        .lightbox-img-exit {
+          opacity: 0 !important;
+          transform: scale(0.97) !important;
+          transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1),
+                      transform 200ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+        }
+      `}</style>
     </div>
   );
 }
@@ -221,6 +261,12 @@ export default function MessageList() {
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
 
+  // 退场动画：正在播放退场动画的消息 id 集合。
+  // 删除消息时先加入 removingIds（触发 MessageBubble 的 emil-msg-exit 类），
+  // 动画结束后才真正调用 store.deleteMessages。
+  const [removingIds, setRemovingIds] = useState(new Set());
+  const removingTimersRef = useRef({});
+
   // 图片灯箱
   const [lightboxSrc, setLightboxSrc] = useState(null);
 
@@ -283,12 +329,40 @@ export default function MessageList() {
     setContextMenu(null);
   }, []);
 
-  // 右键 → 删除此消息
+  // 触发单条消息的退场动画，动画结束后真正删除（store.deleteMessages）。
+  const animateThenDelete = useCallback(
+    (ids) => {
+      if (!currentConversationId || !ids?.length) return;
+      // 已经在退场中的 id 跳过，防止重复触发
+      setRemovingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) next.add(id);
+        return next;
+      });
+      removingTimersRef.current = removingTimersRef.current || {};
+      ids.forEach((id) => {
+        if (removingTimersRef.current[id]) return;
+        removingTimersRef.current[id] = setTimeout(() => {
+          delete removingTimersRef.current[id];
+          setRemovingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+          deleteMessages(currentConversationId, [id]);
+        }, MSG_EXIT_DURATION);
+      });
+    },
+    [currentConversationId, deleteMessages]
+  );
+
+  // 右键 → 删除此消息（先播退场动画再删）
   const handleDeleteFromContext = useCallback(() => {
     if (!contextMenu || !currentConversationId) return;
-    deleteMessages(currentConversationId, [contextMenu.messageId]);
+    const mid = contextMenu.messageId;
     setContextMenu(null);
-  }, [contextMenu, currentConversationId, deleteMessages]);
+    animateThenDelete([mid]);
+  }, [contextMenu, currentConversationId, animateThenDelete]);
 
   // 右键 → 进入/退出多选模式
   const handleToggleSelectFromContext = useCallback(() => {
@@ -329,10 +403,20 @@ export default function MessageList() {
 
   const handleDeleteSelected = useCallback(() => {
     if (!currentConversationId || selectedIds.size === 0) return;
-    deleteMessages(currentConversationId, Array.from(selectedIds));
+    const ids = Array.from(selectedIds);
     setIsSelectMode(false);
     setSelectedIds(new Set());
-  }, [currentConversationId, selectedIds, deleteMessages]);
+    animateThenDelete(ids);
+  }, [currentConversationId, selectedIds, deleteMessages, animateThenDelete]);
+
+  // 卸载时清理所有退场定时器，避免 store.deleteMessages 在组件卸载后触发
+  useEffect(() => {
+    return () => {
+      const timers = removingTimersRef.current || {};
+      Object.values(timers).forEach((t) => clearTimeout(t));
+      removingTimersRef.current = {};
+    };
+  }, []);
 
   // ─── 渲染 ──────────────────────────────────────
 
@@ -368,7 +452,14 @@ export default function MessageList() {
       <div className="shrink-0 h-8 drag-region glass-medium" />
 
       {/* 对话头部 */}
-      <div className="shrink-0 px-6 py-4 border-b border-border-default glass-medium flex items-center justify-between">
+      {/* P1-1：硬边框 border-b → 底部内阴影渐隐，保留 glass-medium 顶部高光 */}
+      <div
+        className="shrink-0 px-6 py-4 glass-medium flex items-center justify-between"
+        style={{
+          boxShadow:
+            'inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -1px 0 rgba(255,255,255,0.04)',
+        }}
+      >
         <div>
           <h2 className="text-lg font-semibold text-text-primary">{getTitle()}</h2>
           {conversation?.type === 'group' && (
@@ -429,6 +520,7 @@ export default function MessageList() {
                 message={msg}
                 isSelectMode={isSelectMode}
                 isSelected={selectedIds.has(msg.id)}
+                isExiting={removingIds.has(msg.id)}
                 onToggleSelect={toggleSelectMessage}
                 onContextMenu={handleContextMenu}
                 onImageClick={setLightboxSrc}
@@ -478,11 +570,13 @@ export default function MessageList() {
           type="button"
           onClick={handleScrollToBottom}
           data-show={showScrollBtn ? 'true' : 'false'}
-          className="emil-scroll-btn sticky bottom-3 ml-auto flex items-center justify-center w-9 h-9 rounded-full"
+          className="emil-scroll-btn sticky bottom-3 ml-auto flex items-center justify-center w-9 h-9 rounded-full emil-pressable"
           style={{
             background: 'var(--bg-surface)',
             border: '1px solid var(--border-default)',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            // P1-8：单层阴影→双层 ambient(柔和扩散) + directional(偏移聚焦)
+            boxShadow:
+              '0 2px 8px rgba(0,0,0,0.15), 0 8px 24px rgba(0,0,0,0.25)',
             color: 'var(--text-secondary)',
           }}
           title="滚动到底部"
@@ -509,6 +603,9 @@ export default function MessageList() {
       {lightboxSrc && (
         <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
       )}
+
+      {/* 消息退场动画样式（局部，不污染全局 CSS） */}
+      <style>{MSG_EXIT_STYLE}</style>
     </div>
   );
 }

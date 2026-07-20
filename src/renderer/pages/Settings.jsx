@@ -61,7 +61,7 @@ function PermissionSwitch({ label, description, checked, onChange, disabled }) {
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={`
-          relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full
+          relative inline-flex h-[31px] w-[51px] flex-shrink-0 cursor-pointer rounded-full
           border border-transparent
           focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-bg-base
           ${checked ? 'bg-accent' : 'bg-border-strong'}
@@ -74,11 +74,11 @@ function PermissionSwitch({ label, description, checked, onChange, disabled }) {
         <span
           aria-hidden
           className={`
-            pointer-events-none absolute top-0.5 left-0.5 inline-block h-4 w-4 rounded-full bg-white
+            pointer-events-none absolute top-[2px] left-[2px] inline-block h-[27px] w-[27px] rounded-full bg-white
           `}
           style={{
-            // Emil: transform translateX 走 GPU；220ms ease-out
-            transform: checked ? 'translateX(16px)' : 'translateX(0)',
+            // Emil: transform translateX 走 GPU；220ms ease-out；位移=track-thumb=20px
+            transform: checked ? 'translateX(20px)' : 'translateX(0)',
             transition: 'transform 220ms cubic-bezier(0.23,1,0.32,1)',
             willChange: 'transform',
           }}

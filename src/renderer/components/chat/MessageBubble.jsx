@@ -231,7 +231,7 @@ function VoiceMessagePlayer({ attachment, isUser }) {
       <button
         type="button"
         onClick={togglePlay}
-        className="flex items-center gap-2.5 transition-colors"
+        className="flex items-center gap-2.5 transition-colors emil-pressable"
         style={{
           width: `${bubbleWidth}px`,
           borderRadius: 'var(--radius-md)',
@@ -420,10 +420,11 @@ function AgentMessageContent({ message }) {
               </div>
             )}
 
-            {/* 工具卡片组：液态玻璃容器（rgba 0.68 + backdrop-filter）+ 细边框 */}
+            {/* 工具卡片组：液态玻璃容器（rgba 0.68 + backdrop-filter）+ 细边框
+                P1-11：加 .glass-enter（blur+scale 同步 materialize 入场） */}
             {toolGroups[i] && (
               <div
-                className="space-y-1.5"
+                className="space-y-1.5 glass-enter"
                 style={{
                   padding: '10px 12px',
                   background: 'rgba(25, 26, 27, 0.68)',
@@ -481,7 +482,7 @@ function RoleBadge({ agent }) {
 // 单条消息气泡（支持选中、右键）
 // ─────────────────────────────────────────────────────────
 
-function MessageBubbleImpl({ message, isSelectMode, isSelected, onToggleSelect, onContextMenu, onImageClick }) {
+function MessageBubbleImpl({ message, isSelectMode, isSelected, isExiting, onToggleSelect, onContextMenu, onImageClick }) {
   const getAgent = useAgentStore((s) => s.getAgent);
   const bossConfig = useAgentStore((s) => s.bossConfig);
   const isUser = message.senderType === 'user';
@@ -518,7 +519,7 @@ function MessageBubbleImpl({ message, isSelectMode, isSelected, onToggleSelect, 
 
   return (
     <div
-      className={`flex gap-3 group relative emil-msg-enter ${isUser ? 'flex-row-reverse' : 'flex-row'} ${
+      className={`flex gap-3 group relative emil-msg-enter ${isExiting ? 'emil-msg-exit' : ''} ${isUser ? 'flex-row-reverse' : 'flex-row'} ${
         isSelectMode ? 'cursor-pointer' : ''
       }`}
       onContextMenu={handleContextMenu}
@@ -683,7 +684,8 @@ function messageBubbleAreEqual(prev, next) {
   return (
     prev.message === next.message &&
     prev.isSelectMode === next.isSelectMode &&
-    prev.isSelected === next.isSelected
+    prev.isSelected === next.isSelected &&
+    prev.isExiting === next.isExiting
   );
 }
 

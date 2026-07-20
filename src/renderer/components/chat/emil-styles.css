@@ -17,11 +17,18 @@
   --emil-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --emil-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --emil-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  /* CSS spring 近似（不引入 JS 动画库）
+     --emil-ease-spring：临界阻尼（damping≈1.0, response≈0.35），无 overshoot，
+         用于侧栏折叠等结构性位移——平滑收尾不弹。
+     --emil-ease-spring-momentum：轻欠阻尼（damping≈0.8），带微 overshoot，
+         用于 toggle thumb 等动量交互——释放后有"弹一下"的物理感。 */
+  --emil-ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --emil-ease-spring-momentum: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* ============ 侧栏折叠：width 用 drawer 曲线，280ms（这是 emil 允许的位移例外） ============ */
+/* ============ 侧栏折叠：width 用 spring 近似曲线，280ms（这是 emil 允许的位移例外） ============ */
 .emil-sidebar-collapse {
-  transition: width 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  transition: width 280ms var(--emil-ease-spring);
 }
 
 /* ============ 拖拽手柄 hover：accent 半透明 ============ */
@@ -36,13 +43,14 @@
   }
 }
 
-/* ============ 巡查开关：thumb 用 transform translateX 而非背景过渡 ============ */
+/* ============ 巡查开关：thumb 用 transform translateX 而非背景过渡
+   spring 近似：thumb 用 momentum 曲线（微 overshoot），track 用临界阻尼曲线 ============ */
 .emil-toggle-track {
-  transition: background-color 180ms var(--emil-ease-out);
+  transition: background-color 200ms var(--emil-ease-spring);
 }
 
 .emil-toggle-thumb {
-  transition: transform 200ms var(--emil-ease-out);
+  transition: transform 240ms var(--emil-ease-spring-momentum);
 }
 
 /* ============ 会话项入场（stagger 由 --emil-i 控制） ============ */

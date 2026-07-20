@@ -46,11 +46,12 @@
   --border-default: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
 
-  /* 圆角 */
+  /* 圆角（Apple 连续圆角梯度：4/8/12/16/20px） */
   --radius-sm: 4px;
-  --radius-md: 6px;    /* 按钮/输入 */
-  --radius-lg: 8px;    /* 卡片 */
-  --radius-xl: 12px;   /* 面板 */
+  --radius-md: 8px;     /* 按钮/输入 */
+  --radius-lg: 12px;    /* 卡片 */
+  --radius-xl: 16px;    /* 面板 */
+  --radius-2xl: 20px;   /* 大容器 */
   --radius-full: 9999px;
 
   /* 间距（保留通用阶梯；Emil 8px 网格） */
@@ -60,11 +61,17 @@
   --spacing-lg: 1.5rem;   /* 24px */
   --spacing-xl: 2rem;     /* 32px */
 
-  /* 阴影（极少使用，主要靠背景阶梯） */
+  /* 阴影（极少使用，主要靠背景阶梯）
+     Apple §12 R3：阴影分 ambient（柔和大范围）+ directional（聚焦偏移）两层。
+     --shadow-dialog 保留为组合值供旧调用；新代码用 --shadow-ambient + --shadow-directional。 */
   --shadow-elevated: rgba(0, 0, 0, 0.4) 0px 2px 4px;
-  --shadow-dialog: 0 4px 12px rgba(0, 0, 0, 0.5),
-    0 16px 48px rgba(0, 0, 0, 0.4),
-    0 2px 6px rgba(0, 0, 0, 0.3);
+  /* ambient：近黑柔和扩散，模拟环境光反弹 */
+  --shadow-ambient: 0 4px 12px rgba(0, 0, 0, 0.12);
+  /* directional：偏移聚焦，模拟主光源投射 */
+  --shadow-directional: 0 12px 32px rgba(0, 0, 0, 0.25);
+  /* 组合（向后兼容旧 .shadow-dialog 调用） */
+  --shadow-dialog: var(--shadow-ambient), var(--shadow-directional),
+    0 2px 6px rgba(0, 0, 0, 0.18);
 
   /* ===== Emil 缓动曲线（自定义，非默认 ease） ===== */
   /* 强 ease-out：UI 入场，立刻反馈 */
@@ -86,11 +93,12 @@
   --transition-normal: 200ms cubic-bezier(0.23, 1, 0.32, 1);
   --transition-slow: 280ms cubic-bezier(0.23, 1, 0.32, 1);
 
-  /* 字体 */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  /* 字体：系统字体优先（Apple §15：默认用平台系统字体，自定义需理由）
+     macOS 上 -apple-system = SF Pro，获得系统级光学尺寸与可读性调优 */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco,
-    Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
 }
 
 /* ============ 浅色主题（可选切换：.light 或 [data-theme='light']） ============ */
@@ -122,8 +130,10 @@
   --border-strong: rgba(0, 0, 0, 0.14);
 
   --shadow-elevated: rgba(0, 0, 0, 0.08) 0px 2px 4px;
-  --shadow-dialog: 0 4px 12px rgba(0, 0, 0, 0.08),
-    0 16px 48px rgba(0, 0, 0, 0.06),
+  /* 浅色阴影更淡，ambient/directional 分离 */
+  --shadow-ambient: 0 4px 12px rgba(0, 0, 0, 0.05);
+  --shadow-directional: 0 12px 32px rgba(0, 0, 0, 0.10);
+  --shadow-dialog: var(--shadow-ambient), var(--shadow-directional),
     0 2px 6px rgba(0, 0, 0, 0.04);
 }
 
@@ -134,6 +144,8 @@
     /* Inter 字体特性：cv01 替代字形、ss03 小写 a 优化 */
     font-feature-settings: 'cv01', 'ss03';
     font-variation-settings: normal;
+    /* 启用光学尺寸：Inter/SF Pro 在不同字号下自动调整字干粗细与字距 */
+    font-optical-sizing: auto;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -153,18 +165,21 @@
     border-color: var(--border-default);
   }
 
-  /* 标题负字距：大标题更紧凑 */
+  /* 标题负字距：大标题更紧凑；行高随尺寸反向收紧（Apple §15） */
   h1 {
     font-weight: 590;
     letter-spacing: -0.022em; /* ~48px → -1.056px */
+    line-height: 1.05;        /* 大标题紧行高 */
   }
   h2 {
     font-weight: 590;
     letter-spacing: -0.022em;
+    line-height: 1.1;         /* 次大标题 */
   }
   h3 {
     font-weight: 590;
     letter-spacing: -0.012em; /* ~24px → -0.288px */
+    line-height: 1.2;         /* 中标题 */
   }
 
   /* 标题字重统一为 590（标题档），中标题 510 */
@@ -368,9 +383,11 @@
     cursor: not-allowed;
   }
 
-  /* 面板背景（侧栏/顶层容器）—— 液态玻璃材质 */
+  /* 面板背景（侧栏/顶层容器）—— 液态玻璃材质
+     暗色玻璃不透明度 0.55（Apple 暗色玻璃基准 ~0.5-0.6），
+     让下方内容适度穿透，体现真实材质层次。 */
   .panel {
-    background-color: rgba(15, 16, 17, 0.72);
+    background-color: rgba(15, 16, 17, 0.55);
     backdrop-filter: blur(24px) saturate(180%);
     -webkit-backdrop-filter: blur(24px) saturate(180%);
     border: 1px solid var(--border-default);
@@ -421,13 +438,19 @@
     border: 1px solid var(--border-subtle);
   }
   /* 顶部边缘高光：模拟光线打在玻璃边缘
-     Apple §12 指引值为 0.4（实色玻璃），但 SoloForge 玻璃本身半透明，
-     0.18 是实测后能压住内容噪声又不显塑料感的最佳点。 */
+     Apple §12 指引 0.4（实色玻璃）；暗色半透明玻璃用 0.25 平衡可读性与材质感，
+     浅色分支见下方 .light .glass-* 规则（0.4-0.6）。 */
   .glass-heavy,
   .glass-medium,
   .glass-light {
-    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.18),
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.25),
       var(--shadow-elevated);
+  }
+  /* Vibrancy 文字（Apple §12 C2）：玻璃层文字需更高对比度、略重字重、字距微增。
+     用法：在 glass-heavy/medium/light 容器内的文字加 .glass-text。 */
+  .glass-text {
+    font-weight: 510;
+    letter-spacing: 0.01em;
   }
   /* 玻璃入场：blur+scale 一起动画（"materialize" 而非 fade） */
   .glass-enter {
@@ -486,6 +509,30 @@
     }
     .surface {
       background-color: var(--bg-surface);
+    }
+  }
+
+  /* 对比度降级（Apple §14 D3）：用户偏好增加对比度时，
+     玻璃变近实色 + 对比边框，提升文字可读性。 */
+  @media (prefers-contrast: more) {
+    .glass-heavy,
+    .glass-medium,
+    .glass-light {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+    }
+    .panel {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+    }
+    .surface {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+    }
+    /* 文字颜色强制拉满，避免半透明导致低对比 */
+    .glass-text {
+      font-weight: 590;
+      color: var(--text-primary);
     }
   }
 
