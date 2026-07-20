@@ -413,7 +413,7 @@ class ChatManager {
         const mm = getMemoryManager();
         if (mm && mm._initialized) {
           try {
-            const memoryContext = mm.getContextForAgent(agentId, message, conversationId);
+            const memoryContext = await mm.getContextForAgent(agentId, message, conversationId);
             if (memoryContext) {
               contextualMessage = `${memoryContext}\n\n---\n\n${contextualMessage}`;
             }
@@ -564,7 +564,7 @@ class ChatManager {
         const mm = getMemoryManager();
         if (mm && mm._initialized) {
           try {
-            const memoryContext = mm.getContextForAgent(agentId, message, conversationId);
+            const memoryContext = await mm.getContextForAgent(agentId, message, conversationId);
             if (memoryContext) {
               contextualMessage = `${memoryContext}\n\n---\n\n${contextualMessage}`;
             }

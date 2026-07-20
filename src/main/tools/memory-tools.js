@@ -51,7 +51,7 @@ const memoryRecallTool = {
     const mm = getMemoryManager();
     const safeLimit = Math.min(Math.max(1, limit), 20);
 
-    const results = mm.recall(query, {
+    const results = await mm.recall(query, {
       agentId: context?.agentId,
       limit: safeLimit,
     });
@@ -362,7 +362,7 @@ const memoryProjectContextTool = {
       results = mm.search({ type: 'project_context', tags: [project], limit: 20 });
       // 如果标签没有匹配到，尝试关键词检索
       if (results.length === 0) {
-        results = mm.recall(project, { type: 'project_context', limit: 10 });
+        results = await mm.recall(project, { type: 'project_context', limit: 10 });
       }
     } else {
       results = mm.search({ type: 'project_context', limit: 20 });

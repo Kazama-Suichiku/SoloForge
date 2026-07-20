@@ -36,7 +36,7 @@ function registerMemoryIPCHandlers(memoryManager) {
 
       let results;
       if (query) {
-        results = memoryManager.recall(query, { agentId, limit, type });
+        results = await memoryManager.recall(query, { agentId, limit, type });
       } else {
         const tagArray = tags ? (Array.isArray(tags) ? tags : tags.split(',').map((t) => t.trim())) : undefined;
         results = memoryManager.search({ tags: tagArray, type, agentId, limit });

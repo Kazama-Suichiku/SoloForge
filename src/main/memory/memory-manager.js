@@ -191,14 +191,15 @@ class MemoryManager {
 
   /**
    * 按语义检索相关记忆
+   * 阶段一C：底层 retriever.recall 已改为 async（混合检索：向量+BM25+tag→RRF）
    * @param {string} query - 查询文本
    * @param {Object} [options]
    * @param {string} [options.agentId] - Agent ID (用于范围过滤)
    * @param {number} [options.limit] - 返回数量
    * @param {string} [options.type] - 限定类型
-   * @returns {Object[]} 检索到的记忆条目
+   * @returns {Promise<Object[]>} 检索到的记忆条目
    */
-  recall(query, options = {}) {
+  async recall(query, options = {}) {
     if (!this.retriever) {
       logger.warn('记忆检索器未初始化');
       return [];
@@ -209,12 +210,16 @@ class MemoryManager {
   /**
    * 获取 Agent 上下文注入文本
    * 在 ChatManager 中调用，将相关记忆格式化后注入到用户消息前
+   *
+   * 阶段一C：底层 getContextForAgent 已改为 async（依赖 async recall），
+   * 调用方需 await。
+   *
    * @param {string} agentId
    * @param {string} message - 当前用户消息
    * @param {string} [conversationId]
-   * @returns {string|null} 格式化的记忆上下文文本，或 null
+   * @returns {Promise<string|null>} 格式化的记忆上下文文本，或 null
    */
-  getContextForAgent(agentId, message, conversationId) {
+  async getContextForAgent(agentId, message, conversationId) {
     if (!this.retriever) return null;
     return this.retriever.getContextForAgent(agentId, message, conversationId);
   }

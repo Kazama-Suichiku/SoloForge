@@ -1,8 +1,26 @@
 /**
  * SoloForge - 记忆检索器
- * 根据当前上下文检索最相关的记忆，使用加权混合排序
+ *
+ * 阶段一C 重构：从纯关键词 n-gram 检索升级为混合检索
+ *   路径 A：query → embedding → vectorIndex.search(k=50) → 语义召回
+ *   路径 B：query → FTS5 BM25 → top-50 → 关键词召回
+ *   路径 C：query keywords → memory_tags 精确匹配 → tag 召回
+ *   融合：RRF（Reciprocal Rank Fusion, k=60）
+ *   Rerank：保留原 importance/frequency/recency 权重作为 RRF 后排序微调
+ *
+ * 降级策略（任一路径失败不阻塞）：
+ *   - embedding/vector-index 模块不存在或 embed 失败 → 跳过向量路径
+ *   - FTS5 不可用或查询无命中 → 跳过 FTS 路径
+ *   - tag 无匹配 → 跳过 tag 路径
+ *   - 三路全空且未指定 type → 回退到 getRecent
+ *   - 三路全空且指定 type → 返回空数组（不崩）
+ *
+ * recall() 已改为 async，调用方需 await。
+ *
  * @module memory/memory-retriever
  */
+
+'use strict';
 
 const { logger } = require('../utils/logger');
 const { memoryStore } = require('./memory-store');
@@ -13,7 +31,7 @@ const {
   STOP_WORDS,
 } = require('./memory-types');
 
-// 检索权重配置
+// 检索权重配置（用于 RRF 后 rerank 微调，保留原语义）
 const WEIGHTS = {
   KEYWORD: 0.40,    // 关键词匹配权重
   RECENCY: 0.20,    // 时间衰减权重
@@ -24,6 +42,13 @@ const WEIGHTS = {
 // 时间衰减系数（用于 recencyScore）
 const RECENCY_LAMBDA = 0.05;
 
+// 每路召回的候选数量上限
+const RECALL_K = 50;
+// RRF（Reciprocal Rank Fusion）常数，越大对排名靠后项越平滑
+const RRF_K = 60;
+// RRF 微调项在最终排序中的权重（其余靠 RRF 主分数）
+const RERANK_WEIGHT = 0.15;
+
 /**
  * 记忆检索器
  */
@@ -31,7 +56,7 @@ class MemoryRetriever {
   constructor() {}
 
   // ═══════════════════════════════════════════════════════════
-  // 关键词提取
+  // 关键词提取（保留，供 tag 路径使用）
   // ═══════════════════════════════════════════════════════════
 
   /**
@@ -80,7 +105,7 @@ class MemoryRetriever {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 评分计算
+  // 评分计算（保留，用于 RRF 后 rerank 微调）
   // ═══════════════════════════════════════════════════════════
 
   /**
@@ -143,7 +168,7 @@ class MemoryRetriever {
   }
 
   /**
-   * 计算记忆的综合相关性分数
+   * 计算记忆的综合相关性分数（RRF 后 rerank 微调用）
    * @param {string[]} queryKeywords
    * @param {Object} indexEntry
    * @param {number} now
@@ -162,68 +187,197 @@ class MemoryRetriever {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 检索主入口
+  // 混合检索主入口
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 按语义检索相关记忆
+   * 按语义检索相关记忆（向量 + BM25 + tag → RRF 融合）
+   *
+   * 三路召回 + RRF 融合 + rerank 微调 + agent/scope/type 过滤。
+   * 降级：任一路径失败均不阻塞；embedding/vector 模块不存在时自动跳过。
+   *
    * @param {string} query - 查询文本
    * @param {Object} [options]
-   * @param {string} [options.agentId] - Agent ID
+   * @param {string} [options.agentId] - Agent ID（用于范围过滤）
    * @param {number} [options.limit] - 返回数量
    * @param {string} [options.type] - 限定类型
-   * @returns {Object[]} 检索到的索引条目（带 score 字段）
+   * @returns {Promise<Object[]>} 检索到的记忆条目（带 score 字段）
    */
-  recall(query, options = {}) {
+  async recall(query, options = {}) {
     const { agentId, limit = MEMORY_CONFIG.DEFAULT_RECALL_LIMIT, type } = options;
     const now = Date.now();
 
-    // 1. 提取查询关键词
+    // 提取关键词（tag 路径 + rerank 用）
     const keywords = this.extractKeywords(query);
-    if (keywords.length === 0 && !type) {
-      // 没有有效关键词且没有指定类型，返回最近的记忆
+
+    // 空查询且无 type 约束 → 回退到最近记忆（保持原行为）
+    if (!query && !type) {
       return memoryStore.getRecent(limit, agentId ? { agentId } : {});
     }
-
-    // 2. 获取候选记忆
-    let candidates;
-    if (agentId) {
-      candidates = memoryStore.queryForAgent(agentId);
-    } else {
-      candidates = memoryStore.query({ includeArchived: false });
+    if (!query && type) {
+      // 有 type 但无 query：无法走三路召回，返回该类型最近记忆
+      const all = memoryStore.query({ type, agentId, includeArchived: false });
+      all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      return all.slice(0, limit);
     }
 
-    // 按类型过滤
-    if (type) {
-      candidates = candidates.filter((c) => c.type === type);
+    // ─── 路径 A：向量语义召回 ─────────────────────────────────
+    let vectorResults = [];
+    try {
+      // 延迟 require：embedding-service / vector-index 在阶段 1-B 落地
+      // 1-B 导出独立函数（非单例对象），直接用 vectorMod.search
+      const embeddingMod = require('./embedding-service');
+      const vectorMod = require('./vector-index');
+      const embed = embeddingMod.embed;
+      const vectorSearch = vectorMod.search;
+      if (typeof embed === 'function' && typeof vectorSearch === 'function') {
+        const queryEmb = await embed(query);
+        if (queryEmb && Array.isArray(queryEmb) && queryEmb.length > 0) {
+          const hits = vectorSearch(queryEmb, RECALL_K);
+          if (Array.isArray(hits)) {
+            vectorResults = hits
+              .map((h) => ({
+                id: h.id,
+                score: typeof h.distance === 'number' ? (1 - h.distance) : (h.score || 0),
+                source: 'vector',
+              }))
+              .filter((h) => h.id);
+          }
+        }
+      }
+    } catch (e) {
+      logger.debug('向量召回路径跳过（降级）', { reason: e.message });
     }
 
-    // 3. 计算每条候选的综合分数
-    const scored = candidates.map((entry) => ({
-      ...entry,
-      score: this.calculateScore(keywords, entry, now),
-    }));
-
-    // 4. 按分数降序排列
-    scored.sort((a, b) => b.score - a.score);
-
-    // 5. 取 Top-K
-    const topK = scored.slice(0, limit);
-
-    // 6. 批量强化（更新访问记录）
-    if (topK.length > 0) {
-      memoryDecay.batchReinforce(topK.map((e) => e.id));
+    // ─── 路径 B：FTS5 BM25 召回 ───────────────────────────────
+    let ftsResults = [];
+    try {
+      const ftsOpts = { limit: RECALL_K };
+      // 不在此处按 agent/type 过滤，RRF 后统一过滤，避免漏召
+      const rows = memoryStore.searchFTS(query, ftsOpts);
+      if (Array.isArray(rows)) {
+        ftsResults = rows
+          .map((r) => ({
+            id: r.id,
+            // searchFTS 已按 BM25 rank 排序，但返回对象无 rank 字段；
+            // RRF 用数组下标作为 rank 即可，score 仅作调试标记
+            score: typeof r.rank === 'number' ? r.rank : 0,
+            source: 'fts',
+          }))
+          .filter((r) => r.id);
+      }
+    } catch (e) {
+      logger.debug('FTS 召回路径跳过（降级）', { reason: e.message });
     }
 
-    logger.debug('记忆检索完成', {
-      query: query.slice(0, 50),
-      keywords: keywords.slice(0, 10),
-      candidates: candidates.length,
-      returned: topK.length,
-      topScore: topK[0]?.score?.toFixed(3),
+    // ─── 路径 C：tag 精确匹配召回 ────────────────────────────
+    let tagResults = [];
+    if (keywords.length > 0) {
+      try {
+        // searchByTags 不支持 limit 参数，slice 截取
+        const rows = memoryStore.searchByTags(keywords, { includeArchived: false });
+        if (Array.isArray(rows)) {
+          tagResults = rows
+            .slice(0, RECALL_K)
+            .map((r) => ({ id: r.id, score: 0.5, source: 'tag' }))
+            .filter((r) => r.id);
+        }
+      } catch (e) {
+        logger.debug('tag 召回路径跳过（降级）', { reason: e.message });
+      }
+    }
+
+    // ─── RRF 融合 ────────────────────────────────────────────
+    const rrf = (results, k = RRF_K) => {
+      const scores = new Map();
+      for (let i = 0; i < results.length; i++) {
+        const rank = i + 1; // 1-indexed rank
+        const contribution = 1 / (k + rank);
+        const id = results[i].id;
+        scores.set(id, (scores.get(id) || 0) + contribution);
+      }
+      return scores;
+    };
+
+    const vectorScores = rrf(vectorResults);
+    const ftsScores = rrf(ftsResults);
+    const tagScores = rrf(tagResults);
+
+    // 合并所有 id
+    const allIds = new Set([
+      ...vectorScores.keys(),
+      ...ftsScores.keys(),
+      ...tagScores.keys(),
+    ]);
+
+    const fused = [];
+    for (const id of allIds) {
+      const totalScore =
+        (vectorScores.get(id) || 0) +
+        (ftsScores.get(id) || 0) +
+        (tagScores.get(id) || 0);
+      fused.push({ id, score: totalScore });
+    }
+
+    // ─── agent/scope/type 过滤 + 剔除 archived/superseded ───
+    const filtered = fused.filter((item) => {
+      const entry = memoryStore.get(item.id);
+      if (!entry) return false;
+      if (type && entry.type !== type) return false;
+      if (agentId) {
+        // agent 专属必须归属本人；shared/user 全局可见
+        if (entry.scope === 'agent' && entry.agentId !== agentId) return false;
+        // 其它 scope（如纯私有）非 agent 范围则排除
+        if (entry.scope !== 'shared' && entry.scope !== 'user' && entry.scope !== 'agent') return false;
+      }
+      if (entry.archived || entry.supersededBy) return false;
+      return true;
     });
 
-    return topK;
+    // ─── Rerank：用 importance/frequency/recency 微调 ───────
+    // 在 RRF 主分数基础上叠加一个小的 rerank 项，保留原排序信号
+    const reranked = filtered.map((item) => {
+      const entry = memoryStore.get(item.id);
+      const rerank = entry ? this.calculateScore(keywords, entry, now) : 0;
+      return { ...item, rrfScore: item.score, finalScore: item.score + RERANK_WEIGHT * rerank };
+    });
+
+    // 按 finalScore 降序
+    reranked.sort((a, b) => b.finalScore - a.finalScore);
+
+    // 截取 Top-N
+    const topN = reranked.slice(0, limit);
+
+    // ─── 取完整 entry + 回填 score ───────────────────────────
+    const result = [];
+    for (const item of topN) {
+      const entry = memoryStore.get(item.id);
+      if (!entry) continue;
+      entry.score = item.finalScore;
+      result.push(entry);
+    }
+
+    // ─── 批量强化（更新访问记录）─────────────────────────────
+    if (result.length > 0) {
+      try {
+        memoryDecay.batchReinforce(result.map((e) => e.id));
+      } catch (e) {
+        logger.debug('batchReinforce 失败（不影响检索）', { reason: e.message });
+      }
+    }
+
+    logger.debug('混合检索完成', {
+      query: query.slice(0, 50),
+      keywords: keywords.slice(0, 10),
+      vectorHits: vectorResults.length,
+      ftsHits: ftsResults.length,
+      tagHits: tagResults.length,
+      fused: fused.length,
+      returned: result.length,
+      topScore: result[0]?.score?.toFixed(3),
+    });
+
+    return result;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -233,14 +387,20 @@ class MemoryRetriever {
   /**
    * 获取 Agent 上下文注入文本
    * 将检索到的记忆格式化为可注入到对话中的文本
+   *
+   * recall() 已改为 async，本方法相应改为 async，调用方需 await。
+   *
    * @param {string} agentId
    * @param {string} message - 当前用户消息
    * @param {string} [conversationId]
-   * @returns {string|null}
+   * @returns {Promise<string|null>}
    */
-  getContextForAgent(agentId, message, conversationId) {
-    // 检索相关记忆
-    const memories = this.recall(message, { agentId, limit: MEMORY_CONFIG.DEFAULT_RECALL_LIMIT });
+  async getContextForAgent(agentId, message, conversationId) {
+    // 检索相关记忆（await）
+    const memories = await this.recall(message, {
+      agentId,
+      limit: MEMORY_CONFIG.DEFAULT_RECALL_LIMIT,
+    });
 
     if (memories.length === 0) return null;
 

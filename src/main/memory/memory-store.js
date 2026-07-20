@@ -1,287 +1,219 @@
 /**
- * SoloForge - 记忆存储层
- * JSON 文件读写、索引管理、防抖写入、按类型分文件存储
+ * SoloForge - 记忆存储层（SQLite 后端）
+ *
+ * 阶段一A 重构：底层持久化从 "JSON 文件 + 内存 Map" 切换到 SQLite
+ * （better-sqlite3 WAL 模式，实现见 sqlite-store.js）。本文件保留为
+ * 对外门面，所有读写委托 sqlite-store，保持其他模块（memory-manager /
+ * memory-retriever / memory-extractor / memory-summarizer / memory-decay
+ * / memory-ipc-handlers / company-switch 等）依赖的接口完全不变。
+ *
+ * 兼容性要点：
+ * - 保留 this.index (Map<string, IndexEntry>)：memory-decay.js 直接读它做
+ *   批量强化（batchReinforce）。改为从 SQLite 查询构建的内存索引缓存，
+ *   add/update/remove/delete 后同步刷新，避免每次都走 DB。
+ * - add/get/query/searchByTags/update/remove/getAll 等返回完整 MemoryEntry
+ *   （与原 JSON 存储结构一致），不再是只有索引条目的子集。
+ * - saveToDisk / saveToDiskSync / flush / clearCache 改为 no-op 或 WAL
+ *   checkpoint：SQLite 自动持久化，无需防抖刷盘。
+ * - loadFromDisk → sqlite-store.loadFromDisk()（打开库 + 建表）。
+ * - reinitialize → sqlite-store.reinitialize()（切公司时关闭旧库开新库）。
+ * - 数据迁移：首次加载时，若 SQLite 库为空但 JSON 文件存在，从 JSON 读全部
+ *   记忆条目批量 INSERT 到 SQLite（迁移后不删 JSON，留作备份）。
+ *
  * @module memory/memory-store
  */
+
+'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 const { dataPath } = require('../account/data-path');
-const {
-  MEMORY_CONFIG,
-  MEMORY_TYPES,
-  TYPE_TO_FILE,
-  AGENT_TYPES,
-  createIndexEntry,
-} = require('./memory-types');
+const { createIndexEntry } = require('./memory-types');
+const { sqliteStore } = require('./sqlite-store');
+// 阶段 1-B：embedding 服务 + 向量索引
+const embeddingService = require('./embedding-service');
+const vectorIndex = require('./vector-index');
 
+// ─── JSON 遗留目录/文件路径（仅迁移用）─────────────────────────
 function getMemoryDir() {
   return path.join(dataPath.getBasePath(), 'memory');
 }
 
-function getIndexPath() {
-  return path.join(getMemoryDir(), MEMORY_CONFIG.INDEX_FILE);
-}
-
 /**
- * 记忆存储管理器
+ * 记忆存储管理器（SQLite 后端）
  */
 class MemoryStore {
   constructor() {
     /**
-     * 内存索引 — 启动时加载，查询不走磁盘
+     * 内存索引缓存 — 从 SQLite 构建，查询时用作快速缓存
+     * memory-decay.js 的 batchReinforce 直接读此 Map。
      * key: memoryId, value: IndexEntry
      * @type {Map<string, Object>}
      */
     this.index = new Map();
 
-    /**
-     * 文件内容缓存 — 按文件路径缓存，避免重复读取
-     * key: 相对路径, value: { entries: Object[], dirty: boolean }
-     * @type {Map<string, { entries: Object[], dirty: boolean }>}
-     */
-    this.fileCache = new Map();
-
-    /**
-     * 防抖定时器 — 按文件路径独立防抖
-     * @type {Map<string, ReturnType<typeof setTimeout>>}
-     */
-    this.debounceTimers = new Map();
-
-    /** 索引防抖定时器 */
-    this._indexDebounceTimer = null;
-
-    this._ensureDirectories();
-    this._loadIndex();
+    this._loaded = false;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 目录初始化
+  // 加载与迁移
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 确保所有必要的目录存在
+   * 从磁盘加载：打开 SQLite 库 + 建表 + 数据迁移 + 构建内存索引 + 重建向量索引
    */
-  _ensureDirectories() {
-    const memoryDir = getMemoryDir();
-    const dirs = [
-      memoryDir,
-      path.join(memoryDir, 'short-term'),
-      path.join(memoryDir, 'long-term'),
-      path.join(memoryDir, 'shared'),
-      path.join(memoryDir, 'agents'),
-      path.join(memoryDir, 'user'),
-    ];
+  _load() {
+    if (this._loaded) return;
+    // 1. 打开 SQLite（建表）
+    sqliteStore.loadFromDisk();
 
-    for (const dir of dirs) {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-    }
-  }
+    // 2. 首次迁移：如果 SQLite 空但 JSON 文件存在，从 JSON 批量导入
+    this._migrateFromJsonIfNeeded();
 
-  // ═══════════════════════════════════════════════════════════
-  // 索引管理
-  // ═══════════════════════════════════════════════════════════
+    // 3. 构建内存索引缓存
+    this._rebuildIndex();
 
-  /**
-   * 从磁盘加载索引到内存
-   */
-  _loadIndex() {
+    // 4. 重建 HNSW 向量索引（从 SQLite embedding BLOB 加载）
+    //    失败不影响主流程，后续靠 FTS5 检索
     try {
-      const indexPath = getIndexPath();
-      if (fs.existsSync(indexPath)) {
-        const raw = fs.readFileSync(indexPath, 'utf-8');
-        // 空文件或纯空白（如首次初始化瞬间写入中断）按空索引处理，避免 JSON.parse('') 报错
-        if (!raw || raw.trim().length === 0) {
-          logger.info('记忆索引文件为空，使用空索引');
-          return;
-        }
-        const data = JSON.parse(raw);
-        if (Array.isArray(data)) {
-          for (const entry of data) {
-            this.index.set(entry.id, entry);
-          }
-        } else if (data && typeof data === 'object') {
-          // 兼容对象/Map 序列化格式（{id: entry} 或数字键），统一按 values 载入
-          for (const entry of Object.values(data)) {
-            if (entry && entry.id) this.index.set(entry.id, entry);
-          }
-        }
-        logger.info('记忆索引已加载', { count: this.index.size });
-      } else {
-        logger.info('记忆索引文件不存在，使用空索引');
-      }
-    } catch (error) {
-      logger.error('加载记忆索引失败', error);
-      this.index.clear();
+      this.rebuildVectorIndex();
+    } catch (e) {
+      logger.warn('启动时重建向量索引失败（继续，降级 FTS5）', { error: e.message });
     }
+
+    this._loaded = true;
+    logger.info('记忆存储已加载 (SQLite)', { count: this.index.size });
   }
 
   /**
-   * 将索引保存到磁盘（防抖）
+   * 从 JSON 文件迁移到 SQLite（仅首次执行）
+   * 条件：SQLite 库为空 AND JSON memory 目录存在且有数据
+   * 迁移后不删 JSON 文件（留作备份）
+   * @private
    */
-  _saveIndex() {
-    if (this._indexDebounceTimer) {
-      clearTimeout(this._indexDebounceTimer);
-    }
-    this._indexDebounceTimer = setTimeout(() => {
-      this._flushIndex();
-    }, MEMORY_CONFIG.DEBOUNCE_MS);
-  }
-
-  /**
-   * 立即将索引写入磁盘（异步）
-   */
-  _flushIndex() {
-    const entries = Array.from(this.index.values());
-    this._indexDebounceTimer = null;
-
-    // 使用异步写入，不阻塞主进程
-    fs.writeFile(getIndexPath(), JSON.stringify(entries, null, 2), 'utf-8', (err) => {
-      if (err) {
-        logger.error('保存记忆索引失败', err);
-      } else {
-        logger.debug('记忆索引已保存', { count: entries.length });
-      }
-    });
-  }
-
-  /**
-   * 同步刷盘（仅用于应用退出前）
-   */
-  _flushIndexSync() {
+  _migrateFromJsonIfNeeded() {
     try {
-      const entries = Array.from(this.index.values());
-      fs.writeFileSync(getIndexPath(), JSON.stringify(entries, null, 2), 'utf-8');
-      logger.debug('记忆索引已同步保存', { count: entries.length });
+      const count = sqliteStore.getStats().totalMemories;
+      if (count > 0) return; // SQLite 已有数据，无需迁移
+
+      const memoryDir = getMemoryDir();
+      if (!fs.existsSync(memoryDir)) return;
+
+      const entries = this._readAllJsonEntries(memoryDir);
+      if (entries.length === 0) return;
+
+      logger.info('开始从 JSON 迁移记忆到 SQLite', { count: entries.length });
+
+      let migrated = 0;
+      let errors = 0;
+      for (const entry of entries) {
+        if (!entry || !entry.id) continue;
+        try {
+          const r = sqliteStore.add(entry);
+          if (r.success) migrated++;
+          else errors++;
+        } catch (e) {
+          errors++;
+          logger.warn('迁移单条记忆失败', { id: entry.id, error: e.message });
+        }
+      }
+
+      logger.info('JSON → SQLite 迁移完成', {
+        migrated,
+        errors,
+        total: entries.length,
+      });
     } catch (error) {
-      logger.error('同步保存记忆索引失败', error);
+      logger.error('JSON → SQLite 迁移失败（继续以空库运行）', error);
     }
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // 文件路径解析
-  // ═══════════════════════════════════════════════════════════
-
   /**
-   * 根据记忆类型和 agentId 获取存储文件的相对路径
-   * @param {string} type - 记忆类型
-   * @param {string|null} agentId - Agent ID
-   * @returns {string} 相对路径
-   */
-  _getRelativePath(type, agentId) {
-    if (AGENT_TYPES.includes(type) && agentId) {
-      return `agents/${agentId}.json`;
-    }
-    return TYPE_TO_FILE[type] || `long-term/${type}.json`;
-  }
-
-  /**
-   * 获取绝对文件路径
-   * @param {string} relativePath
-   * @returns {string}
-   */
-  _getAbsolutePath(relativePath) {
-    return path.join(getMemoryDir(), relativePath);
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // 文件读写 (带缓存)
-  // ═══════════════════════════════════════════════════════════
-
-  /**
-   * 读取指定文件的条目列表（优先使用缓存）
-   * @param {string} relativePath
+   * 扫描 JSON memory 目录，读出全部记忆条目
+   * 遍历 short-term/ long-term/ shared/ user/ agents/ 子目录及 TYPE_TO_FILE 映射
+   * @param {string} memoryDir
    * @returns {Object[]}
+   * @private
    */
-  _readFile(relativePath) {
-    // 先检查缓存
-    if (this.fileCache.has(relativePath)) {
-      return this.fileCache.get(relativePath).entries;
-    }
+  _readAllJsonEntries(memoryDir) {
+    const entries = [];
+    const seen = new Set();
 
-    // 从磁盘加载
-    const absPath = this._getAbsolutePath(relativePath);
-    let entries = [];
-
-    try {
-      if (fs.existsSync(absPath)) {
-        const content = fs.readFileSync(absPath, 'utf-8');
-        if (content && content.trim()) {
-          entries = JSON.parse(content);
-          if (!Array.isArray(entries)) {
-            entries = [];
+    const tryReadFile = (absPath) => {
+      try {
+        if (!fs.existsSync(absPath)) return;
+        const raw = fs.readFileSync(absPath, 'utf-8');
+        if (!raw || !raw.trim()) return;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return;
+        for (const e of arr) {
+          if (e && e.id && !seen.has(e.id)) {
+            seen.add(e.id);
+            entries.push(e);
           }
         }
+      } catch (e) {
+        logger.warn('迁移时读取 JSON 失败', { path: absPath, error: e.message });
       }
-    } catch (error) {
-      logger.error(`读取记忆文件失败: ${relativePath}`, error);
-      entries = [];
+    };
+
+    // 按 TYPE_TO_FILE 映射读
+    for (const relPath of Object.values(TYPE_TO_FILE)) {
+      tryReadFile(path.join(memoryDir, relPath));
     }
 
-    // 放入缓存
-    this.fileCache.set(relativePath, { entries, dirty: false });
+    // 遍历 agents/ 子目录（动态 agentId 文件）
+    const agentsDir = path.join(memoryDir, 'agents');
+    if (fs.existsSync(agentsDir)) {
+      for (const name of fs.readdirSync(agentsDir)) {
+        if (name.endsWith('.json')) {
+          tryReadFile(path.join(agentsDir, name));
+        }
+      }
+    }
+
+    // 兜底：遍历所有子目录里的 .json（捕获未在映射中的文件）
+    for (const sub of ['short-term', 'long-term', 'shared', 'user']) {
+      const subDir = path.join(memoryDir, sub);
+      if (!fs.existsSync(subDir)) continue;
+      for (const name of fs.readdirSync(subDir)) {
+        if (name.endsWith('.json')) {
+          tryReadFile(path.join(subDir, name));
+        }
+      }
+    }
+
     return entries;
   }
 
   /**
-   * 标记文件为脏（需要写入磁盘），并触发防抖写入
-   * @param {string} relativePath
+   * 从 SQLite 重建内存索引缓存
+   * @private
    */
-  _markDirty(relativePath) {
-    const cache = this.fileCache.get(relativePath);
-    if (cache) {
-      cache.dirty = true;
+  _rebuildIndex() {
+    this.index.clear();
+    try {
+      const all = sqliteStore.getAll();
+      for (const entry of all) {
+        this.index.set(entry.id, createIndexEntry(entry));
+      }
+    } catch (error) {
+      logger.error('重建内存索引失败', error);
     }
-
-    // 防抖写入
-    if (this.debounceTimers.has(relativePath)) {
-      clearTimeout(this.debounceTimers.get(relativePath));
-    }
-
-    this.debounceTimers.set(relativePath, setTimeout(() => {
-      this._flushFile(relativePath);
-    }, MEMORY_CONFIG.DEBOUNCE_MS));
   }
 
   /**
-   * 立即将指定文件写入磁盘（异步）
-   * @param {string} relativePath
+   * 同步单条索引（add/update/remove 后调用，避免全量 rebuild）
+   * @private
    */
-  _flushFile(relativePath) {
-    const cache = this.fileCache.get(relativePath);
-    if (!cache || !cache.dirty) return;
-
-    const absPath = this._getAbsolutePath(relativePath);
-    const dir = path.dirname(absPath);
-    const entries = cache.entries;
-    const entryCount = entries.length;
-    cache.dirty = false;
-    this.debounceTimers.delete(relativePath);
-
-    // 使用异步操作，不阻塞主进程
-    fs.mkdir(dir, { recursive: true }, (mkdirErr) => {
-      if (mkdirErr && mkdirErr.code !== 'EEXIST') {
-        logger.error(`创建记忆目录失败: ${dir}`, mkdirErr);
-        cache.dirty = true;
-        return;
-      }
-
-      fs.writeFile(absPath, JSON.stringify(entries, null, 2), 'utf-8', (writeErr) => {
-        if (writeErr) {
-          logger.error(`保存记忆文件失败: ${relativePath}`, writeErr);
-          cache.dirty = true;
-        } else {
-          logger.debug(`记忆文件已保存: ${relativePath}`, { count: entryCount });
-        }
-      });
-    });
+  _syncIndexForEntry(entry) {
+    if (!entry || !entry.id) return;
+    this.index.set(entry.id, createIndexEntry(entry));
   }
 
   // ═══════════════════════════════════════════════════════════
-  // CRUD 操作
+  // CRUD 操作（委托 sqliteStore）
   // ═══════════════════════════════════════════════════════════
 
   /**
@@ -290,29 +222,16 @@ class MemoryStore {
    * @returns {{ success: boolean, id?: string, error?: string }}
    */
   add(memoryEntry) {
-    try {
-      const relPath = this._getRelativePath(memoryEntry.type, memoryEntry.agentId);
-      const entries = this._readFile(relPath);
-
-      // 检查上限，如果超出则淘汰分数最低的
-      if (entries.length >= MEMORY_CONFIG.MAX_ENTRIES_PER_FILE) {
-        this._evictLowest(entries, relPath);
-      }
-
-      entries.push(memoryEntry);
-      this._markDirty(relPath);
-
-      // 更新索引
-      const indexEntry = createIndexEntry(memoryEntry);
-      this.index.set(memoryEntry.id, indexEntry);
-      this._saveIndex();
-
+    this._load();
+    const result = sqliteStore.add(memoryEntry);
+    if (result.success) {
+      this._syncIndexForEntry(memoryEntry);
       logger.debug('记忆已存储', { id: memoryEntry.id, type: memoryEntry.type });
-      return { success: true, id: memoryEntry.id };
-    } catch (error) {
-      logger.error('存储记忆失败', error);
-      return { success: false, error: error.message };
+      // 阶段 1-B：异步生成 embedding 并写入 SQLite + 向量索引
+      // 不阻塞 add() 主流程；embedding 失败则降级（后续靠 FTS5 检索）
+      this._triggerEmbedding(memoryEntry);
     }
+    return result;
   }
 
   /**
@@ -321,13 +240,17 @@ class MemoryStore {
    * @returns {{ success: boolean, count: number, errors: string[] }}
    */
   addMultiple(memoryEntries) {
+    this._load();
     const errors = [];
     let count = 0;
 
     for (const entry of memoryEntries) {
-      const result = this.add(entry);
+      const result = sqliteStore.add(entry);
       if (result.success) {
         count++;
+        this._syncIndexForEntry(entry);
+        // 阶段 1-B：批量写入也异步触发 embedding
+        this._triggerEmbedding(entry);
       } else {
         errors.push(`${entry.id || 'unknown'}: ${result.error}`);
       }
@@ -342,12 +265,27 @@ class MemoryStore {
    * @returns {Object|null}
    */
   get(memoryId) {
-    const indexEntry = this.index.get(memoryId);
-    if (!indexEntry) return null;
+    this._load();
+    return sqliteStore.get(memoryId);
+  }
 
-    const relPath = this._getRelativePath(indexEntry.type, indexEntry.agentId);
-    const entries = this._readFile(relPath);
-    return entries.find((e) => e.id === memoryId) || null;
+  /**
+   * 获取全部记忆条目（按创建时间倒序）
+   * @returns {Object[]}
+   */
+  getAll() {
+    this._load();
+    return sqliteStore.getAll();
+  }
+
+  /**
+   * 是否存在指定记忆
+   * @param {string} memoryId
+   * @returns {boolean}
+   */
+  has(memoryId) {
+    this._load();
+    return sqliteStore.has(memoryId);
   }
 
   /**
@@ -357,34 +295,14 @@ class MemoryStore {
    * @returns {{ success: boolean, error?: string }}
    */
   update(memoryId, updates) {
-    const indexEntry = this.index.get(memoryId);
-    if (!indexEntry) {
-      return { success: false, error: `记忆不存在: ${memoryId}` };
+    this._load();
+    const result = sqliteStore.update(memoryId, updates);
+    if (result.success) {
+      // 同步内存索引：从 SQLite 重新读最新行
+      const fresh = sqliteStore.get(memoryId);
+      if (fresh) this._syncIndexForEntry(fresh);
     }
-
-    try {
-      const relPath = this._getRelativePath(indexEntry.type, indexEntry.agentId);
-      const entries = this._readFile(relPath);
-      const idx = entries.findIndex((e) => e.id === memoryId);
-      if (idx === -1) {
-        return { success: false, error: `记忆文件中找不到: ${memoryId}` };
-      }
-
-      // 合并更新（不允许修改 id 和 type）
-      const { id, type, ...allowedUpdates } = updates;
-      Object.assign(entries[idx], allowedUpdates);
-      this._markDirty(relPath);
-
-      // 同步更新索引
-      const updatedIndexEntry = createIndexEntry(entries[idx]);
-      this.index.set(memoryId, updatedIndexEntry);
-      this._saveIndex();
-
-      return { success: true };
-    } catch (error) {
-      logger.error(`更新记忆失败: ${memoryId}`, error);
-      return { success: false, error: error.message };
-    }
+    return result;
   }
 
   /**
@@ -393,62 +311,51 @@ class MemoryStore {
    * @returns {{ success: boolean, error?: string }}
    */
   remove(memoryId) {
-    const indexEntry = this.index.get(memoryId);
-    if (!indexEntry) {
-      return { success: false, error: `记忆不存在: ${memoryId}` };
-    }
-
-    try {
-      const relPath = this._getRelativePath(indexEntry.type, indexEntry.agentId);
-      const entries = this._readFile(relPath);
-      const idx = entries.findIndex((e) => e.id === memoryId);
-      if (idx !== -1) {
-        entries.splice(idx, 1);
-        this._markDirty(relPath);
-      }
-
-      // 删除索引
+    this._load();
+    const result = sqliteStore.delete(memoryId);
+    if (result.success) {
       this.index.delete(memoryId);
-      this._saveIndex();
-
+      // 阶段 1-B：同步从向量索引移除（标记删除，不释放 slot）
+      vectorIndex.removeVector(memoryId);
       logger.debug('记忆已删除', { id: memoryId });
-      return { success: true };
-    } catch (error) {
-      logger.error(`删除记忆失败: ${memoryId}`, error);
-      return { success: false, error: error.message };
     }
+    return result;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 查询操作 (基于内存索引)
+  // 查询操作
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 获取所有索引条目
+   * 获取所有索引条目（兼容旧接口：返回 IndexEntry 数组，而非完整 MemoryEntry）
    * @param {Object} [filters] - 过滤条件
-   * @param {string} [filters.type] - 按类型筛选
-   * @param {string} [filters.scope] - 按范围筛选
-   * @param {string} [filters.agentId] - 按 Agent 筛选
-   * @param {boolean} [filters.includeArchived=false] - 是否包含已归档
-   * @returns {Object[]}
+   * @param {string} [filters.type]
+   * @param {string} [filters.scope]
+   * @param {string} [filters.agentId]
+   * @param {boolean} [filters.includeArchived=false]
+   * @param {boolean} [filters.includeSuperseded=false]
+   * @returns {Object[]} 索引条目（IndexEntry）
    */
   query(filters = {}) {
-    const { type, scope, agentId, includeArchived = false } = filters;
+    this._load();
+    const {
+      type,
+      scope,
+      agentId,
+      includeArchived = false,
+      includeSuperseded = false,
+    } = filters;
+
+    // 用内存索引做过滤（保持原行为：返回 IndexEntry 而非完整 entry）
     const results = [];
-
     for (const entry of this.index.values()) {
-      // 过滤已归档
       if (!includeArchived && entry.archived) continue;
-      // 过滤被替代
-      if (entry.supersededBy) continue;
-
+      if (!includeSuperseded && entry.supersededBy) continue;
       if (type && entry.type !== type) continue;
       if (scope && entry.scope !== scope) continue;
       if (agentId && entry.agentId !== agentId) continue;
-
       results.push(entry);
     }
-
     return results;
   }
 
@@ -458,38 +365,32 @@ class MemoryStore {
    * @returns {Object[]}
    */
   queryForAgent(agentId) {
+    this._load();
     const results = [];
-
     for (const entry of this.index.values()) {
       if (entry.archived || entry.supersededBy) continue;
-
-      // Agent 可见：自己的 + 共享的 + 用户的
       if (entry.scope === 'shared' || entry.scope === 'user') {
         results.push(entry);
       } else if (entry.scope === 'agent' && entry.agentId === agentId) {
         results.push(entry);
       }
     }
-
     return results;
   }
 
   /**
    * 按标签搜索记忆索引
    * @param {string[]} tags - 搜索标签
-   * @param {Object} [filters] - 额外过滤
-   * @returns {Object[]}
+   * @param {Object} [filters] - 额外过滤（type/scope/agentId/includeArchived）
+   * @returns {Object[]} 索引条目
    */
   searchByTags(tags, filters = {}) {
+    this._load();
     if (!tags || tags.length === 0) return this.query(filters);
 
-    const lowerTags = tags.map((t) => t.toLowerCase());
-    const candidates = this.query(filters);
-
-    return candidates.filter((entry) => {
-      const entryTags = (entry.tags || []).map((t) => t.toLowerCase());
-      return lowerTags.some((tag) => entryTags.includes(tag));
-    });
+    // 用 sqliteStore 做标签 JOIN 查询，再转成 IndexEntry 格式以兼容
+    const entries = sqliteStore.searchByTags(tags, filters);
+    return entries.map((e) => createIndexEntry(e));
   }
 
   /**
@@ -500,13 +401,9 @@ class MemoryStore {
    */
   getRecent(limit = 20, filters = {}) {
     const candidates = this.query(filters);
-    candidates.sort((a, b) => b.createdAt - a.createdAt);
+    candidates.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return candidates.slice(0, limit);
   }
-
-  // ═══════════════════════════════════════════════════════════
-  // 批量操作
-  // ═══════════════════════════════════════════════════════════
 
   /**
    * 获取指定类型的所有完整记忆条目
@@ -515,130 +412,193 @@ class MemoryStore {
    * @returns {Object[]}
    */
   getEntriesByType(type, agentId) {
-    const relPath = this._getRelativePath(type, agentId);
-    return this._readFile(relPath);
+    this._load();
+    const filters = { type };
+    if (agentId) filters.agentId = agentId;
+    filters.includeArchived = true; // 兼容原行为：getEntriesByType 不过滤 archived
+    filters.includeSuperseded = true;
+    return sqliteStore.query(filters);
   }
 
   /**
    * 批量更新索引中的字段（用于衰减等批量操作）
+   * memory-decay.runDecay() 用此方法批量标记 archived。
    * @param {Array<{id: string, updates: Object}>} batchUpdates
    */
   batchUpdateIndex(batchUpdates) {
+    this._load();
     for (const { id, updates } of batchUpdates) {
+      // 同步 SQLite
+      sqliteStore.update(id, updates);
+      // 同步内存索引
       const entry = this.index.get(id);
       if (entry) {
         Object.assign(entry, updates);
+        if ('archived' in updates) entry.archived = !!updates.archived;
       }
     }
-    this._saveIndex();
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 淘汰机制
+  // Embedding 与向量索引（阶段 1-B）
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 淘汰文件中分数最低的条目
-   * @param {Object[]} entries - 文件中的条目列表（会被修改）
-   * @param {string} relPath - 相对路径
+   * add() 成功后异步触发 embedding 生成 + 写入 SQLite + 加入向量索引。
+   * - 不阻塞 add() 主流程（setImmediate 推迟到下一个 tick）。
+   * - embedding 生成失败/服务禁用时静默降级（记忆已写入，后续靠 FTS5 检索）。
+   * - 短文本（<= 10 字）跳过：embedding 对短文本意义不大，且多为系统占位。
+   * @param {Object} entry
+   * @private
    */
-  _evictLowest(entries, relPath) {
-    if (entries.length < MEMORY_CONFIG.MAX_ENTRIES_PER_FILE) return;
+  _triggerEmbedding(entry) {
+    if (!entry || !entry.id || !entry.content) return;
+    // 短文本跳过（与执行计划一致：content.length > 10）
+    if (entry.content.trim().length <= 10) return;
+    // 已有 embedding（迁移来的记忆或重写）则不重复生成
+    if (entry.embedding) return;
 
-    // 按 importance + accessCount 组合分数排序，淘汰最低的 10%
-    const evictCount = Math.max(1, Math.floor(entries.length * 0.1));
-
-    entries.sort((a, b) => {
-      const scoreA = (a.importance || 0) + Math.log(1 + (a.accessCount || 0)) * 0.1;
-      const scoreB = (b.importance || 0) + Math.log(1 + (b.accessCount || 0)) * 0.1;
-      return scoreA - scoreB;
+    const id = entry.id;
+    const content = entry.content;
+    setImmediate(async () => {
+      try {
+        const emb = await embeddingService.embed(content);
+        if (!emb) {
+          // embedding 服务不可用（模型未加载/禁用），静默降级
+          return;
+        }
+        // 1. 写入 SQLite embedding BLOB（带模型签名）
+        await sqliteStore.updateEmbedding(
+          id,
+          Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength),
+          embeddingService.DEFAULT_MODEL
+        );
+        // 2. 加入内存向量索引
+        vectorIndex.addVector(id, emb);
+        logger.debug('embedding 已生成并入库', { id, dim: emb.length });
+      } catch (e) {
+        logger.debug('embedding 生成失败（降级到 FTS5）', { id, error: e.message });
+      }
     });
+  }
 
-    const evicted = entries.splice(0, evictCount);
-
-    // 从索引中也删除
-    for (const e of evicted) {
-      this.index.delete(e.id);
+  /**
+   * 从 SQLite 加载所有已有 embedding 重建 HNSW 向量索引。
+   * 启动时调用一次（_load 内）+ 切换公司（reinitialize）后调用。
+   *
+   * 注意：此方法是同步的（SQLite 读 + hnswlib 构建都是同步），
+   * 但 embedding 量可能大（~数百到数千条），构建耗时在毫秒级，
+   * 可接受。若未来量上万可考虑移到 worker。
+   *
+   * @returns {{ built: boolean, count: number, errors: number }}
+   */
+  rebuildVectorIndex() {
+    this._load();
+    try {
+      const embeddings = sqliteStore.getEmbeddings({ includeArchived: false });
+      const items = embeddings.map((e) => ({
+        id: e.id,
+        embedding: e.embedding, // Buffer，vector-index.toNumberArray 支持
+      }));
+      const result = vectorIndex.buildIndex(items);
+      logger.info('向量索引已重建', {
+        count: result.count,
+        errors: result.errors,
+        total: embeddings.length,
+      });
+      return result;
+    } catch (error) {
+      logger.error('重建向量索引失败', { error: error.message });
+      return { built: false, count: 0, errors: 1 };
     }
+  }
 
-    logger.info(`记忆淘汰: ${relPath}`, { evicted: evictCount, remaining: entries.length });
+  /**
+   * 获取向量索引单例（供 1-C 阶段 memory-retriever 做向量召回）。
+   * @returns {object} vector-index 模块导出
+   */
+  getVectorIndex() {
+    return vectorIndex;
+  }
+
+  /**
+   * 获取 embedding 服务单例（供 retriever 做查询向量化）。
+   * @returns {object} embedding-service 模块导出
+   */
+  getEmbeddingService() {
+    return embeddingService;
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 刷盘与清理
+  // FTS5 全文搜索（阶段 1-C retriever 会用，1-A 先暴露）
   // ═══════════════════════════════════════════════════════════
 
   /**
-   * 立即将所有脏数据刷入磁盘
+   * FTS5 全文搜索（trigram tokenizer，支持中文 3+ 字子串）
+   * @param {string} query
+   * @param {Object} [opts] - { limit, type, scope, agentId, includeArchived }
+   * @returns {Object[]} 完整 MemoryEntry
+   */
+  searchFTS(query, opts = {}) {
+    this._load();
+    return sqliteStore.searchFTS(query, opts);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 刷盘与生命周期（SQLite 自动持久化，多为 no-op）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 立即将所有数据刷入磁盘
+   * SQLite 自动持久化，此处只做 WAL checkpoint
    */
   flush() {
-    // 清除所有防抖定时器
-    for (const [relPath, timer] of this.debounceTimers) {
-      clearTimeout(timer);
-      this._flushFile(relPath);
-    }
-    this.debounceTimers.clear();
-
-    // 刷新索引
-    if (this._indexDebounceTimer) {
-      clearTimeout(this._indexDebounceTimer);
-      this._indexDebounceTimer = null;
-    }
-    this._flushIndex();
-
-    logger.info('记忆存储已全部刷盘');
+    if (this._loaded) sqliteStore.saveToDisk();
+    logger.info('记忆存储已刷盘 (WAL checkpoint)');
   }
 
   /**
-   * 清空文件缓存（释放内存，下次读取时会重新从磁盘加载）
+   * 清空文件缓存（兼容旧接口，SQLite 模式下无文件缓存，no-op）
    */
   clearCache() {
-    this.flush(); // 先刷盘
-    this.fileCache.clear();
+    this.flush();
   }
 
   /**
    * 重新初始化（切换公司后调用）
-   * 刷盘、清空内存状态、重新加载
+   * 关闭当前 SQLite 库，打开新路径的库，重建内存索引 + 向量索引
    */
   reinitialize() {
-    this.flush();
-    this.index.clear();
-    this.fileCache.clear();
-    for (const [, timer] of this.debounceTimers) {
-      clearTimeout(timer);
+    if (this._loaded) {
+      sqliteStore.reinitialize();
+    } else {
+      sqliteStore.loadFromDisk();
+      this._loaded = true;
     }
-    this.debounceTimers.clear();
-    if (this._indexDebounceTimer) {
-      clearTimeout(this._indexDebounceTimer);
-      this._indexDebounceTimer = null;
+    this._migrateFromJsonIfNeeded();
+    this._rebuildIndex();
+    // 阶段 1-B：切换公司后重建向量索引（新库的 embedding）
+    try {
+      this.rebuildVectorIndex();
+    } catch (e) {
+      logger.warn('切换公司后重建向量索引失败', { error: e.message });
     }
-    this._ensureDirectories();
-    this._loadIndex();
+    logger.info('记忆存储已重新初始化', { count: this.index.size });
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // 统计
+  // ═══════════════════════════════════════════════════════════
 
   /**
    * 获取存储统计信息
    * @returns {Object}
    */
   getStats() {
-    const stats = {
-      totalMemories: this.index.size,
-      byType: {},
-      byScope: {},
-      archived: 0,
-      cachedFiles: this.fileCache.size,
-    };
-
-    for (const entry of this.index.values()) {
-      // 按类型
-      stats.byType[entry.type] = (stats.byType[entry.type] || 0) + 1;
-      // 按范围
-      stats.byScope[entry.scope] = (stats.byScope[entry.scope] || 0) + 1;
-      // 已归档
-      if (entry.archived) stats.archived++;
-    }
-
+    if (!this._loaded) this._load();
+    const stats = sqliteStore.getStats();
+    // 兼容字段：旧代码可能读 cachedFiles
+    stats.cachedFiles = 0;
     return stats;
   }
 }
