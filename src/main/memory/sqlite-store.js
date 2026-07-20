@@ -184,13 +184,18 @@ class SqliteMemoryStore {
     // 外键约束（用于 memory_tags -> memories）
     this.db.pragma('foreign_keys = ON');
 
+    // 先迁移旧库列（在 DDL 之前，因为 DDL 里的 CREATE INDEX 可能引用新列）
+    this._migrateColumns();
+
     // 建表
     for (const ddl of DDL_STATEMENTS) {
-      this.db.exec(ddl);
+      try {
+        this.db.exec(ddl);
+      } catch (e) {
+        // 旧库可能缺列导致 INDEX 创建失败，已在 _migrateColumns 补列
+        logger.debug('DDL 执行（可能因列已存在跳过）', { ddl: ddl.slice(0, 60), error: e.message });
+      }
     }
-
-    // 阶段 3-B：旧库迁移 —— 幂等 ALTER TABLE ADD COLUMN source_episode_id
-    this._migrateColumns();
 
     // 预编译语句
     this._prepareStatements();

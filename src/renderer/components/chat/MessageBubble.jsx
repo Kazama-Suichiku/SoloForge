@@ -20,6 +20,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
+import MermaidDiagram from './MermaidDiagram';
 import { useAgentStore } from '../../store/agent-store';
 import AgentAvatar from '../AgentAvatar';
 import ToolCallCard from './ToolCallCard';
@@ -79,7 +83,8 @@ function getAgentAvatarStyle(agent) {
 // ─────────────────────────────────────────────────────────
 // 模块级常量：避免每次渲染创建新对象，防止 ReactMarkdown 不必要的重渲染
 // ─────────────────────────────────────────────────────────
-const REMARK_PLUGINS = [remarkGfm];
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
 
 // Linear 风格 markdown 渲染器：
 // - 链接用 accent 色
@@ -114,7 +119,15 @@ const MARKDOWN_COMPONENTS = {
       {children}
     </pre>
   ),
-  code: ({ inline, children, ...props }) => {
+  code: ({ inline, className, children, ...props }) => {
+    const text = String(children);
+    const lang = /language-(\w+)/.exec(className || '')?.[1];
+
+    // Mermaid 图表检测
+    if (!inline && lang === 'mermaid') {
+      return <MermaidDiagram chart={text} />;
+    }
+
     if (inline) {
       return (
         <code
@@ -380,7 +393,7 @@ function AgentMessageContent({ message }) {
     return (
       <div className="max-w-none break-words" style={bodyStyle}>
         {content ? (
-          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
+          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
             {content}
           </ReactMarkdown>
         ) : (
@@ -414,7 +427,7 @@ function AgentMessageContent({ message }) {
             {/* 文本段（直接在 --bg-base 上） */}
             {trimmedText && (
               <div className="max-w-none break-words" style={bodyStyle}>
-                <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={MARKDOWN_COMPONENTS}>
+                <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
                   {trimmedText}
                 </ReactMarkdown>
               </div>
