@@ -84,7 +84,7 @@ class ChatAgent extends AgentBase {
     const config = agentConfigStore.get(this.id);
     const orgInfo = agentConfigStore.getOrganizationInfo();
     const peopleInfo = agentConfigStore.getPeopleRecognitionPrompt();
-    const collaborationInfo = getCollaborationPrompt();
+    const collaborationInfo = getCollaborationPrompt(this.id);
     const companyName = dataPath.getCompanyName();
 
     // ═══ 1. 强身份锚定（最高优先级，放在提示词最前面） ═══
