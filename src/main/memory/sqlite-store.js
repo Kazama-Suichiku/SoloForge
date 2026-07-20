@@ -40,6 +40,10 @@ const FTS_TOKENIZER = "trigram";
 // 阶段 3-B：memories 表新增 source_episode_id 列，用于溯源下钻到原始通信事件。
 //   - 新库：CREATE TABLE 已包含该列
 //   - 旧库：_open() 后通过 _migrateColumns() 幂等 ALTER TABLE ADD COLUMN
+// 阶段 4-A：memories 表新增 valid_from / valid_to 列，用于时态事实管理。
+//   - valid_from：事实生效时间（默认 createdAt）
+//   - valid_to：事实失效时间（NULL 表示当前有效）
+//   - idx_valid 索引加速 getValidMemories (WHERE valid_to IS NULL) 查询
 const DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -59,7 +63,9 @@ const DDL_STATEMENTS = [
     embedding BLOB,
     embedding_model TEXT,
     updated_at INTEGER,
-    source_episode_id TEXT
+    source_episode_id TEXT,
+    valid_from INTEGER,
+    valid_to INTEGER
   )`,
   `CREATE INDEX IF NOT EXISTS idx_type ON memories(type)`,
   `CREATE INDEX IF NOT EXISTS idx_scope ON memories(scope)`,
@@ -67,6 +73,9 @@ const DDL_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_archived ON memories(archived)`,
   // 阶段 3-B：溯源下钻索引 —— 按 episode_id 反查记忆
   `CREATE INDEX IF NOT EXISTS idx_source_episode ON memories(source_episode_id)`,
+  // 阶段 4-A：时态索引 —— 加速 getValidMemories (valid_to IS NULL) 与
+  // getHistoryMemories (valid_from / valid_to 范围查询)。
+  `CREATE INDEX IF NOT EXISTS idx_valid ON memories(valid_to)`,
 
   `CREATE TABLE IF NOT EXISTS memory_tags (
     memory_id TEXT,
@@ -190,24 +199,62 @@ class SqliteMemoryStore {
   }
 
   /**
-   * 旧库列迁移（阶段 3-B）
-   * 对已存在的 memories 表幂等补列 source_episode_id。
-   * better-sqlite3 同步执行 ALTER TABLE；若列已存在则捕获错误并忽略。
+   * 旧库列迁移（阶段 3-B + 阶段 4-A）
+   * 对已存在的 memories 表幂等补列：
+   *   - source_episode_id TEXT（3-B）
+   *   - valid_from INTEGER / valid_to INTEGER（4-A）
+   * better-sqlite3 同步执行 ALTER TABLE；若列已存在则跳过。
+   * 补列后对旧记忆做一次回填：valid_from = createdAt（让旧记忆进入时态视图）。
    * @private
    */
   _migrateColumns() {
     if (!this.db) return;
-    // 检查 memories 表是否已有 source_episode_id 列
     try {
       const cols = this.db.prepare(`PRAGMA table_info(memories)`).all();
-      const hasCol = cols.some((c) => c.name === 'source_episode_id');
-      if (!hasCol) {
+      const has = (name) => cols.some((c) => c.name === name);
+
+      if (!has('source_episode_id')) {
         this.db.exec(`ALTER TABLE memories ADD COLUMN source_episode_id TEXT`);
         logger.info('memories 表已补列 source_episode_id（旧库迁移）');
       }
+
+      let addedValid = false;
+      if (!has('valid_from')) {
+        this.db.exec(`ALTER TABLE memories ADD COLUMN valid_from INTEGER`);
+        addedValid = true;
+      }
+      if (!has('valid_to')) {
+        this.db.exec(`ALTER TABLE memories ADD COLUMN valid_to INTEGER`);
+        addedValid = true;
+      }
+      if (addedValid) {
+        logger.info('memories 表已补列 valid_from / valid_to（阶段 4-A 旧库迁移）');
+      }
+
+      // 补建 idx_valid（旧库可能没有该索引）
+      try {
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_valid ON memories(valid_to)`);
+      } catch (_e) {
+        // 忽略索引创建失败
+      }
+
+      // 回填：对 valid_from IS NULL 的旧行设为 created_at，让旧记忆进入时态视图。
+      // 幂等：只在新增列后做一次；后续 add() 会显式带 valid_from。
+      if (addedValid) {
+        try {
+          const r = this.db
+            .prepare(`UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL`)
+            .run();
+          if (r.changes > 0) {
+            logger.info('旧记忆 valid_from 已回填', { count: r.changes });
+          }
+        } catch (e) {
+          logger.debug('valid_from 回填失败', { error: e.message });
+        }
+      }
     } catch (error) {
       // 列已存在或表不存在，忽略
-      logger.debug('source_episode_id 列迁移检查', { error: error.message });
+      logger.debug('列迁移检查', { error: error.message });
     }
   }
 
@@ -222,12 +269,12 @@ class SqliteMemoryStore {
           id, type, scope, agent_id, content, summary, tags_json,
           importance, access_count, created_at, last_accessed_at,
           archived, superseded_by, source_json, embedding, embedding_model, updated_at,
-          source_episode_id
+          source_episode_id, valid_from, valid_to
         ) VALUES (
           @id, @type, @scope, @agent_id, @content, @summary, @tags_json,
           @importance, @access_count, @created_at, @last_accessed_at,
           @archived, @superseded_by, @source_json, @embedding, @embedding_model, @updated_at,
-          @source_episode_id
+          @source_episode_id, @valid_from, @valid_to
         )
       `),
       insertTag: db.prepare(`INSERT INTO memory_tags (memory_id, tag) VALUES (?, ?)`),
@@ -283,6 +330,39 @@ class SqliteMemoryStore {
       ),
       getTagPairsByB: db.prepare(
         `SELECT tag_a AS otherTag, count FROM tag_pairs WHERE tag_b = ?`
+      ),
+      // 阶段 4-A：时态事实管理 ──────────────────────────────────────
+      // invalidateMemory(id)：将一条记忆标记为失效（valid_to = now），
+      // 不删除数据，保留历史轨迹。
+      invalidateMemory: db.prepare(
+        `UPDATE memories SET valid_to = @valid_to, updated_at = @updated_at WHERE id = @id AND valid_to IS NULL`
+      ),
+      // getValidMemories(agentId)：查当前有效（valid_to IS NULL）的记忆。
+      // 按 agent 过滤：agent 专属记忆 agent_id = ?，shared/user 全局可见（agent_id IS NULL 或 scope IN shared/user）。
+      getValidMemories: db.prepare(
+        `SELECT * FROM memories
+         WHERE valid_to IS NULL AND archived = 0 AND superseded_by IS NULL
+           AND (agent_id = ? OR agent_id IS NULL OR scope IN ('shared','user'))
+         ORDER BY created_at DESC`
+      ),
+      // getHistoryMemories(agentId, atTime)：查某时刻有效的记忆（时点回溯）。
+      // 条件：valid_from <= atTime AND (valid_to IS NULL OR valid_to >= atTime)
+      // 同样按 agent 过滤。
+      getHistoryMemories: db.prepare(
+        `SELECT * FROM memories
+         WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)
+           AND archived = 0
+           AND (agent_id = ? OR agent_id IS NULL OR scope IN ('shared','user'))
+         ORDER BY created_at DESC`
+      ),
+      // 按主题查找当前有效的同类型记忆（memory-store._invalidateSameTopic 用）。
+      // 主题用 summary 子串匹配（summary 是记忆的一句话摘要，同主题事实
+      // 通常共享核心关键词）。仅返回当前有效（valid_to IS NULL）的行。
+      findValidByTypeAndSummary: db.prepare(
+        `SELECT * FROM memories
+         WHERE type = ? AND valid_to IS NULL AND archived = 0 AND superseded_by IS NULL
+           AND summary IS NOT NULL AND summary LIKE ?
+         ORDER BY created_at DESC`
       ),
     };
   }
@@ -343,6 +423,10 @@ class SqliteMemoryStore {
       updatedAt: row.updated_at || row.created_at,
       // 阶段 3-B：溯源下钻 —— 指向原始通信事件 id（comm_events.id）
       sourceEpisodeId: row.source_episode_id || null,
+      // 阶段 4-A：时态事实管理 —— 生效/失效时间戳
+      // valid_from = 事实开始生效的时间（默认 createdAt），valid_to = 失效时间（NULL = 当前有效）
+      validFrom: row.valid_from ?? row.created_at ?? null,
+      validTo: row.valid_to ?? null,
     };
   }
 
@@ -376,6 +460,10 @@ class SqliteMemoryStore {
         entry.source?.episodeId ??
         entry.source?.conversationId ??
         null,
+      // 阶段 4-A：时态事实管理 —— 写入时填 valid_from（默认 now），valid_to 默认 null（有效）
+      // 若 entry 显式带了 validFrom（如迁移旧数据）则保留；否则用 createdAt / now。
+      valid_from: entry.validFrom ?? entry.createdAt ?? Date.now(),
+      valid_to: entry.validTo ?? null,
     };
   }
 
@@ -563,6 +651,9 @@ class SqliteMemoryStore {
           embeddingModel: 'embedding_model',
           updatedAt: 'updated_at',
           sourceEpisodeId: 'source_episode_id',
+          // 阶段 4-A：时态字段 —— 允许 update() 显式修改 valid_from / valid_to
+          validFrom: 'valid_from',
+          validTo: 'valid_to',
         };
 
         const sets = [];
@@ -885,6 +976,123 @@ class SqliteMemoryStore {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // 时态事实管理（阶段 4-A）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 将一条记忆标记为失效（valid_to = now），不删除数据。
+   * 用于「新事实写入时把旧事实失效」的时态管理：旧事实保留可追溯，但默认检索只查
+   * valid_to IS NULL 的当前为真记忆。
+   * 幂等：WHERE valid_to IS NULL 保证只对当前有效的记忆生效，已失效的不重复改。
+   * @param {string} id 记忆 id
+   * @param {number} [invalidatedAt] 失效时间戳，默认 Date.now()
+   * @returns {{ success: boolean, error?: string, invalidated?: boolean }}
+   *   invalidated=true 表示确实把一条有效记忆改成了失效；false 表示无有效记忆可改
+   */
+  invalidateMemory(id, invalidatedAt) {
+    if (!this._opened) this._open();
+    if (!id) return { success: false, error: '缺少 id' };
+    const ts = invalidatedAt ?? Date.now();
+    try {
+      const r = this._stmts.invalidateMemory.run({
+        id,
+        valid_to: ts,
+        updated_at: ts,
+      });
+      const invalidated = r.changes > 0;
+      if (invalidated) {
+        logger.debug('记忆已标记失效', { id, validTo: ts });
+      }
+      return { success: true, invalidated };
+    } catch (error) {
+      logger.warn('invalidateMemory 失败', { id, error: error.message });
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 查询当前有效的记忆（valid_to IS NULL）。
+   * 按 agent 过滤：agent 专属记忆 + 全局 shared/user 记忆均可见。
+   * @param {string} [agentId] Agent ID；传 null/undefined 则返回全部当前有效记忆
+   * @returns {Object[]} 完整 MemoryEntry 数组（按 created_at 倒序）
+   */
+  getValidMemories(agentId) {
+    if (!this._opened) this._open();
+    try {
+      // 预编译语句第一个参数是 agent_id；传 null 时 SQLite = ? 匹配 NULL 失败，
+      // 故 null 时走另一条不带 agent 过滤的分支。
+      if (agentId) {
+        const rows = this._stmts.getValidMemories.all(agentId);
+        return rows.map((r) => this._rowToEntry(r));
+      }
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memories
+           WHERE valid_to IS NULL AND archived = 0 AND superseded_by IS NULL
+           ORDER BY created_at DESC`
+        )
+        .all();
+      return rows.map((r) => this._rowToEntry(r));
+    } catch (error) {
+      logger.warn('getValidMemories 查询失败', { agentId, error: error.message });
+      return [];
+    }
+  }
+
+  /**
+   * 时点回溯查询：返回某时刻「当时有效」的记忆。
+   * 条件：valid_from <= atTime AND (valid_to IS NULL OR valid_to >= atTime)
+   *   即该时刻之前已生效、且该时刻之后才失效（或仍有效）的记忆。
+   * @param {number} atTime 查询时刻（毫秒时间戳）
+   * @param {string} [agentId] Agent ID 过滤；null 则不过滤
+   * @returns {Object[]} 完整 MemoryEntry 数组（按 created_at 倒序）
+   */
+  getHistoryMemories(atTime, agentId) {
+    if (!this._opened) this._open();
+    if (typeof atTime !== 'number' || !Number.isFinite(atTime)) {
+      return [];
+    }
+    try {
+      if (agentId) {
+        const rows = this._stmts.getHistoryMemories.all(atTime, atTime, agentId);
+        return rows.map((r) => this._rowToEntry(r));
+      }
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memories
+           WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)
+             AND archived = 0
+           ORDER BY created_at DESC`
+        )
+        .all(atTime, atTime);
+      return rows.map((r) => this._rowToEntry(r));
+    } catch (error) {
+      logger.warn('getHistoryMemories 查询失败', { atTime, agentId, error: error.message });
+      return [];
+    }
+  }
+
+  /**
+   * 按类型 + summary 子串查找当前有效的同主题记忆。
+   * 用于 memory-store.add() 时判断「是否已有同主题的旧事实需要失效」。
+   * summary 是记忆的一句话摘要，同主题事实通常共享核心关键词，故用 LIKE 子串匹配。
+   * @param {string} type 记忆类型
+   * @param {string} summarySubstring summary 子串（已转义 % _ \）
+   * @returns {Object[]} 当前有效的同类型同主题记忆
+   */
+  findValidByTypeAndSummary(type, summarySubstring) {
+    if (!this._opened) this._open();
+    if (!type || !summarySubstring) return [];
+    try {
+      const rows = this._stmts.findValidByTypeAndSummary.all(type, summarySubstring);
+      return rows.map((r) => this._rowToEntry(r));
+    } catch (error) {
+      logger.debug('findValidByTypeAndSummary 查询失败', { type, error: error.message });
+      return [];
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // 上下文折叠摘要缓存（阶段 2-A）
   // ═══════════════════════════════════════════════════════════
 
@@ -1025,12 +1233,98 @@ class SqliteMemoryStore {
   }
 
   /**
+   * 备份数据库到指定路径（阶段 4-B 容灾）。
+   * 用 SQLite 的 backup API（better-sqlite3 的 db.backup(targetPath)）做在线热备份：
+   *   - 源库可继续读写（backup 用 page 级快照，不阻塞主流程）
+   *   - 目标文件若已存在会被覆盖
+   *   - 备份完成后再对源库做一次 VACUUM 回收空间（可选，默认 false 避免阻塞）
+   *
+   * 备用方案：若 backup API 不可用（老版本 better-sqlite3），降级到
+   * `VACUUM INTO targetPath`（SQLite 3.27+，better-sqlite3 内置 sqlite 3.53 支持）。
+   *
+   * @param {string} targetPath 备份文件绝对路径（父目录需存在，本方法会尝试创建）
+   * @param {Object} [opts] { vacuum?: boolean } 备份后是否对源库 VACUUM
+   * @returns {{ success: boolean, path?: string, bytes?: number, error?: string }}
+   */
+  backup(targetPath, opts = {}) {
+    if (!this._opened || !this.db) {
+      return { success: false, error: '数据库未打开' };
+    }
+    if (!targetPath || typeof targetPath !== 'string') {
+      return { success: false, error: '缺少备份目标路径' };
+    }
+    const { vacuum = false } = opts;
+    try {
+      // 确保父目录存在
+      const dir = path.dirname(targetPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      // 先做 WAL checkpoint，把 WAL 数据写回主库，保证备份完整
+      try {
+        this.db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch (_e) {
+        // 忽略 checkpoint 失败，继续备份
+      }
+
+      // 优先用 better-sqlite3 的 backup API（在线热备份）
+      let usedApi = 'backup';
+      try {
+        this.db.backup(targetPath);
+      } catch (be) {
+        // 降级到 VACUUM INTO（部分老版本/自定义编译可能无 backup 方法）
+        usedApi = 'vacuum-into';
+        try {
+          this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
+        } catch (ve) {
+          // 两种方案都失败
+          throw new Error(`backup API 失败: ${be.message}; VACUUM INTO 失败: ${ve.message}`);
+        }
+      }
+
+      // 备份后可选 VACUUM 源库（回收空间，但会短暂阻塞写入）
+      if (vacuum) {
+        try {
+          this.db.exec('VACUUM');
+        } catch (ve) {
+          logger.warn('备份后 VACUUM 源库失败（备份已成功）', { error: ve.message });
+        }
+      }
+
+      // 读取备份文件大小用于日志
+      let bytes = 0;
+      try {
+        bytes = fs.statSync(targetPath).size;
+      } catch (_e) {
+        // 忽略
+      }
+      logger.info('数据库备份完成', { path: targetPath, bytes, api: usedApi });
+      return { success: true, path: targetPath, bytes };
+    } catch (error) {
+      logger.error('数据库备份失败', { path: targetPath, error: error.message });
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * 重新初始化（切换公司后调用）
-   * 关闭当前库，打开新路径的库
+   * 关闭当前库，打开新路径的库。
+   * 阶段 4-B：打开新库后执行一次 VACUUM，回收旧库遗留的碎片空间，
+   * 保证新库紧凑（切公司场景下旧库可能积累大量已删除/失效行）。
+   * VACUUM 失败不影响后续使用（仅日志告警）。
    */
   reinitialize() {
     this.close();
     this._open();
+    // 阶段 4-B：新库打开后 VACUUM 一次，回收碎片
+    if (this._opened && this.db) {
+      try {
+        this.db.exec('VACUUM');
+        logger.debug('reinitialize 后 VACUUM 完成');
+      } catch (e) {
+        logger.warn('reinitialize 后 VACUUM 失败（不影响使用）', { error: e.message });
+      }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1049,12 +1343,28 @@ class SqliteMemoryStore {
     const byScope = {};
     for (const { scope, c } of this._stmts.countByScope.all()) byScope[scope] = c;
     const archived = this._stmts.countArchived.get().c;
+    // 阶段 4-A：时态统计 —— 当前有效记忆数与已失效记忆数
+    let validCount = 0;
+    let invalidatedCount = 0;
+    try {
+      validCount = this.db
+        .prepare(`SELECT COUNT(*) AS c FROM memories WHERE valid_to IS NULL AND archived = 0`)
+        .get().c;
+      invalidatedCount = this.db
+        .prepare(`SELECT COUNT(*) AS c FROM memories WHERE valid_to IS NOT NULL`)
+        .get().c;
+    } catch (_e) {
+      // 旧库可能没有 valid_to 列（迁移前），忽略
+    }
     return {
       totalMemories: total,
       byType,
       byScope,
       archived,
       cachedFiles: 0,
+      // 阶段 4-A：时态统计
+      validMemories: validCount,
+      invalidatedMemories: invalidatedCount,
     };
   }
 }

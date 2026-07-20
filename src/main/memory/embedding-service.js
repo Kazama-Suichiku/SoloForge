@@ -21,6 +21,9 @@
  *   阻塞主流程。
  * - 模型签名：每次写入 embedding 时记录模型名到 memories.embedding_model，
  *   换模型时可据此标记需重新 embedding（阶段 4-B 冷热分离时用）。
+ * - 阶段 4-B 容灾：连续推理失败 3 次后标记 unavailable，embed() 直接返回 null
+ *   不再尝试（避免每次调用都触发失败推理）；成功推理一次即重置计数。
+ *   可通过 resetFailure() 手动重置（如网络恢复后）；getStatus() 返回精简状态。
  *
  * @module memory/embedding-service
  */
@@ -45,12 +48,27 @@ process.env.TRANSFORMERS_CACHE = process.env.TRANSFORMERS_CACHE || MODEL_CACHE_D
 let embedder = null;
 /** @type {Promise|null} 正在进行的加载 Promise（避免并发重复加载） */
 let loading = null;
-/** @type {boolean} 是否已永久禁用（加载失败后不再重试，避免每次调用都卡几秒） */
+/** @type {boolean} 是否已永久禁用（模型加载失败后不再重试，避免每次调用都卡几秒） */
 let disabled = false;
 /** @type {string|null} 失败原因（disabled=true 时记录） */
 let disabledReason = null;
 /** @type {string} 当前使用的模型名 */
 let currentModel = DEFAULT_MODEL;
+
+// 阶段 4-B：容灾 —— 连续推理失败计数器。
+// embed() 每次推理失败时 failureCount++；连续失败达到 FAILURE_THRESHOLD(3)
+// 后标记 unavailable=true，后续 embed() 直接返回 null 不再尝试（避免每次调用
+// 都触发失败推理浪费 CPU/网络）。成功推理一次即重置计数器。
+// 与 disabled（模型加载失败）不同：unavailable 是推理阶段失败，可通过
+// resetFailure() 手动重置后重试（如临时网络抖动恢复后）。
+/** @type {number} 连续推理失败次数 */
+let failureCount = 0;
+/** @type {boolean} 是否因连续失败而不可用 */
+let unavailable = false;
+/** @type {string|null} 不可用原因 */
+let unavailableReason = null;
+/** 连续失败阈值，达到后标记 unavailable */
+const FAILURE_THRESHOLD = 3;
 
 // ─── 内存缓存 ─────────────────────────────────────────────────
 /**
@@ -150,9 +168,13 @@ async function embed(text) {
   const cached = cache.get(text);
   if (cached) return cached;
 
+  // 阶段 4-B：容灾 —— 模型加载失败（disabled）或连续推理失败（unavailable）
+  // 时直接返回 null，不再尝试，避免每次调用都触发失败推理。
+  if (disabled || unavailable) return null;
+
   // 获取 pipeline
   const extractor = await getEmbedder();
-  if (!extractor) return null; // 已禁用
+  if (!extractor) return null; // 已禁用（模型加载失败）
 
   try {
     const output = await extractor(text, {
@@ -165,14 +187,19 @@ async function embed(text) {
         expected: DEFAULT_DIM,
         actual: result ? result.length : 0,
       });
+      // 维度异常也视为一次失败，计入容灾
+      _recordFailure(new Error(`embedding 维度异常: ${result ? result.length : 0}`));
       return null;
     }
+    // 成功推理 → 重置失败计数
+    _recordSuccess();
     // 写入缓存（容量保护）
     if (cache.size >= CACHE_MAX) cache.clear();
     cache.set(text, result);
     return result;
   } catch (error) {
     logger.debug('embedding 生成失败', { text: text.slice(0, 50), error: error.message });
+    _recordFailure(error);
     return null;
   }
 }
@@ -195,26 +222,93 @@ async function embedBatch(texts) {
 
 /**
  * 获取当前 embedding 服务信息。
- * @returns {{ model: string, dim: number, ready: boolean, disabled: boolean, cacheSize: number }}
+ * @returns {{ model: string, dim: number, ready: boolean, disabled: boolean, disabledReason: string|null, unavailable: boolean, unavailableReason: string|null, failureCount: number, cacheSize: number }}
  */
 function getModelInfo() {
   return {
     model: currentModel,
     dim: DEFAULT_DIM,
-    ready: !!embedder && !disabled,
+    ready: !!embedder && !disabled && !unavailable,
     disabled,
     disabledReason: disabled ? disabledReason : null,
+    // 阶段 4-B：容灾状态
+    unavailable,
+    unavailableReason: unavailable ? unavailableReason : null,
+    failureCount,
     cacheSize: cache.size,
   };
 }
 
 /**
- * 服务是否就绪（模型已加载且未禁用）。
+ * 服务是否就绪（模型已加载且未禁用且未因连续失败而不可用）。
  * 注意：返回 false 不代表永远不可用，仅代表当前未加载；首次 embed() 会触发加载。
  * @returns {boolean}
  */
 function isReady() {
-  return !!embedder && !disabled;
+  return !!embedder && !disabled && !unavailable;
+}
+
+/**
+ * 阶段 4-B：获取服务容灾状态（精简版，用于 retriever 判断是否走向量路径）。
+ * @returns {{ available: boolean, disabled: boolean, unavailable: boolean, failureCount: number, reason: string|null }}
+ */
+function getStatus() {
+  let reason = null;
+  if (disabled) reason = disabledReason;
+  else if (unavailable) reason = unavailableReason;
+  return {
+    available: !disabled && !unavailable,
+    disabled,
+    unavailable,
+    failureCount,
+    reason,
+  };
+}
+
+/**
+ * 阶段 4-B：记录一次推理失败。
+ * 连续失败达到 FAILURE_THRESHOLD(3) 后标记 unavailable，后续 embed() 直接返回 null。
+ * @param {Error} error
+ * @private
+ */
+function _recordFailure(error) {
+  failureCount++;
+  const msg = error ? error.message : 'unknown';
+  if (failureCount >= FAILURE_THRESHOLD && !unavailable) {
+    unavailable = true;
+    unavailableReason = `连续推理失败 ${failureCount} 次（最后错误: ${msg}）`;
+    logger.warn(
+      'embedding 服务因连续失败已标记不可用（降级到纯 FTS5，可用 resetFailure() 重置）',
+      { failureCount, lastError: msg }
+    );
+  } else {
+    logger.debug('embedding 推理失败计数', { failureCount, lastError: msg });
+  }
+}
+
+/**
+ * 阶段 4-B：记录一次推理成功，重置失败计数。
+ * @private
+ */
+function _recordSuccess() {
+  if (failureCount > 0 || unavailable) {
+    failureCount = 0;
+    unavailable = false;
+    unavailableReason = null;
+    logger.info('embedding 服务恢复可用（失败计数已重置）');
+  }
+}
+
+/**
+ * 阶段 4-B：手动重置容灾失败计数。
+ * 在外部判定故障已恢复（如网络重连、服务重启）后调用，允许 embed() 再次尝试推理。
+ * 不重置 disabled（模型加载失败是永久性的，需重启进程）。
+ */
+function resetFailure() {
+  failureCount = 0;
+  unavailable = false;
+  unavailableReason = null;
+  logger.info('embedding 容灾失败计数已手动重置');
 }
 
 /**
@@ -227,12 +321,16 @@ function clearCache() {
 
 /**
  * 重置服务状态（测试用）。
- * 清空缓存 + 重置禁用标志，但保留已加载的模型（避免重复下载）。
+ * 清空缓存 + 重置禁用标志 + 重置容灾失败计数，但保留已加载的模型（避免重复下载）。
  */
 function reset() {
   cache.clear();
   disabled = false;
   disabledReason = null;
+  // 阶段 4-B：同时重置容灾失败计数
+  failureCount = 0;
+  unavailable = false;
+  unavailableReason = null;
 }
 
 module.exports = {
@@ -242,6 +340,9 @@ module.exports = {
   isReady,
   clearCache,
   reset,
+  // 阶段 4-B：容灾
+  getStatus,
+  resetFailure,
   // 常量导出（供 vector-index / retriever 引用）
   DEFAULT_MODEL,
   DEFAULT_DIM,

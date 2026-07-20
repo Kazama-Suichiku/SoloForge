@@ -51,6 +51,32 @@ const RRF_K = 60;
 // RRF 微调项在最终排序中的权重（其余靠 RRF 主分数）
 const RERANK_WEIGHT = 0.15;
 
+// 阶段 4-B：冷热知识分离 —— 热记忆 vs 冷知识类型集合。
+// 热记忆（决策/教训/偏好/任务成果/对话总结）：变化快、与当前任务强相关，
+//   优先走向量语义召回 + 标签共现扩展（语义相似度更准）。
+// 冷知识（事实/项目背景/流程规范/公司知识/共识）：相对稳定、术语精确，
+//   优先走 FTS5 BM25 全文召回（关键词精确匹配更准）。
+// 两路仍都参与 RRF 融合，只是「优先路径」的召回量更大、权重略高，
+// 另一路作为补充避免漏召。
+const HOT_MEMORY_TYPES = new Set([
+  'decision',
+  'lesson',
+  'preference',
+  'task_result',
+  'conversation_summary',
+]);
+const COLD_MEMORY_TYPES = new Set([
+  'fact',
+  'project_context',
+  'procedure',
+  'company_fact',
+  'consensus',
+]);
+
+// 冷热路径的召回量配比：优先路径取满 RECALL_K，补充路径取一半。
+const PRIMARY_RECALL_K = RECALL_K;
+const SECONDARY_RECALL_K = Math.floor(RECALL_K / 2);
+
 /**
  * 记忆检索器
  */
@@ -198,16 +224,29 @@ class MemoryRetriever {
    * 三路召回 + RRF 融合 + rerank 微调 + agent/scope/type 过滤。
    * 降级：任一路径失败均不阻塞；embedding/vector 模块不存在时自动跳过。
    *
+   * 阶段 4-A 时态事实管理：
+   *   - 默认只返回当前有效（valid_to IS NULL）的记忆；已失效的旧事实被过滤。
+   *   - options.historical = true 时，不过滤 valid_to，返回全部（含已失效）记忆，
+   *     用于历史回溯场景（如「之前用户的偏好是什么」）。
+   *
+   * 阶段 4-B 冷热知识分离：
+   *   - 根据召回结果的 type 判断冷热：热记忆优先向量+共现路径，冷知识优先 FTS5。
+   *   - 两路召回量根据冷热配比调整（优先路径 RECALL_K，补充路径 RECALL_K/2），
+   *     但两路仍都参与 RRF 融合避免漏召。
+   *   - 每路召回耗时记录到 debug 日志（检索延迟日志）。
+   *
    * @param {string} query - 查询文本
    * @param {Object} [options]
    * @param {string} [options.agentId] - Agent ID（用于范围过滤）
    * @param {number} [options.limit] - 返回数量
    * @param {string} [options.type] - 限定类型
+   * @param {boolean} [options.historical=false] - 是否包含已失效记忆（历史回溯）
    * @returns {Promise<Object[]>} 检索到的记忆条目（带 score 字段）
    */
   async recall(query, options = {}) {
-    const { agentId, limit = MEMORY_CONFIG.DEFAULT_RECALL_LIMIT, type } = options;
+    const { agentId, limit = MEMORY_CONFIG.DEFAULT_RECALL_LIMIT, type, historical = false } = options;
     const now = Date.now();
+    const t_start = Date.now(); // 阶段 4-B：检索延迟日志起点
 
     // 提取关键词（tag 路径 + rerank 用）
     const keywords = this.extractKeywords(query);
@@ -225,8 +264,30 @@ class MemoryRetriever {
       return this._withEpisodeId(sliced);
     }
 
+    // ─── 阶段 4-B：冷热路径召回量配比 ──────────────────────────
+    // 根据 options.type 判断优先路径：
+    //   - type 在 HOT_MEMORY_TYPES → 向量为主，FTS 为辅
+    //   - type 在 COLD_MEMORY_TYPES → FTS 为主，向量为辅
+    //   - type 未指定或不在任一集合 → 两路均衡（都用 RECALL_K）
+    // 即使指定了优先路径，另一路仍参与召回（量减半），避免漏召。
+    let vectorK = RECALL_K;
+    let ftsK = RECALL_K;
+    let priorityPath = 'balanced';
+    if (type) {
+      if (HOT_MEMORY_TYPES.has(type)) {
+        vectorK = PRIMARY_RECALL_K;
+        ftsK = SECONDARY_RECALL_K;
+        priorityPath = 'vector';
+      } else if (COLD_MEMORY_TYPES.has(type)) {
+        ftsK = PRIMARY_RECALL_K;
+        vectorK = SECONDARY_RECALL_K;
+        priorityPath = 'fts';
+      }
+    }
+
     // ─── 路径 A：向量语义召回 ─────────────────────────────────
     let vectorResults = [];
+    const t_vec_start = Date.now();
     try {
       // 延迟 require：embedding-service / vector-index 在阶段 1-B 落地
       // 1-B 导出独立函数（非单例对象），直接用 vectorMod.search
@@ -237,7 +298,7 @@ class MemoryRetriever {
       if (typeof embed === 'function' && typeof vectorSearch === 'function') {
         const queryEmb = await embed(query);
         if (queryEmb && Array.isArray(queryEmb) && queryEmb.length > 0) {
-          const hits = vectorSearch(queryEmb, RECALL_K);
+          const hits = vectorSearch(queryEmb, vectorK);
           if (Array.isArray(hits)) {
             vectorResults = hits
               .map((h) => ({
@@ -252,11 +313,13 @@ class MemoryRetriever {
     } catch (e) {
       logger.debug('向量召回路径跳过（降级）', { reason: e.message });
     }
+    const t_vec_ms = Date.now() - t_vec_start;
 
     // ─── 路径 B：FTS5 BM25 召回 ───────────────────────────────
     let ftsResults = [];
+    const t_fts_start = Date.now();
     try {
-      const ftsOpts = { limit: RECALL_K };
+      const ftsOpts = { limit: ftsK };
       // 不在此处按 agent/type 过滤，RRF 后统一过滤，避免漏召
       const rows = memoryStore.searchFTS(query, ftsOpts);
       if (Array.isArray(rows)) {
@@ -273,6 +336,7 @@ class MemoryRetriever {
     } catch (e) {
       logger.debug('FTS 召回路径跳过（降级）', { reason: e.message });
     }
+    const t_fts_ms = Date.now() - t_fts_start;
 
     // ─── 路径 C：tag 精确匹配召回 + 共现扩展（阶段 3-A）─────────
     // 1. 用 query 提取的核心 keywords 精确匹配 memory_tags
@@ -366,6 +430,8 @@ class MemoryRetriever {
     }
 
     // ─── agent/scope/type 过滤 + 剔除 archived/superseded ───
+    // 阶段 4-A：默认（historical=false）只保留当前有效记忆（valid_to IS NULL）；
+    //   historical=true 时保留全部（含已失效），用于历史回溯。
     const filtered = fused.filter((item) => {
       const entry = memoryStore.get(item.id);
       if (!entry) return false;
@@ -377,6 +443,8 @@ class MemoryRetriever {
         if (entry.scope !== 'shared' && entry.scope !== 'user' && entry.scope !== 'agent') return false;
       }
       if (entry.archived || entry.supersededBy) return false;
+      // 阶段 4-A：时态过滤 —— 非历史模式时剔除已失效记忆
+      if (!historical && entry.validTo != null) return false;
       return true;
     });
 
@@ -432,6 +500,12 @@ class MemoryRetriever {
       fused: fused.length,
       returned: result.length,
       topScore: result[0]?.score?.toFixed(3),
+      // 阶段 4-B：冷热路径配比 + 检索延迟日志
+      priorityPath,
+      historical,
+      latencyMs: Date.now() - t_start,
+      vectorLatencyMs: t_vec_ms,
+      ftsLatencyMs: t_fts_ms,
     });
 
     return result;

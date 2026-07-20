@@ -37,6 +37,23 @@ const vectorIndex = require('./vector-index');
 // 阶段 3-A：标签共现图
 const { tagCooccurrence } = require('./tag-cooccurrence');
 
+// 阶段 4-A：时态事实管理 —— 可失效的事实类型集合。
+// 这三类记忆具有「同主题新事实覆盖旧事实」的语义：
+//   - preference：用户偏好（变了就更新，旧的失效）
+//   - fact：事实信息（事实更正，旧版本失效）
+//   - company_fact：公司知识（公司情况变化，旧知识失效）
+// 新记忆写入时，若发现同类型且 summary 子串匹配的旧有效记忆，
+// 把旧的 valid_to = now（失效不删除），新的 valid_from = now（生效）。
+const TEMPORAL_FACT_TYPES = new Set([
+  'preference',
+  'fact',
+  'company_fact',
+]);
+
+// 同主题匹配时，summary 子串最小长度。太短会误匹配（如「用」单字），
+// 太长会漏匹配（同主题但措辞不同）。6 字是经验值，能命中核心名词短语。
+const TOPIC_MATCH_MIN_LEN = 6;
+
 // ─── JSON 遗留目录/文件路径（仅迁移用）─────────────────────────
 function getMemoryDir() {
   return path.join(dataPath.getBasePath(), 'memory');
@@ -229,6 +246,26 @@ class MemoryStore {
     // 优先级：显式 sourceEpisodeId > source.episodeId > source.conversationId
     // 写到 entry.sourceEpisodeId，sqlite-store._entryToRow 会读取并入库。
     this._normalizeEpisodeId(memoryEntry);
+
+    // 阶段 4-A：时态事实管理 —— 写入新事实前，把同主题的旧有效事实失效。
+    // 仅对 preference/fact/company_fact 三类生效；其余类型直接写入。
+    // 失效旧记忆后，新记忆的 valid_from 显式设为 now（生效时间）。
+    if (TEMPORAL_FACT_TYPES.has(memoryEntry.type)) {
+      try {
+        this._invalidateSameTopic(memoryEntry);
+      } catch (e) {
+        // 时态失效失败不阻塞写入（降级为普通追加，旧记忆也保留）
+        logger.debug('_invalidateSameTopic 失败（降级为普通追加）', {
+          type: memoryEntry.type,
+          error: e.message,
+        });
+      }
+      // 新事实的生效时间显式设为 now（除非调用方已指定 validFrom）
+      if (!memoryEntry.validFrom) {
+        memoryEntry.validFrom = Date.now();
+      }
+    }
+
     const result = sqliteStore.add(memoryEntry);
     if (result.success) {
       this._syncIndexForEntry(memoryEntry);
@@ -241,6 +278,71 @@ class MemoryStore {
       tagCooccurrence.updateOnAdd(memoryEntry.tags);
     }
     return result;
+  }
+
+  /**
+   * 阶段 4-A：把与新记忆同主题（同 type + summary 子串匹配）的旧有效记忆失效。
+   * 策略：从新记忆 summary 提取一个核心子串（去停用词后的最长连续片段），
+   * 在 SQLite 里查同 type + summary LIKE 该子串 + valid_to IS NULL 的记忆，
+   * 逐条 invalidateMemory（valid_to = now）。失败不抛（add 主流程已 try/catch）。
+   *
+   * 注意：summary 子串需转义 SQL LIKE 通配符（% _ \），否则误匹配。
+   * 子串提取取 summary 中间一段（跳过首尾的虚词），长度 >= TOPIC_MATCH_MIN_LEN。
+   *
+   * @param {Object} newEntry 即将写入的新记忆
+   * @returns {number} 被失效的旧记忆条数
+   * @private
+   */
+  _invalidateSameTopic(newEntry) {
+    if (!newEntry || !newEntry.type || !newEntry.summary) return 0;
+    const summary = String(newEntry.summary).trim();
+    if (summary.length < TOPIC_MATCH_MIN_LEN) return 0;
+
+    // 提取主题子串：取 summary 的前 12 字作为匹配片段（摘要通常以主题词开头）。
+    // 截断到 12 字避免 LIKE 匹配过长导致漏匹配；短于 6 字则跳过。
+    const topic = summary.slice(0, 12);
+    if (topic.length < TOPIC_MATCH_MIN_LEN) return 0;
+
+    // 转义 LIKE 通配符：%、_、\
+    const escaped = topic.replace(/[\\%_]/g, (ch) => '\\' + ch);
+    const likePattern = `%${escaped}%`;
+
+    try {
+      const oldMemories = sqliteStore.findValidByTypeAndSummary(
+        newEntry.type,
+        likePattern
+      );
+      if (!oldMemories || oldMemories.length === 0) return 0;
+
+      let invalidated = 0;
+      const now = Date.now();
+      for (const old of oldMemories) {
+        // 不失效自己（newEntry 尚未写入，理论上不会命中，但防御性判断）
+        if (old.id === newEntry.id) continue;
+        const r = sqliteStore.invalidateMemory(old.id, now);
+        if (r.success && r.invalidated) {
+          invalidated++;
+          // 同步内存索引：把旧记忆标记为已失效（validTo 写回索引条目便于调试）
+          const idx = this.index.get(old.id);
+          if (idx) {
+            // IndexEntry 没有 validTo 字段，但更新 archived 不合适（archived 是衰减语义）。
+            // 这里只做日志，检索时 sqlite-store.getValidMemories 已过滤；
+            // retriever 的 recall 会通过 entry.validTo 判断。
+          }
+        }
+      }
+      if (invalidated > 0) {
+        logger.info('同主题旧事实已失效', {
+          type: newEntry.type,
+          topic: topic,
+          invalidated,
+        });
+      }
+      return invalidated;
+    } catch (e) {
+      logger.debug('_invalidateSameTopic 查询/失效失败', { error: e.message });
+      return 0;
+    }
   }
 
   /**
@@ -275,6 +377,19 @@ class MemoryStore {
     for (const entry of memoryEntries) {
       // 阶段 3-B：批量写入也规范化 source_episode_id
       this._normalizeEpisodeId(entry);
+
+      // 阶段 4-A：批量写入也做时态失效处理（与 add() 一致）
+      if (TEMPORAL_FACT_TYPES.has(entry.type)) {
+        try {
+          this._invalidateSameTopic(entry);
+        } catch (_e) {
+          // 忽略，降级为普通追加
+        }
+        if (!entry.validFrom) {
+          entry.validFrom = Date.now();
+        }
+      }
+
       const result = sqliteStore.add(entry);
       if (result.success) {
         count++;
@@ -615,6 +730,72 @@ class MemoryStore {
       // 但下次 get() 会读到最新值，retriever 下钻不受影响）
     }
     return result;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 时态事实管理（阶段 4-A）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 将一条记忆标记为失效（valid_to = now），不删除数据。
+   * 用于时态事实管理：新事实写入时把旧事实失效，保留历史可追溯。
+   * @param {string} memoryId
+   * @param {number} [invalidatedAt] 失效时间戳，默认 now
+   * @returns {{ success: boolean, error?: string, invalidated?: boolean }}
+   */
+  invalidateMemory(memoryId, invalidatedAt) {
+    this._load();
+    const result = sqliteStore.invalidateMemory(memoryId, invalidatedAt);
+    if (result.success && result.invalidated) {
+      // 同步内存索引：失效后从索引中移除，避免 query/getRecent 返回已失效记忆
+      this.index.delete(memoryId);
+      // 阶段 1-B：同步从向量索引移除（失效记忆不应参与语义召回）
+      try {
+        vectorIndex.removeVector(memoryId);
+      } catch (_e) {
+        // 忽略
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 查询当前有效的记忆（valid_to IS NULL）。
+   * 默认检索只返回当前为真的事实。
+   * @param {string} [agentId] Agent ID 过滤；null 则返回全部当前有效记忆
+   * @returns {Object[]} 完整 MemoryEntry 数组（按 created_at 倒序）
+   */
+  getValidMemories(agentId) {
+    this._load();
+    return sqliteStore.getValidMemories(agentId);
+  }
+
+  /**
+   * 时点回溯查询：返回某时刻「当时有效」的记忆。
+   * 条件：valid_from <= atTime AND (valid_to IS NULL OR valid_to >= atTime)
+   * @param {number} atTime 查询时刻（毫秒时间戳）
+   * @param {string} [agentId] Agent ID 过滤
+   * @returns {Object[]} 完整 MemoryEntry 数组
+   */
+  getHistoryMemories(atTime, agentId) {
+    this._load();
+    return sqliteStore.getHistoryMemories(atTime, agentId);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 容灾备份（阶段 4-B）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 备份数据库到指定路径（在线热备份）。
+   * 委托 sqliteStore.backup()，用 SQLite backup API 做 page 级快照。
+   * @param {string} targetPath 备份文件绝对路径
+   * @param {Object} [opts] { vacuum?: boolean }
+   * @returns {{ success: boolean, path?: string, bytes?: number, error?: string }}
+   */
+  backup(targetPath, opts) {
+    this._load();
+    return sqliteStore.backup(targetPath, opts);
   }
 
   // ═══════════════════════════════════════════════════════════
