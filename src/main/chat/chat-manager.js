@@ -155,6 +155,15 @@ class ChatManager {
     if (historyManager && typeof historyManager.setLLMManager === 'function') {
       historyManager.setLLMManager(llmManager);
     }
+    // 阶段二A：注入到 contextFolding，用于异步生成折叠摘要
+    try {
+      const { contextFolding } = require('../memory/context-folding');
+      if (contextFolding && typeof contextFolding.setLLMManager === 'function') {
+        contextFolding.setLLMManager(llmManager);
+      }
+    } catch (e) {
+      // context-folding 模块不可用时静默跳过（降级：不折叠）
+    }
   }
 
   /**

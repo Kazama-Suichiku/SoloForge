@@ -254,15 +254,20 @@ class HistoryManager {
    * - 摘要累积：已有旧摘要 + 新摘要合并；摘要过长再压缩
    * - LLM 不可用 / 摘要失败：返回 summary=null（由调用方 fallback 到 getOptimizedHistory）
    *
+   * 阶段二A：在返回前对 recentMessages 做上下文折叠（按与 currentQuery 的
+   * 语义相似度把低相关长消息替换为折叠摘要），进一步压缩 token 占用。
+   * 折叠失败/降级时静默跳过，返回未折叠的 recentMessages。
+   *
    * @param {Array<{role: string, content: string}>} fullHistory - 完整历史
    * @param {string} conversationId - 对话 ID
    * @param {Object} options
    * @param {number} [options.tokenBudget] - 历史消息的 token 预算
    * @param {number} [options.recentCount=PAGE_SIZE] - 始终完整保留的最近消息条数
+   * @param {string} [options.currentQuery] - 当前用户查询（用于上下文折叠相似度计算）
    * @returns {Promise<{messages: Array, summary: string|null, hasMoreHistory: boolean, historyInfo: string, totalMessages: number, shownMessages: number}>}
    */
   async getRollingSummaryHistory(fullHistory, conversationId, options = {}) {
-    const { tokenBudget, recentCount = PAGE_SIZE } = options;
+    const { tokenBudget, recentCount = PAGE_SIZE, currentQuery } = options;
 
     // 空历史
     if (!fullHistory || fullHistory.length === 0) {
@@ -294,13 +299,28 @@ class HistoryManager {
     // 2. 没超预算：直接返回全部（仍带上已有的滚动摘要，如果有的话）
     if (totalTokens <= tokenBudget) {
       const existingSummary = this.getRollingSummary(conversationId);
+      let keptMessages = fullHistory;
+      // 上下文折叠（阶段二A）：即使没超预算，也按 currentQuery 相似度折叠
+      // 低相关长消息，让上下文更聚焦于当前 query。
+      if (currentQuery && keptMessages.length >= 5) {
+        try {
+          const { contextFolding } = require('../memory/context-folding');
+          const folded = await contextFolding.fold(keptMessages, currentQuery);
+          if (Array.isArray(folded)) keptMessages = folded;
+        } catch (e) {
+          logger.debug('上下文折叠降级（未超预算路径），保留原历史', {
+            conversationId,
+            error: e && e.message,
+          });
+        }
+      }
       return {
-        messages: fullHistory,
+        messages: keptMessages,
         summary: existingSummary,
         hasMoreHistory: false,
-        historyInfo: existingSummary ? this._formatHistoryInfo(existingSummary, fullHistory.length, fullHistory.length) : '',
+        historyInfo: existingSummary ? this._formatHistoryInfo(existingSummary, fullHistory.length, keptMessages.length) : '',
         totalMessages: fullHistory.length,
-        shownMessages: fullHistory.length,
+        shownMessages: keptMessages.length,
       };
     }
 
@@ -382,7 +402,27 @@ class HistoryManager {
       }
     }
 
-    // 7. 返回：摘要 + 最近消息
+    // 7. 上下文折叠：对保留的 recentMessages 按 currentQuery 相似度折叠低相关长消息
+    //    阶段二A：进一步压缩 token，低相关长消息替换为折叠摘要。
+    //    折叠失败/降级时静默跳过，recentMessages 保持原样。
+    if (currentQuery && recentMessages.length >= 5) {
+      try {
+        const { contextFolding } = require('../memory/context-folding');
+        // contextFolding 已由 chatManager.setLLMManager 注入 llmManager
+        const folded = await contextFolding.fold(recentMessages, currentQuery);
+        if (Array.isArray(folded)) {
+          recentMessages = folded;
+        }
+      } catch (e) {
+        // 降级：跳过折叠，保留原 recentMessages
+        logger.debug('上下文折叠降级，保留原历史', {
+          conversationId,
+          error: e && e.message,
+        });
+      }
+    }
+
+    // 8. 返回：摘要 + 最近消息
     const historyInfo = rollingSummary
       ? this._formatHistoryInfo(rollingSummary, fullHistory.length, recentMessages.length)
       : '';

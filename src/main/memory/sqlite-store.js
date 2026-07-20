@@ -81,6 +81,25 @@ const DDL_STATEMENTS = [
     tags_text,
     tokenize='${FTS_TOKENIZER}'
   )`,
+
+  // 阶段二A：上下文折叠摘要缓存表
+  // 按 content SHA-256 hash 缓存历史消息的折叠摘要，跨对话复用，避免对同一段
+  // 长文反复调 LLM 生成摘要。
+  //   - content_hash: 原始消息内容的 SHA-256，主键
+  //   - summary: 折叠摘要文本（null 表示尚未生成）
+  //   - summary_status: pending（已排队待生成）/ ready（已就绪）
+  //   - embedding: 预留，摘要的 embedding（阶段四可用来做摘要级相似检索）
+  //   - created_at / last_used: 时间戳，用于冷清理与 LRU
+  `CREATE TABLE IF NOT EXISTS folding_entries (
+    content_hash TEXT PRIMARY KEY,
+    summary TEXT,
+    summary_status TEXT,
+    embedding BLOB,
+    created_at INTEGER,
+    last_used INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_folding_status ON folding_entries(summary_status)`,
+  `CREATE INDEX IF NOT EXISTS idx_folding_last_used ON folding_entries(last_used)`,
 ];
 
 /**
@@ -184,6 +203,17 @@ class SqliteMemoryStore {
       // 阶段 1-B：embedding 更新（异步写入，add() 之外单独 UPDATE）
       updateEmbedding: db.prepare(
         `UPDATE memories SET embedding = @embedding, embedding_model = @embedding_model, updated_at = @updated_at WHERE id = @id`
+      ),
+      // 阶段 2-A：folding_entries 读写
+      getFoldingEntry: db.prepare(
+        `SELECT content_hash, summary, summary_status, created_at, last_used FROM folding_entries WHERE content_hash = ?`
+      ),
+      insertFoldingEntry: db.prepare(
+        `INSERT OR REPLACE INTO folding_entries (content_hash, summary, summary_status, created_at, last_used)
+         VALUES (@content_hash, @summary, @summary_status, @created_at, @last_used)`
+      ),
+      touchFoldingEntry: db.prepare(
+        `UPDATE folding_entries SET last_used = @last_used WHERE content_hash = @content_hash`
       ),
     };
   }
@@ -658,6 +688,75 @@ class SqliteMemoryStore {
     } catch (error) {
       logger.warn('读取单条 embedding 失败', { id, error: error.message });
       return { embedding: null, embeddingModel: null };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 上下文折叠摘要缓存（阶段 2-A）
+  // ═══════════════════════════════════════════════════════════
+
+  /**
+   * 读取一条折叠摘要缓存。
+   * @param {string} contentHash 原始消息内容的 SHA-256
+   * @returns {{content_hash: string, summary: string|null, summary_status: string, created_at: number, last_used: number}|null}
+   */
+  getFoldingEntry(contentHash) {
+    if (!this._opened) this._open();
+    if (!contentHash) return null;
+    try {
+      return this._stmts.getFoldingEntry.get(contentHash) || null;
+    } catch (error) {
+      logger.warn('读取 folding_entries 失败', {
+        hash: String(contentHash).slice(0, 12),
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * 写入/覆盖一条折叠摘要缓存（INSERT OR REPLACE）。
+   * @param {string} contentHash SHA-256
+   * @param {string|null} summary 摘要文本（null 表示尚未生成）
+   * @param {string} status 'pending' | 'ready'
+   * @returns {{ success: boolean, error?: string }}
+   */
+  saveFoldingEntry(contentHash, summary, status) {
+    if (!this._opened) this._open();
+    if (!contentHash) return { success: false, error: '缺少 content_hash' };
+    const now = Date.now();
+    try {
+      this._stmts.insertFoldingEntry.run({
+        content_hash: contentHash,
+        summary: summary ?? null,
+        summary_status: status || 'pending',
+        created_at: now,
+        last_used: now,
+      });
+      return { success: true };
+    } catch (error) {
+      logger.warn('写入 folding_entries 失败', {
+        hash: String(contentHash).slice(0, 12),
+        error: error.message,
+      });
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 刷新 last_used 时间戳（命中时调用，供冷清理/LRU 用）。
+   * @param {string} contentHash
+   */
+  touchFoldingEntry(contentHash) {
+    if (!this._opened) this._open();
+    if (!contentHash) return;
+    try {
+      this._stmts.touchFoldingEntry.run({
+        content_hash: contentHash,
+        last_used: Date.now(),
+      });
+    } catch (_e) {
+      // 静默：touch 失败不影响主流程
     }
   }
 

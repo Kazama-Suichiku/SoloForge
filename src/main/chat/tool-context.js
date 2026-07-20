@@ -141,6 +141,8 @@ async function getPaginatedHistory(fullHistory, conversationId, budgetParams) {
       const rollingResult = await historyManager.getRollingSummaryHistory(fullHistory, conversationId, {
         tokenBudget,
         recentCount: PAGE_SIZE,
+        // 阶段二A：把当前用户消息作为 currentQuery 传给上下文折叠
+        currentQuery: budgetParams?.contextualMessage || '',
       });
 
       // 如果滚动摘要成功（没标记 fallback），直接返回
